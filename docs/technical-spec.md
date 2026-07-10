@@ -130,6 +130,50 @@ Pod is OOMKilled mid-run. Operator detects termination, recreates the pod, an in
 - **Admin (once):** `wren setup` → connect GCP project, deploy control plane + operator, install the GitHub App, set org defaults.
 - **Engineer (once):** `wren login` (SSO) → ready. `wren project add <repo>` to register a repo.
 
+### 2.5 End-to-end workflow (Journey A)
+
+The sequence below traces one autonomous run from `run create` to an opened PR.
+Note the **credential boundary**: the run's GitHub token and model key live only
+on the trusted **egress-proxy**; the untrusted **runner** never holds a secret and
+reaches GitHub / the model API *through* the proxy (§5.6/§5.7).
+
+```mermaid
+sequenceDiagram
+    actor Eng as Engineer
+    participant CLI as wren CLI
+    participant CP as Control plane
+    participant Op as Operator
+    box Agent pod (hardened, per run)
+        participant Proxy as egress-proxy (holds creds)
+        participant Run as runner (no secrets)
+    end
+    participant GH as GitHub
+
+    Eng->>CLI: wren run create --project X --task "..."
+    CLI->>CP: POST /v1/runs (identity header)
+    CP->>CP: resolve project config
+    CP->>Op: create AgentRun CR
+    CP-->>CLI: run id (phase Pending)
+    CLI-->>Eng: submitted r-8f3a2c
+    Op->>Proxy: schedule pod; mount GitHub token + model key
+    Op->>Run: start hydrate then harness then finalize (no token)
+    Run->>Proxy: clone repo
+    Proxy->>GH: git clone (token injected)
+    Run->>Run: harness performs the task
+    Run->>Proxy: push branch and open PR
+    Proxy->>GH: git push + create PR (token injected)
+    GH-->>Run: PR URL
+    Run-->>Op: status Succeeded + PR URL
+    Op-->>CP: mirror CR status
+    Eng->>CLI: wren run get r-8f3a2c
+    CLI->>CP: GET /v1/runs/r-8f3a2c
+    CP-->>Eng: Succeeded, PR link returned
+```
+
+> Renders as a diagram on GitHub. On a crash mid-run (Journey C), the operator
+> recreates the pod and the runner resumes; on `--interactive` (Journey B), the
+> engineer attaches to the run's stream between the CLI and the runner.
+
 ---
 
 ## 3. High-level architecture
