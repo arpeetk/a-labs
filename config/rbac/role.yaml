@@ -1,0 +1,48 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wren-operator-role
+rules:
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  - persistentvolumeclaims
+  - pods
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - wren.dev
+  resources:
+  - agentpools
+  - agentruns
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - wren.dev
+  resources:
+  - agentpools/status
+  - agentruns/status
+  verbs:
+  - get
+  - patch
+  - update
+- apiGroups:
+  - wren.dev
+  resources:
+  - agentruns/finalizers
+  verbs:
+  - update

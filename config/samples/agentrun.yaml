@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: user-arpeet
+---
+apiVersion: wren.dev/v1alpha1
+kind: AgentRun
+metadata:
+  name: r-demo
+  namespace: user-arpeet
+spec:
+  project: payments-api
+  user: arpeet@corp.com
+  harness:
+    kind: claude-code
+    image: registry.example.com/claude-code-runner:1.0
+    model: claude-opus-4-8
+  task:
+    prompt: "Add idempotency keys to the refund endpoint; cover with tests."
+    baseRef: main
+  interactive: false
+  sandbox:
+    runtimeClass: runc
+    resources:
+      cpu: "1"
+      memory: 2Gi
+      ephemeralDisk: 5Gi
+  workspace:
+    pvc:
+      storageClass: standard   # kind's default local-path StorageClass
+      size: 1Gi
+    checkpoint:
+      intervalSeconds: 120
+      bucket: gs://wren-ckpt
+  egress:
+    allowlist: [api.anthropic.com, github.com]
+  retry:
+    maxRestarts: 5
+    backoff: exponential
