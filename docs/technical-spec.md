@@ -1,6 +1,6 @@
 # Wren — Technical Specification
 
-> **Status:** Draft v0.2 (living) · **Owner:** Platform / Software Factory · **Last updated:** 2026-07-07
+> **Status:** Draft v0.3 (living) · **Owner:** Platform / Software Factory · **Last updated:** 2026-07-10
 >
 > `Wren` is a working name for the platform and its CLI binary (`wren`). Names are placeholders and can change without affecting the design.
 
@@ -23,7 +23,16 @@ Milestone **M0** in progress. Built and tested (unit + real-cluster e2e on kind)
 - **GitHub token delivery:** the runner reads a `GITHUB_TOKEN` from env (a mounted Secret) as the M0 stand-in; the secure design injects a per-run installation token at the **egress-proxy** so it never enters the runner (§5.6/§5.7). The App-token minter is built; the injection path lands with the egress-proxy.
 - **Isolation:** agent pods run under `runc`; gVisor/Kata deferred to M4 (§5.6), as already noted.
 
-Not yet built in M0: harness/checkpointer/egress-proxy/hydrate **container images** (pods currently ImagePull the placeholder images), GitHub App integration, `wren project/mcp/fleet/usage` server-side.
+**Not yet built in M0** (next-up in **bold**):
+
+- **Real egress-proxy** — allowlist + credential injection. Today the runner still receives `GITHUB_TOKEN` via env (stand-in); the sidecar is a no-op liveness stub. *(This is the next piece of work — it also unblocks the real Claude Code adapter.)*
+- Real **Claude Code** adapter (needs `ANTHROPIC_API_KEY` injected via the egress path).
+- Real **checkpointer** (GCS snapshot) + resume-from-checkpoint hydrate; both are stubs today.
+- GitHub **App setup flow** (`wren setup`); the per-run installation-token minter is already built (`internal/github`).
+- `wren project` / `mcp` / `fleet` / `usage` and `run logs` server-side.
+- Postgres store, gRPC/Connect transport, isolated agent node pool + `NetworkPolicy`.
+
+**Repo:** the M0 codebase is on GitHub at `arpeetk/a-labs` (checked in via PR #2, branch `wren/m0-foundations`). Contributor/agent working guide: [`AGENTS.md`](../AGENTS.md) — read it before making changes.
 
 ---
 
@@ -437,6 +446,8 @@ The agent runs untrusted, model-generated code. **v1 relies on hardened-containe
 
 ### 5.7 GitHub integration
 
+> **M0 status:** the **finalize** step is built (`internal/{github,gitwork,finalize}`): go-git clone/commit/push + open a PR with the rubric body, plus a GitHub **App installation-token minter**. A real live PR has been produced end-to-end against `arpeetk/a-labs`. Two gaps vs. the target below: (1) the token reaches the runner via a mounted `GITHUB_TOKEN` Secret rather than being injected at the egress-proxy (stand-in until the proxy lands); (2) the branch is `wren/<sanitized-user>/<run-id>` — the `-<slug>` suffix and rubric *validation* are not yet implemented. The App *setup* flow (`wren setup`) is also pending.
+
 **Auth model: a GitHub App** (org-installed), not PATs.
 
 - **Setup (admin):** `wren setup` walks the admin through installing the Wren GitHub App on the org and selecting repos. The App's private key is stored in Secret Manager. Required permissions: `contents:write`, `pull_requests:write`, `metadata:read` (no admin, no org-wide write).
@@ -545,7 +556,7 @@ Everything is provisioned by **Terraform modules** shipped with Wren so `wren se
 v1 targets multi-harness + steering; the build is sequenced but all lands within v1.
 
 - **M0 — Foundations.** Control-plane skeleton (auth, projects, runs), operator + `AgentRun` CRD, **Claude Code** harness, async task→PR, Regional PD workspace + GCS checkpointer, hardened `runc` pod on an isolated agent node pool, egress-proxy, GitHub App + repo-scoped tokens, `run create/get/logs`. *(Journey A + C end-to-end.)*
-  - **Done:** operator (`AgentRun` reconcile + crash-resume, `AgentPool` skeleton), control-plane Runs/Projects services + HTTP API, CLI `run create/list/get`, CR-status mirroring, the `wren-runtime` harness/sidecar image (mock harness), and **GitHub PR/finalize** (App-token minter, go-git clone/commit/push, finalize→PR with rubric; hydrate clones when configured). Verified e2e on kind: **Journey A to `Succeeded`**; finalize proven hermetically. **Remaining:** real Claude Code adapter (needs ANTHROPIC_API_KEY + egress), real egress-proxy (token injection) / checkpointer(GCS), live-PR wiring (real App creds), `run logs`, isolated node pool, Postgres store, gRPC transport.
+  - **Done:** operator (`AgentRun` reconcile + crash-resume, `AgentPool` skeleton), control-plane Runs/Projects services + HTTP API, CLI `run create/list/get`, CR-status mirroring, the `wren-runtime` harness/sidecar image (mock harness), and **GitHub PR/finalize** (App-token minter, go-git clone/commit/push, finalize→PR with rubric; hydrate clones when configured). Verified e2e on kind: **Journey A to `Succeeded`**, including a **real live PR** on `arpeetk/a-labs`. **Remaining:** real **egress-proxy** (allowlist + token injection — next up), real Claude Code adapter (needs ANTHROPIC_API_KEY via egress), real checkpointer (GCS) + checkpoint-restore, GitHub App setup flow, `run logs`, isolated node pool + NetworkPolicy, Postgres store, gRPC transport.
 - **M1 — Breadth.** **Codex** + **BYO** harness adapters, MCP config service + `wren mcp`, usage metering (tokens/CPU/mem) + `wren usage`, `fleet` views, RBAC.
 - **M2 — Interactive.** agent-gateway + steering stream, `run attach/steer`, tool-permission routing, rubric validation modes.
 - **M3 — Scale & polish.** `AgentPool` warm pools, quotas/budgets with hard-cap pause, Terraform-driven `wren setup`, read-only web dashboard.
