@@ -35,7 +35,7 @@ func newReconciler(t *testing.T, objs ...client.Object) (*AgentRunReconciler, cl
 		WithObjects(objs...).
 		WithStatusSubresource(&wrenv1.AgentRun{}, &corev1.Pod{}).
 		Build()
-	return &AgentRunReconciler{Client: c, Scheme: s, Images: testImages}, c
+	return &AgentRunReconciler{Client: c, Scheme: s, PodConfig: PodConfig{Images: testImages}}, c
 }
 
 func reconcile(t *testing.T, r *AgentRunReconciler, run *wrenv1.AgentRun) {
@@ -164,7 +164,7 @@ func TestReconcileFailsAfterRetryBudget(t *testing.T) {
 	r, c := newReconciler(t, run)
 
 	// Manually create the current pod, then fail it.
-	pod := buildAgentPod(run, testImages, "")
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
 	if err := c.Create(context.Background(), pod); err != nil {
 		t.Fatal(err)
 	}

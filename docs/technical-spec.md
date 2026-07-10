@@ -23,14 +23,18 @@ Milestone **M0** in progress. Built and tested (unit + real-cluster e2e on kind)
 - **GitHub token delivery:** the runner reads a `GITHUB_TOKEN` from env (a mounted Secret) as the M0 stand-in; the secure design injects a per-run installation token at the **egress-proxy** so it never enters the runner (§5.6/§5.7). The App-token minter is built; the injection path lands with the egress-proxy.
 - **Isolation:** agent pods run under `runc`; gVisor/Kata deferred to M4 (§5.6), as already noted.
 
+**Recently completed:**
+
+- **Egress-proxy + credential injection** (`internal/egress`) — the proxy now enforces the domain allowlist and injects credentials for `github.com` / `api.github.com` / `api.anthropic.com`. Credentials live only on the proxy container; **the runner holds no token**. Verified with a live PR where the harness container had no `GITHUB_TOKEN`. *Remaining hardening (next-up):* enforce that the runner cannot **bypass** the proxy — in-pod containers share a network namespace, so this needs uid-based iptables redirection (Istio-style) or a separate egress pod + `NetworkPolicy` default-deny.
+
 **Not yet built in M0** (next-up in **bold**):
 
-- **Real egress-proxy** — allowlist + credential injection. Today the runner still receives `GITHUB_TOKEN` via env (stand-in); the sidecar is a no-op liveness stub. *(This is the next piece of work — it also unblocks the real Claude Code adapter.)*
-- Real **Claude Code** adapter (needs `ANTHROPIC_API_KEY` injected via the egress path).
+- **Bypass enforcement** for the egress-proxy (iptables uid-redirect or egress pod + NetworkPolicy) — until then the runner *cooperatively* routes through the proxy.
+- Real **Claude Code** adapter (now unblocked by the egress path; `ANTHROPIC_API_KEY` is injected at the proxy via `ANTHROPIC_BASE_URL`).
 - Real **checkpointer** (GCS snapshot) + resume-from-checkpoint hydrate; both are stubs today.
 - GitHub **App setup flow** (`wren setup`); the per-run installation-token minter is already built (`internal/github`).
 - `wren project` / `mcp` / `fleet` / `usage` and `run logs` server-side.
-- Postgres store, gRPC/Connect transport, isolated agent node pool + `NetworkPolicy`.
+- Postgres store, gRPC/Connect transport, isolated agent node pool.
 
 **Repo:** the M0 codebase is on GitHub at `arpeetk/a-labs` (checked in via PR #2, branch `wren/m0-foundations`). Contributor/agent working guide: [`AGENTS.md`](../AGENTS.md) — read it before making changes.
 
@@ -435,6 +439,8 @@ Three durable layers:
 
 The agent runs untrusted, model-generated code. **v1 relies on hardened-container isolation plus strong network, credential, and identity controls; kernel-level isolation (gVisor/Kata) is designed in but deferred** (see below). Defense in depth:
 
+> **M0 status:** the egress-proxy (`internal/egress`) is built — it holds the run's credentials and reverse-proxies github.com / api.github.com / api.anthropic.com with auth injection, plus an allowlist forward-proxy (CONNECT/HTTP) for other egress. The runner is configured to route through it (`WREN_EGRESS_PROXY`, `ANTHROPIC_BASE_URL`) and holds no token. **Gap:** because pod containers share a network namespace, the runner can currently *bypass* the proxy; true enforcement needs uid-based iptables redirection or a separate egress pod + a default-deny `NetworkPolicy` (next-up hardening).
+
 1. **Network default-deny** — a `NetworkPolicy` blocks all pod egress except to the in-pod **egress-proxy**. The proxy (Envoy/Squid) enforces a **domain allowlist** (Anthropic API, GitHub, MCP endpoints, approved package registries) and **injects credentials** on the way out. The runner container holds **no secrets**. *(This is the primary containment boundary in v1 and the reason deferring gVisor is acceptable: even code running under standard `runc` cannot reach anything off the allowlist or obtain a usable credential.)*
 2. **Credential handling** — secrets live in **GCP Secret Manager**. GitHub access is a **short-lived installation token** minted per run, scoped to the target repo (§5.7), handed to the proxy — never mounted in the runner. Anthropic/model keys likewise injected at the proxy.
 3. **Least-privilege identity** — Workload Identity maps a per-run KSA to a GSA with access only to that run's GCS prefix + its MCP secrets. No broad cloud access from the pod.
@@ -556,7 +562,7 @@ Everything is provisioned by **Terraform modules** shipped with Wren so `wren se
 v1 targets multi-harness + steering; the build is sequenced but all lands within v1.
 
 - **M0 — Foundations.** Control-plane skeleton (auth, projects, runs), operator + `AgentRun` CRD, **Claude Code** harness, async task→PR, Regional PD workspace + GCS checkpointer, hardened `runc` pod on an isolated agent node pool, egress-proxy, GitHub App + repo-scoped tokens, `run create/get/logs`. *(Journey A + C end-to-end.)*
-  - **Done:** operator (`AgentRun` reconcile + crash-resume, `AgentPool` skeleton), control-plane Runs/Projects services + HTTP API, CLI `run create/list/get`, CR-status mirroring, the `wren-runtime` harness/sidecar image (mock harness), and **GitHub PR/finalize** (App-token minter, go-git clone/commit/push, finalize→PR with rubric; hydrate clones when configured). Verified e2e on kind: **Journey A to `Succeeded`**, including a **real live PR** on `arpeetk/a-labs`. **Remaining:** real **egress-proxy** (allowlist + token injection — next up), real Claude Code adapter (needs ANTHROPIC_API_KEY via egress), real checkpointer (GCS) + checkpoint-restore, GitHub App setup flow, `run logs`, isolated node pool + NetworkPolicy, Postgres store, gRPC transport.
+  - **Done:** operator (`AgentRun` reconcile + crash-resume, `AgentPool` skeleton), control-plane Runs/Projects services + HTTP API, CLI `run create/list/get`, CR-status mirroring, the `wren-runtime` harness/sidecar image (mock harness), and **GitHub PR/finalize** (App-token minter, go-git clone/commit/push, finalize→PR with rubric; hydrate clones when configured). Verified e2e on kind: **Journey A to `Succeeded`**, including a **real live PR** on `arpeetk/a-labs`, and the **egress-proxy** (credential injection + allowlist) with the runner holding no token. **Remaining:** proxy **bypass enforcement** (iptables/NetworkPolicy — next up), real Claude Code adapter, real checkpointer (GCS) + checkpoint-restore, GitHub App setup flow, `run logs`, isolated node pool, Postgres store, gRPC transport.
 - **M1 — Breadth.** **Codex** + **BYO** harness adapters, MCP config service + `wren mcp`, usage metering (tokens/CPU/mem) + `wren usage`, `fleet` views, RBAC.
 - **M2 — Interactive.** agent-gateway + steering stream, `run attach/steer`, tool-permission routing, rubric validation modes.
 - **M3 — Scale & polish.** `AgentPool` warm pools, quotas/budgets with hard-cap pause, Terraform-driven `wren setup`, read-only web dashboard.

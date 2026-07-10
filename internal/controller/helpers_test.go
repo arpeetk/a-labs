@@ -123,30 +123,63 @@ func TestBuildRunSpecMCPPath(t *testing.T) {
 	}
 }
 
-func TestGitHubTokenInjection(t *testing.T) {
-	run := testRun()
-	pod := buildAgentPod(run, testImages, "wren-github-token")
-
-	hasTokenEnv := func(c *corev1.Container) bool {
-		for _, e := range c.Env {
-			if e.Name == "GITHUB_TOKEN" && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil &&
-				e.ValueFrom.SecretKeyRef.Name == "wren-github-token" && e.ValueFrom.SecretKeyRef.Key == "token" {
-				return true
-			}
+func envValue(c *corev1.Container, name string) (corev1.EnvVar, bool) {
+	for _, e := range c.Env {
+		if e.Name == name {
+			return e, true
 		}
-		return false
 	}
-	if !hasTokenEnv(&pod.Spec.Containers[0]) {
-		t.Error("harness missing GITHUB_TOKEN secret env")
+	return corev1.EnvVar{}, false
+}
+
+// The credential belongs on the egress-proxy, never the runner (spec §5.6): the
+// harness/hydrate get only the proxy URL, and the token env lives on the proxy.
+func TestCredentialsGoToEgressProxyNotRunner(t *testing.T) {
+	run := testRun()
+	pod := buildAgentPod(run, PodConfig{
+		Images:             testImages,
+		GitHubTokenSecret:  "wren-github-token",
+		AnthropicKeySecret: "wren-anthropic-key",
+	})
+
+	harness := &pod.Spec.Containers[0]
+	hydrate := containerByName(pod.Spec.InitContainers, InitHydrate)
+	proxy := containerByName(pod.Spec.InitContainers, ContainerEgressProxy)
+
+	// Runner containers must NOT carry any credential.
+	for _, c := range []*corev1.Container{harness, hydrate} {
+		if _, ok := envValue(c, "GITHUB_TOKEN"); ok {
+			t.Errorf("%s must not receive GITHUB_TOKEN", c.Name)
+		}
+		if _, ok := envValue(c, "ANTHROPIC_API_KEY"); ok {
+			t.Errorf("%s must not receive ANTHROPIC_API_KEY", c.Name)
+		}
+		// ...but they are pointed at the proxy.
+		if e, ok := envValue(c, "WREN_EGRESS_PROXY"); !ok || e.Value != "http://127.0.0.1:8099" {
+			t.Errorf("%s WREN_EGRESS_PROXY = %q (ok=%v)", c.Name, e.Value, ok)
+		}
 	}
-	if !hasTokenEnv(containerByName(pod.Spec.InitContainers, InitHydrate)) {
-		t.Error("hydrate missing GITHUB_TOKEN secret env")
+	if e, ok := envValue(harness, "ANTHROPIC_BASE_URL"); !ok || e.Value != "http://127.0.0.1:8099/anthropic" {
+		t.Errorf("harness ANTHROPIC_BASE_URL = %q (ok=%v)", e.Value, ok)
 	}
 
-	// Empty secret name → no injection.
-	plain := buildAgentPod(run, testImages, "")
-	if hasTokenEnv(&plain.Spec.Containers[0]) {
-		t.Error("token env injected despite empty secret name")
+	// The proxy carries the credentials via Secret refs.
+	gh, ok := envValue(proxy, "GITHUB_TOKEN")
+	if !ok || gh.ValueFrom == nil || gh.ValueFrom.SecretKeyRef == nil ||
+		gh.ValueFrom.SecretKeyRef.Name != "wren-github-token" || gh.ValueFrom.SecretKeyRef.Key != "token" {
+		t.Errorf("egress-proxy GITHUB_TOKEN secret ref wrong: %+v", gh)
+	}
+	ak, ok := envValue(proxy, "ANTHROPIC_API_KEY")
+	if !ok || ak.ValueFrom == nil || ak.ValueFrom.SecretKeyRef == nil ||
+		ak.ValueFrom.SecretKeyRef.Name != "wren-anthropic-key" || ak.ValueFrom.SecretKeyRef.Key != "key" {
+		t.Errorf("egress-proxy ANTHROPIC_API_KEY secret ref wrong: %+v", ak)
+	}
+
+	// No secrets configured → proxy has no credential envs.
+	plain := buildAgentPod(run, PodConfig{Images: testImages})
+	plainProxy := containerByName(plain.Spec.InitContainers, ContainerEgressProxy)
+	if _, ok := envValue(plainProxy, "GITHUB_TOKEN"); ok {
+		t.Error("GITHUB_TOKEN injected despite empty secret name")
 	}
 }
 
@@ -167,7 +200,7 @@ func TestSanitizeRef(t *testing.T) {
 func TestBuildAgentPodMCPVolume(t *testing.T) {
 	run := testRun()
 	run.Spec.MCP.ConfigRef = "mcp-secret"
-	pod := buildAgentPod(run, testImages, "")
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
 	found := false
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == VolumeMCP && v.Secret != nil && v.Secret.SecretName == "mcp-secret" {

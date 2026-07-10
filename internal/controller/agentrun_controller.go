@@ -33,10 +33,9 @@ const (
 type AgentRunReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
-	Images Images
-	// GitHubTokenSecret is the Secret (key "token") injected as GITHUB_TOKEN into
-	// the harness/hydrate containers; empty disables injection.
-	GitHubTokenSecret string
+	// PodConfig is the operator-level pod configuration (images, credential
+	// Secrets injected into the egress-proxy, egress port).
+	PodConfig PodConfig
 }
 
 // +kubebuilder:rbac:groups=wren.dev,resources=agentruns,verbs=get;list;watch;create;update;patch;delete
@@ -154,7 +153,7 @@ func (r *AgentRunReconciler) ensurePod(ctx context.Context, run *wrenv1.AgentRun
 	if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
-	desired := buildAgentPod(run, r.Images, r.GitHubTokenSecret)
+	desired := buildAgentPod(run, r.PodConfig)
 	if err := controllerutil.SetControllerReference(run, desired, r.Scheme); err != nil {
 		return nil, err
 	}

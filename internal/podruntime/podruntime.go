@@ -14,9 +14,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
+	"github.com/summiteight/wren/internal/egress"
 	"github.com/summiteight/wren/internal/finalize"
 	"github.com/summiteight/wren/internal/github"
 	"github.com/summiteight/wren/internal/gitwork"
@@ -24,26 +29,84 @@ import (
 	"github.com/summiteight/wren/internal/runspec"
 )
 
-// githubToken is the M0 stand-in for the egress-proxy-injected installation
-// token: a token handed to the runner via env (a mounted Secret). The secure
-// design injects it at the egress proxy so it never lives in the runner env
-// (spec §5.6/§5.7); that lands with the egress-proxy work.
+// egressProxyBase is the base URL of the in-pod egress-proxy, when the operator
+// wired one in. In that mode the runner holds NO GitHub token — the proxy
+// injects it (spec §5.6/§5.7).
+func egressProxyBase() string { return strings.TrimRight(os.Getenv("WREN_EGRESS_PROXY"), "/") }
+
+// githubToken is the direct-mode (no-proxy) token, read from the runner env.
 func githubToken() string { return os.Getenv("GITHUB_TOKEN") }
 
-// prConfigured reports whether a run can open a real PR (repo + token present).
+// prConfigured reports whether a run can open a real PR: it needs a repo and a
+// way to authenticate to GitHub — either the egress-proxy (preferred) or a
+// direct token (M0 fallback).
 func prConfigured(spec runspec.RunSpec) bool {
-	return spec.Repo != "" && githubToken() != ""
+	return spec.Repo != "" && (egressProxyBase() != "" || githubToken() != "")
 }
 
-// newGitHubClient builds the PR client; a seam so tests can inject a fake.
+// gitCloneURL returns the clone URL and push token for a run. Via the proxy the
+// token is empty (the proxy injects it); direct mode embeds github.com + token.
+func gitCloneURL(spec runspec.RunSpec) (url, token string, ok bool) {
+	if spec.Repo == "" {
+		return "", "", false
+	}
+	if base := egressProxyBase(); base != "" {
+		return base + egress.RouteGitHub + spec.Repo + ".git", "", true
+	}
+	if tok := githubToken(); tok != "" {
+		return "https://github.com/" + spec.Repo + ".git", tok, true
+	}
+	return "", "", false
+}
+
+// prClientAndToken builds the GitHub PR API client and the push token. Via the
+// proxy: client points at the proxy's github-api route (no token). Direct: a
+// real client with the runner's token (through the injectable seam for tests).
+func prClientAndToken() (github.Client, string, error) {
+	if base := egressProxyBase(); base != "" {
+		c, err := github.NewRESTWithBaseURL("", base+egress.RouteGitHubAPI, nil)
+		return c, "", err
+	}
+	tok := githubToken()
+	return newGitHubClient(tok), tok, nil
+}
+
+// newGitHubClient builds the direct-mode PR client; a seam so tests can inject a fake.
 var newGitHubClient = func(token string) github.Client { return github.NewREST(token, nil) }
+
+// waitForProxy blocks until the in-pod egress-proxy is accepting connections (or
+// a timeout elapses). The proxy is a native sidecar that starts before the
+// runner, but "started" does not guarantee its socket is listening yet; the
+// runner (same network namespace) waits on 127.0.0.1 before using it.
+func waitForProxy(ctx context.Context, em *harness.Emitter) {
+	base := egressProxyBase()
+	if base == "" {
+		return
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return
+		}
+		if c, err := net.DialTimeout("tcp", u.Host, 500*time.Millisecond); err == nil {
+			_ = c.Close()
+			return
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	em.Message("egress-proxy not reachable after 30s; proceeding anyway")
+}
 
 // skipReason explains why finalize was skipped.
 func skipReason(spec runspec.RunSpec) string {
 	if spec.Repo == "" {
 		return "no repo configured for this project"
 	}
-	return "no GITHUB_TOKEN available in the runner"
+	return "no egress-proxy or GITHUB_TOKEN available to the runner"
 }
 
 // DefaultRunSpecPath is where the operator mounts the RunSpec ConfigMap.
@@ -83,6 +146,8 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 	em.Status("running")
 	em.Message("harness: " + h.Name() + " (mode=" + string(spec.Mode) + ")")
 
+	waitForProxy(ctx, em) // harness (and finalize) reach GitHub/model APIs via the proxy
+
 	res, err := h.Run(ctx, spec, em)
 	if err != nil {
 		em.Status("failed")
@@ -95,7 +160,13 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 
 	pr := harness.PRInfo{Branch: res.Branch}
 	if prConfigured(spec) {
-		p, ferr := finalize.Run(ctx, spec, githubToken(), newGitHubClient(githubToken()))
+		client, token, cerr := prClientAndToken()
+		if cerr != nil {
+			em.Errorf("finalize: " + cerr.Error())
+			em.Status("failed")
+			return cerr
+		}
+		p, ferr := finalize.Run(ctx, spec, token, client)
 		switch {
 		case errors.Is(ferr, finalize.ErrNoChanges):
 			em.Message("finalize: harness made no changes; no PR opened")
@@ -118,7 +189,7 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 
 // RunHydrate runs the hydrate init container. M0: it confirms the workspace is
 // present. Real clone / checkpoint-restore lands with the checkpointer work.
-func RunHydrate(_ context.Context, out io.Writer, specPath string) error {
+func RunHydrate(ctx context.Context, out io.Writer, specPath string) error {
 	if specPath == "" {
 		specPath = DefaultRunSpecPath
 	}
@@ -128,16 +199,21 @@ func RunHydrate(_ context.Context, out io.Writer, specPath string) error {
 		em.Errorf("load runspec: " + err.Error())
 		return err
 	}
-	// When a repo + token are configured, do a real clone so the harness works
-	// in a git checkout and finalize can push a branch. Checkpoint-restore on
-	// resume lands with the checkpointer work.
-	if prConfigured(spec) && spec.Mode != runspec.ModeResume {
-		repoURL := "https://github.com/" + spec.Repo + ".git"
-		if _, err := gitwork.Clone(repoURL, spec.BaseRef, spec.WorkspacePath, githubToken()); err != nil {
+	// When a repo + GitHub auth are configured, do a real clone so the harness
+	// works in a git checkout and finalize can push a branch. The clone routes
+	// through the egress-proxy when present (no token in the runner).
+	// Checkpoint-restore on resume lands with the checkpointer work.
+	if url, token, ok := gitCloneURL(spec); ok && spec.Mode != runspec.ModeResume {
+		waitForProxy(ctx, em)
+		if _, err := gitwork.Clone(url, spec.BaseRef, spec.WorkspacePath, token); err != nil {
 			em.Errorf("hydrate clone: " + err.Error())
 			return err
 		}
-		em.Message("hydrate: cloned " + spec.Repo + " @ " + orDefault(spec.BaseRef, "default"))
+		via := "direct"
+		if egressProxyBase() != "" {
+			via = "egress-proxy"
+		}
+		em.Message("hydrate: cloned " + spec.Repo + " @ " + orDefault(spec.BaseRef, "default") + " (" + via + ")")
 		return nil
 	}
 
@@ -154,6 +230,70 @@ func orDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+// RunEgressProxy runs the egress-proxy sidecar: it holds the run's credentials
+// and forwards the runner's traffic, injecting auth for github.com /
+// api.github.com / api.anthropic.com and enforcing the domain allowlist for
+// everything else (spec §5.6). Secrets (GITHUB_TOKEN, ANTHROPIC_API_KEY) are
+// mounted into THIS container, never the harness.
+func RunEgressProxy(ctx context.Context, out io.Writer) error {
+	em := harness.NewEmitter(out)
+
+	cfg := egressConfigFromEnv()
+	proxy, err := egress.New(cfg)
+	if err != nil {
+		em.Errorf("egress-proxy: " + err.Error())
+		return err
+	}
+	port := os.Getenv("WREN_EGRESS_PORT")
+	if port == "" {
+		port = egress.DefaultPort
+	}
+	srv := &http.Server{Addr: "127.0.0.1:" + port, Handler: proxy}
+	em.Message(fmt.Sprintf("egress-proxy: listening on 127.0.0.1:%s (%d cred routes, %d allowlisted hosts)",
+		port, len(cfg.Routes), len(cfg.Allowlist)))
+
+	go func() {
+		<-ctx.Done()
+		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = srv.Shutdown(sctx)
+	}()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	em.Message("egress-proxy: stopping")
+	return nil
+}
+
+// egressConfigFromEnv builds the proxy config from the egress-proxy container's
+// environment (its mounted credentials + the run's allowlist).
+func egressConfigFromEnv() egress.Config {
+	cfg := egress.Config{Allowlist: splitAllowlist(os.Getenv("WREN_EGRESS_ALLOWLIST"))}
+	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
+		cfg.Routes = append(cfg.Routes,
+			egress.Route{Prefix: egress.RouteGitHub, Upstream: "https://github.com",
+				Auth: egress.BasicAuth{Username: "x-access-token", Password: tok}},
+			egress.Route{Prefix: egress.RouteGitHubAPI, Upstream: "https://api.github.com",
+				Auth: egress.HeaderAuth{Key: "Authorization", Value: "Bearer " + tok}},
+		)
+	}
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		cfg.Routes = append(cfg.Routes, egress.Route{Prefix: egress.RouteAnthropic,
+			Upstream: "https://api.anthropic.com", Auth: egress.HeaderAuth{Key: "x-api-key", Value: key}})
+	}
+	return cfg
+}
+
+func splitAllowlist(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // RunSidecar runs a long-lived sidecar role: it logs liveness and blocks until
@@ -190,7 +330,9 @@ func Dispatch(ctx context.Context, out io.Writer, role, specPath string) error {
 		return RunHarness(ctx, out, specPath)
 	case RoleHydrate:
 		return RunHydrate(ctx, out, specPath)
-	case RoleEgressProxy, RoleCheckpointer, RoleGateway:
+	case RoleEgressProxy:
+		return RunEgressProxy(ctx, out)
+	case RoleCheckpointer, RoleGateway:
 		return RunSidecar(ctx, out, role)
 	default:
 		return fmt.Errorf("unknown role %q", role)

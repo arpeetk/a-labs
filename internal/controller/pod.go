@@ -2,11 +2,13 @@ package controller
 
 import (
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
+	"github.com/summiteight/wren/internal/egress"
 	"github.com/summiteight/wren/internal/runspec"
 )
 
@@ -43,6 +45,44 @@ const (
 // container's first argument; wren-runtime's entrypoint dispatches on it.
 type Images struct {
 	Runtime string
+}
+
+// PodConfig is the operator-level configuration applied to every agent pod.
+type PodConfig struct {
+	Images Images
+	// GitHubTokenSecret / AnthropicKeySecret are Secrets (keys "token"/"key")
+	// injected into the egress-proxy container (not the runner). Empty disables.
+	GitHubTokenSecret  string
+	AnthropicKeySecret string
+	// EgressPort is the localhost port the egress-proxy listens on.
+	EgressPort string
+}
+
+func (c PodConfig) egressPort() string {
+	if c.EgressPort != "" {
+		return c.EgressPort
+	}
+	return egress.DefaultPort
+}
+
+func (c PodConfig) proxyBaseURL() string { return "http://127.0.0.1:" + c.egressPort() }
+
+// secretEnv builds an optional Secret-sourced env var (optional so a missing
+// Secret does not block the pod).
+func secretEnv(envName, secretName, key string) []corev1.EnvVar {
+	if secretName == "" {
+		return nil
+	}
+	return []corev1.EnvVar{{
+		Name: envName,
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				Key:                  key,
+				Optional:             ptr(true),
+			},
+		},
+	}}
 }
 
 // pvcName is the stable workspace PVC name for a run. It is intentionally stable
@@ -132,31 +172,19 @@ func runtimeClassName(rc wrenv1.RuntimeClass) *string {
 	}
 }
 
-// githubTokenEnv injects GITHUB_TOKEN from a Secret (optional, so a missing
-// secret does not block the pod). This is the M0 stand-in for egress-proxy
-// token injection (spec §5.6/§5.7).
-func githubTokenEnv(secretName string) []corev1.EnvVar {
-	if secretName == "" {
-		return nil
-	}
-	return []corev1.EnvVar{{
-		Name: "GITHUB_TOKEN",
-		ValueFrom: &corev1.EnvVarSource{
-			SecretKeyRef: &corev1.SecretKeySelector{
-				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
-				Key:                  "token",
-				Optional:             ptr(true),
-			},
-		},
-	}}
-}
-
 // buildAgentPod assembles the agent pod for a run: a single untrusted harness
 // container plus native-sidecar egress-proxy, checkpointer, and gateway, with a
 // hydrate init container that clones the repo or restores a checkpoint.
-func buildAgentPod(run *wrenv1.AgentRun, images Images, githubTokenSecret string) *corev1.Pod {
+func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 	resume := run.Status.RestartCount > 0
-	ghToken := githubTokenEnv(githubTokenSecret)
+	images := cfg.Images
+	proxyBase := cfg.proxyBaseURL()
+	// The runner routes GitHub/model traffic through the egress-proxy; it holds
+	// no credentials of its own (spec §5.6).
+	proxyEnv := []corev1.EnvVar{
+		{Name: "WREN_EGRESS_PROXY", Value: proxyBase},
+		{Name: "ANTHROPIC_BASE_URL", Value: proxyBase + strings.TrimSuffix(egress.RouteAnthropic, "/")},
+	}
 
 	workspaceMount := corev1.VolumeMount{Name: VolumeWorkspace, MountPath: runspec.WorkspacePath}
 	ipcMount := corev1.VolumeMount{Name: VolumeIPC, MountPath: MountIPC}
@@ -169,16 +197,22 @@ func buildAgentPod(run *wrenv1.AgentRun, images Images, githubTokenSecret string
 
 	runSpecEnv := corev1.EnvVar{Name: "WREN_RUNSPEC", Value: runspec.MountPath + "/" + runspec.FileName}
 
+	egressProxyEnv := []corev1.EnvVar{
+		{Name: "WREN_RUN_ID", Value: run.Name},
+		{Name: "WREN_EGRESS_PORT", Value: cfg.egressPort()},
+		{Name: "WREN_EGRESS_ALLOWLIST", Value: joinAllowlist(run.Spec.Egress.Allowlist)},
+	}
+	// Credentials live here — on the trusted proxy, never the runner.
+	egressProxyEnv = append(egressProxyEnv, secretEnv("GITHUB_TOKEN", cfg.GitHubTokenSecret, "token")...)
+	egressProxyEnv = append(egressProxyEnv, secretEnv("ANTHROPIC_API_KEY", cfg.AnthropicKeySecret, "key")...)
+
 	egressProxy := corev1.Container{
 		Name:            ContainerEgressProxy,
 		Image:           images.Runtime,
 		Args:            []string{ContainerEgressProxy},
 		RestartPolicy:   &sidecar,
 		SecurityContext: hardened(true),
-		Env: []corev1.EnvVar{
-			{Name: "WREN_RUN_ID", Value: run.Name},
-			{Name: "WREN_EGRESS_ALLOWLIST", Value: joinAllowlist(run.Spec.Egress.Allowlist)},
-		},
+		Env:             egressProxyEnv,
 	}
 
 	hydrate := corev1.Container{
@@ -191,7 +225,7 @@ func buildAgentPod(run *wrenv1.AgentRun, images Images, githubTokenSecret string
 			{Name: "WREN_MODE", Value: string(mode(resume))},
 			{Name: "WREN_BASE_REF", Value: run.Spec.Task.BaseRef},
 			{Name: "WREN_CHECKPOINT_BUCKET", Value: run.Spec.Workspace.Checkpoint.Bucket},
-		}, ghToken...),
+		}, proxyEnv...),
 		VolumeMounts: []corev1.VolumeMount{workspaceMount, runSpecMount},
 	}
 
@@ -232,7 +266,7 @@ func buildAgentPod(run *wrenv1.AgentRun, images Images, githubTokenSecret string
 			{Name: "WREN_MODE", Value: string(mode(resume))},
 			runSpecEnv,
 			{Name: "HOME", Value: MountHome},
-		}, ghToken...),
+		}, proxyEnv...),
 		VolumeMounts: []corev1.VolumeMount{
 			workspaceMount,
 			ipcMount,

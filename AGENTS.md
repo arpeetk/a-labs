@@ -189,8 +189,10 @@ the PR). With one, it opens a real PR.
 
 - **Harness:** the **mock** adapter (deterministic, no key) is the default; the
   real Claude Code adapter needs `ANTHROPIC_API_KEY` + the egress path.
-- **Sidecars** (egress-proxy / checkpointer / gateway): liveness stand-ins — no
-  real allowlisting, GCS checkpointing, or stream bridging yet.
+- **Egress-proxy:** real — enforces the allowlist and injects github/anthropic
+  credentials (`internal/egress`); the runner holds no token. Not yet enforced:
+  the runner can *bypass* it (needs iptables uid-redirect or egress pod +
+  NetworkPolicy). **checkpointer / gateway** sidecars are still liveness stand-ins.
 - **Transport:** control-plane API is HTTP/JSON (target: gRPC + Connect).
 - **Store:** in-memory (target: Cloud SQL / Postgres).
 - **Auth:** `X-Wren-User` header (target: OIDC/SSO).

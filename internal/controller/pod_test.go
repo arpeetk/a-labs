@@ -47,7 +47,7 @@ func containerByName(cs []corev1.Container, name string) *corev1.Container {
 
 func TestBuildAgentPod(t *testing.T) {
 	run := testRun()
-	pod := buildAgentPod(run, testImages, "")
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
 
 	if pod.Name != "r-abc-0" {
 		t.Errorf("pod name = %q, want r-abc-0", pod.Name)
@@ -124,7 +124,7 @@ func TestBuildAgentPod(t *testing.T) {
 func TestBuildAgentPodRuntimeClass(t *testing.T) {
 	run := testRun()
 	run.Spec.Sandbox.RuntimeClass = wrenv1.RuntimeGVisor
-	pod := buildAgentPod(run, testImages, "")
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
 	if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "gvisor" {
 		t.Errorf("expected runtimeClassName=gvisor, got %v", pod.Spec.RuntimeClassName)
 	}
@@ -133,7 +133,7 @@ func TestBuildAgentPodRuntimeClass(t *testing.T) {
 func TestBuildAgentPodResumeName(t *testing.T) {
 	run := testRun()
 	run.Status.RestartCount = 2
-	pod := buildAgentPod(run, testImages, "")
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
 	if pod.Name != "r-abc-2" {
 		t.Errorf("resume pod name = %q, want r-abc-2", pod.Name)
 	}

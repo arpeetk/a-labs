@@ -28,14 +28,15 @@ func main() {
 	var (
 		metricsAddr, probeAddr string
 		leaderElect            bool
-		images                 controller.Images
+		podCfg                 controller.PodConfig
 	)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "metrics endpoint address")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "health probe address")
 	flag.BoolVar(&leaderElect, "leader-elect", false, "enable leader election for HA")
-	flag.StringVar(&images.Runtime, "runtime-image", "wren/runtime:dev", "wren-runtime image for in-pod sidecar/init roles")
-	var githubTokenSecret string
-	flag.StringVar(&githubTokenSecret, "github-token-secret", "wren-github-token", "Secret (key \"token\") injected as GITHUB_TOKEN into the runner; empty to disable")
+	flag.StringVar(&podCfg.Images.Runtime, "runtime-image", "wren/runtime:dev", "wren-runtime image for in-pod sidecar/init roles")
+	flag.StringVar(&podCfg.GitHubTokenSecret, "github-token-secret", "wren-github-token", "Secret (key \"token\") injected as GITHUB_TOKEN into the egress-proxy; empty to disable")
+	flag.StringVar(&podCfg.AnthropicKeySecret, "anthropic-key-secret", "wren-anthropic-key", "Secret (key \"key\") injected as ANTHROPIC_API_KEY into the egress-proxy; empty to disable")
+	flag.StringVar(&podCfg.EgressPort, "egress-port", "", "egress-proxy localhost port (default 8099)")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -57,10 +58,9 @@ func main() {
 	}
 
 	if err := (&controller.AgentRunReconciler{
-		Client:            mgr.GetClient(),
-		Scheme:            mgr.GetScheme(),
-		Images:            images,
-		GitHubTokenSecret: githubTokenSecret,
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		PodConfig: podCfg,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up AgentRun controller")
 		os.Exit(1)
