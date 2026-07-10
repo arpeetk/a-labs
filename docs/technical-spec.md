@@ -6,14 +6,14 @@
 
 ### Implementation status (living — updated as we build)
 
-Milestone **M0** in progress. Built and tested (unit + real-cluster e2e on kind):
+Milestone **M0** in progress. Built and tested (unit + real-cluster e2e on **kind and real GKE**):
 
 - **CLI** (`cmd/wren`) — command tree; `login`, `run create/list/get` wired to the control-plane HTTP API.
 - **Operator** (`cmd/wren-operator`, `internal/controller`) — `AgentRun` reconciler (hardened pod + workspace PVC + RunSpec ConfigMap, lifecycle, crash-resume), `AgentPool` skeleton. CRDs + RBAC + manager manifests under `config/`.
 - **Control plane** (`cmd/wren-apiserver`, `internal/{apiserver,coreapi,store,launcher}`) — Runs + Projects services; creates `AgentRun` CRs and mirrors CR status back.
 - **Harness runtime** (`cmd/wren-runtime`, `internal/{harness,podruntime}`) — the multi-call in-pod binary implementing the §5.4 contract: harness runner (event stream + workspace write) plus M0 stand-in sidecars (egress-proxy/checkpointer/gateway) and hydrate. Adapters: **mock** (deterministic, no key) and a **claude-code** stub. One container image (`build/Dockerfile.runtime`).
 - **GitHub PR / finalize** (`internal/{github,gitwork,finalize}`) — GitHub App installation-token minting (§5.7), go-git clone/commit/push (distroless-friendly, no git binary), and the finalize step (commit → push branch → open PR with rubric body). Hydrate does a real clone when a repo+token are configured; finalize opens the PR. Operator injects `GITHUB_TOKEN` from a Secret into the runner (M0 stand-in for egress-proxy injection). **Verified with a real live PR** against `arpeetk/a-labs` (Journey A produced an actual open PR).
-- **Verified e2e on kind (Journey A):** `wren run create` → CR (now carrying `repo`) → operator schedules the hardened pod → hydrate + mock harness run → finalize (real PR when token present; graceful skip otherwise) → pod `Completed` → operator marks run **`Succeeded`** → `wren run get` reflects it.
+- **Verified e2e on kind AND real GKE (Journey A):** `wren run create` → CR (carrying `repo`) → operator schedules the hardened pod → egress-proxy (holds creds) → hydrate clones via proxy → mock harness → finalize opens a **real PR** through the proxy → pod `Completed` → run **`Succeeded`** → `wren run get` reflects it. On GKE: image pulled from Artifact Registry, workspace on a Persistent Disk, runner container held **no token**.
 
 **M0 implementation decisions (deviations from the target design, to revisit):**
 
