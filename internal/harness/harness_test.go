@@ -120,7 +120,6 @@ func TestMockHarnessContextCancelled(t *testing.T) {
 
 func TestSelect(t *testing.T) {
 	t.Setenv("WREN_HARNESS", "")
-	t.Setenv("ANTHROPIC_API_KEY", "")
 
 	if h := Select(runspec.RunSpec{Harness: "mock"}); h.Name() != "mock" {
 		t.Errorf("mock → %s", h.Name())
@@ -128,14 +127,12 @@ func TestSelect(t *testing.T) {
 	if h := Select(runspec.RunSpec{Harness: "byo"}); h.Name() != "mock" {
 		t.Errorf("byo → %s", h.Name())
 	}
-	// claude-code with no key falls back to mock (M0).
-	if h := Select(runspec.RunSpec{Harness: "claude-code"}); h.Name() != "mock" {
-		t.Errorf("claude-code(no key) → %s", h.Name())
-	}
-	// With a key, selects the claude-code adapter.
-	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
+	// claude-code always selects the real adapter (key comes via the proxy).
 	if h := Select(runspec.RunSpec{Harness: "claude-code"}); h.Name() != "claude-code" {
-		t.Errorf("claude-code(key) → %s", h.Name())
+		t.Errorf("claude-code → %s", h.Name())
+	}
+	if h := Select(runspec.RunSpec{Harness: "weird"}); h.Name() != "mock" {
+		t.Errorf("unknown → %s", h.Name())
 	}
 	// Env override wins over the spec.
 	t.Setenv("WREN_HARNESS", "mock")
@@ -150,5 +147,46 @@ func TestClaudeCodeMissingBinary(t *testing.T) {
 	spec := runspec.RunSpec{RunID: "r-1", Prompt: "x", WorkspacePath: t.TempDir()}
 	if _, err := (ClaudeCode{}).Run(context.Background(), spec, NewEmitter(&bytes.Buffer{})); err == nil {
 		t.Fatal("expected error when claude CLI absent")
+	}
+}
+
+// TestClaudeCodeRunsAndStreams uses a fake `claude` on PATH to verify the
+// adapter runs it in the workspace, parses its stream-json events, and reports
+// token usage — without a real model call.
+func TestClaudeCodeRunsAndStreams(t *testing.T) {
+	fakeBin := t.TempDir()
+	script := "#!/bin/sh\n" +
+		`echo '{"type":"assistant","message":{"content":[{"type":"text","text":"planning"},{"type":"tool_use","name":"Edit"}]}}'` + "\n" +
+		"echo changed > CHANGED.txt\n" +
+		`echo '{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":120,"output_tokens":45}}'` + "\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	ws := t.TempDir()
+	var buf bytes.Buffer
+	res, err := ClaudeCode{}.Run(context.Background(),
+		runspec.RunSpec{RunID: "r-1", Prompt: "do it", WorkspacePath: ws, BranchPrefix: "wren/me"},
+		NewEmitter(&buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.InputTokens != 120 || res.OutputTokens != 45 {
+		t.Errorf("usage = %+v", res)
+	}
+	if res.Branch != "wren/me/r-1" {
+		t.Errorf("branch = %q", res.Branch)
+	}
+	// The agent ran with cwd = workspace (the fake wrote a file there).
+	if _, err := os.Stat(filepath.Join(ws, "CHANGED.txt")); err != nil {
+		t.Errorf("claude did not run in the workspace: %v", err)
+	}
+	evs := decodeEvents(t, &buf)
+	if len(eventsOfType(evs, EventToolCall)) != 1 {
+		t.Errorf("expected 1 tool_call, got events %+v", evs)
+	}
+	if len(eventsOfType(evs, EventMessage)) < 2 {
+		t.Error("expected assistant + result messages")
 	}
 }

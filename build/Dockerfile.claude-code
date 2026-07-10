@@ -1,0 +1,26 @@
+# wren/claude-code-runner: a harness image with the Claude Code CLI + git and the
+# wren-runtime binary as entrypoint. The operator uses this as a project's harness
+# image; wren-runtime's harness role drives `claude` in the cloned workspace.
+#
+# Model calls go to ANTHROPIC_BASE_URL (the in-pod egress-proxy), which injects
+# the real key — so this image ships no credentials.
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -o /out/wren-runtime ./cmd/wren-runtime
+
+FROM node:22-bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g @anthropic-ai/claude-code \
+ && npm cache clean --force
+COPY --from=build /out/wren-runtime /usr/local/bin/wren-runtime
+# Non-root agent user; HOME/tmp/workspace are writable volumes at runtime.
+RUN useradd -m -u 10001 agent
+USER 10001:10001
+ENV HOME=/home/agent XDG_CACHE_HOME=/tmp/.cache
+WORKDIR /home/agent
+ENTRYPOINT ["/usr/local/bin/wren-runtime"]

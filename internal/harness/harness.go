@@ -25,8 +25,9 @@ type Harness interface {
 }
 
 // Select chooses a harness adapter for a run. The WREN_HARNESS env var overrides
-// the RunSpec. In M0, claude-code falls back to the mock adapter unless an
-// ANTHROPIC_API_KEY is present, so the pipeline is demonstrable without secrets.
+// the RunSpec (used for tests / a keyless demo). "claude-code" returns the real
+// adapter — the model key is injected at the egress-proxy, so the runner need
+// not hold one; the adapter fails gracefully if the `claude` CLI is absent.
 func Select(spec runspec.RunSpec) Harness {
 	kind := os.Getenv("WREN_HARNESS")
 	if kind == "" {
@@ -34,13 +35,10 @@ func Select(spec runspec.RunSpec) Harness {
 	}
 	switch kind {
 	case "claude-code":
-		if os.Getenv("ANTHROPIC_API_KEY") != "" {
-			return &ClaudeCode{}
-		}
-		return &Mock{Note: "claude-code requested but no ANTHROPIC_API_KEY; using mock (M0)"}
+		return ClaudeCode{}
 	case "mock", "byo", "":
-		return &Mock{}
+		return Mock{}
 	default:
-		return &Mock{Note: "unknown harness " + kind + "; using mock (M0)"}
+		return Mock{Note: "unknown harness " + kind + "; using mock (M0)"}
 	}
 }
