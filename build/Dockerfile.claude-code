@@ -18,9 +18,11 @@ RUN apt-get update \
  && npm install -g @anthropic-ai/claude-code \
  && npm cache clean --force
 COPY --from=build /out/wren-runtime /usr/local/bin/wren-runtime
-# Non-root agent user; HOME/tmp/workspace are writable volumes at runtime.
-RUN useradd -m -u 10001 agent
-USER 10001:10001
+# Non-root agent user at uid 65532 to MATCH the distroless runtime image used by
+# the hydrate init container — so the harness owns the files hydrate cloned and
+# finalize can write to .git. HOME/tmp/workspace are writable volumes at runtime.
+RUN useradd -m -u 65532 agent
+USER 65532:65532
 ENV HOME=/home/agent XDG_CACHE_HOME=/tmp/.cache
 WORKDIR /home/agent
 ENTRYPOINT ["/usr/local/bin/wren-runtime"]
