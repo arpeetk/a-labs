@@ -74,31 +74,42 @@ func prClientAndToken() (github.Client, string, error) {
 // newGitHubClient builds the direct-mode PR client; a seam so tests can inject a fake.
 var newGitHubClient = func(token string) github.Client { return github.NewREST(token, nil) }
 
-// waitForProxy blocks until the in-pod egress-proxy is accepting connections (or
-// a timeout elapses). The proxy is a native sidecar that starts before the
-// runner, but "started" does not guarantee its socket is listening yet; the
-// runner (same network namespace) waits on 127.0.0.1 before using it.
-func waitForProxy(ctx context.Context, em *harness.Emitter) {
+// ErrRetryable marks a transient failure (e.g. the egress-proxy never came up)
+// that the operator may retry on a fresh pod. cmd/wren-runtime maps it to the
+// ExitRetryable exit code.
+var ErrRetryable = errors.New("retryable")
+
+// proxyWaitTimeout is how long the runner waits for the egress-proxy socket.
+// A package var so tests can shorten it.
+var proxyWaitTimeout = 30 * time.Second
+
+// waitForProxy reports whether the in-pod egress-proxy is accepting connections.
+// The proxy is a native sidecar that starts before the runner, but "started"
+// does not guarantee its socket is listening yet; the runner (same network
+// namespace) waits on 127.0.0.1. Returns true immediately when no proxy is
+// configured (nothing to wait for).
+func waitForProxy(ctx context.Context, em *harness.Emitter) bool {
 	base := egressProxyBase()
 	if base == "" {
-		return
+		return true
 	}
 	u, err := url.Parse(base)
 	if err != nil {
-		return
+		return true
 	}
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(proxyWaitTimeout)
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		if c, err := net.DialTimeout("tcp", u.Host, 500*time.Millisecond); err == nil {
 			_ = c.Close()
-			return
+			return true
 		}
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 	}
-	em.Message("egress-proxy not reachable after 30s; proceeding anyway")
+	em.Message("egress-proxy not reachable after " + proxyWaitTimeout.String())
+	return false
 }
 
 // skipReason explains why finalize was skipped.
@@ -146,7 +157,13 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 	em.Status("running")
 	em.Message("harness: " + h.Name() + " (mode=" + string(spec.Mode) + ")")
 
-	waitForProxy(ctx, em) // harness (and finalize) reach GitHub/model APIs via the proxy
+	// The harness (and finalize) reach GitHub / the model API via the proxy. If
+	// it never comes up, abort before running the (expensive) harness and let
+	// the operator retry on a fresh pod.
+	if !waitForProxy(ctx, em) {
+		em.Status("failed")
+		return fmt.Errorf("%w: egress-proxy unreachable", ErrRetryable)
+	}
 
 	res, err := h.Run(ctx, spec, em)
 	if err != nil {
@@ -204,7 +221,9 @@ func RunHydrate(ctx context.Context, out io.Writer, specPath string) error {
 	// through the egress-proxy when present (no token in the runner).
 	// Checkpoint-restore on resume lands with the checkpointer work.
 	if url, token, ok := gitCloneURL(spec); ok && spec.Mode != runspec.ModeResume {
-		waitForProxy(ctx, em)
+		if !waitForProxy(ctx, em) {
+			return fmt.Errorf("%w: egress-proxy unreachable", ErrRetryable)
+		}
 		if _, err := gitwork.Clone(url, spec.BaseRef, spec.WorkspacePath, token); err != nil {
 			em.Errorf("hydrate clone: " + err.Error())
 			return err

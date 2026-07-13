@@ -6,12 +6,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/summiteight/wren/internal/podruntime"
+	"github.com/summiteight/wren/internal/runspec"
 )
 
 func main() {
@@ -29,6 +31,9 @@ func main() {
 
 	if err := podruntime.Dispatch(ctx, os.Stdout, role, specPath); err != nil {
 		log.Printf("wren-runtime %s: %v", role, err)
-		os.Exit(1)
+		if errors.Is(err, podruntime.ErrRetryable) {
+			os.Exit(runspec.ExitRetryable) // transient — operator may retry
+		}
+		os.Exit(runspec.ExitError) // deterministic — operator must not retry
 	}
 }

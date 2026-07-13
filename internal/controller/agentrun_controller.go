@@ -192,15 +192,22 @@ func (r *AgentRunReconciler) reconcilePodState(ctx context.Context, run *wrenv1.
 // handlePodFailure resumes the run (up to the retry budget) or fails it,
 // recording the classified reason so `wren run get` shows continuity.
 func (r *AgentRunReconciler) handlePodFailure(ctx context.Context, run *wrenv1.AgentRun, pod *corev1.Pod) (ctrl.Result, error) {
-	reason := classifyTermination(pod)
+	info := classifyTermination(pod)
 	max := run.Spec.Retry.MaxRestarts
 	if max == 0 {
 		max = defaultMaxRestarts
 	}
 
+	// Deterministic failures are terminal: retrying just repeats them and, for
+	// an agent harness, re-spends its tokens.
+	if !info.retryable {
+		return r.setPhase(ctx, run, wrenv1.PhaseFailed, "HarnessError",
+			fmt.Sprintf("run failed (%s); not retryable", info.reason))
+	}
+
 	if run.Status.RestartCount >= max {
 		return r.setPhase(ctx, run, wrenv1.PhaseFailed, "RetryBudgetExhausted",
-			fmt.Sprintf("failed after %d restarts (%s)", run.Status.RestartCount, reason))
+			fmt.Sprintf("failed after %d restarts (%s)", run.Status.RestartCount, info.reason))
 	}
 
 	// Delete the failed pod, bump the restart count, and drop back to
@@ -214,7 +221,7 @@ func (r *AgentRunReconciler) handlePodFailure(ctx context.Context, run *wrenv1.A
 		Type:    "Resuming",
 		Status:  metav1.ConditionTrue,
 		Reason:  "PodTerminated",
-		Message: fmt.Sprintf("restart %d/%d after %s", run.Status.RestartCount, max, reason),
+		Message: fmt.Sprintf("restart %d/%d after %s", run.Status.RestartCount, max, info.reason),
 	}
 	setCondition(run, meta)
 	if err := r.Status().Update(ctx, run); err != nil {
@@ -283,22 +290,38 @@ func readyStatus(p wrenv1.RunPhase) metav1.ConditionStatus {
 	}
 }
 
-// classifyTermination produces a human-readable cause from a failed pod.
-func classifyTermination(pod *corev1.Pod) string {
+// terminationInfo describes why a pod failed and whether a retry could help.
+type terminationInfo struct {
+	reason    string
+	retryable bool
+}
+
+// classifyTermination inspects a failed pod and decides whether a retry is
+// warranted. Infrastructure-caused terminations (OOM, eviction, node loss) are
+// retryable — a fresh pod may succeed (Journey C). A container that exits
+// non-zero on its own is a deterministic failure and is NOT retried, unless it
+// used the ExitRetryable code to explicitly request one.
+func classifyTermination(pod *corev1.Pod) terminationInfo {
 	statuses := append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...)
 	statuses = append(statuses, pod.Status.ContainerStatuses...)
 	for _, cs := range statuses {
-		if t := cs.State.Terminated; t != nil && t.ExitCode != 0 {
-			if t.Reason == "OOMKilled" {
-				return "OOMKilled"
-			}
-			return fmt.Sprintf("%s exit %d", cs.Name, t.ExitCode)
+		t := cs.State.Terminated
+		if t == nil || t.ExitCode == 0 {
+			continue
+		}
+		switch {
+		case t.Reason == "OOMKilled":
+			return terminationInfo{reason: "OOMKilled", retryable: true}
+		case int(t.ExitCode) == runspec.ExitRetryable:
+			return terminationInfo{reason: fmt.Sprintf("%s requested retry", cs.Name), retryable: true}
+		default:
+			return terminationInfo{reason: fmt.Sprintf("%s exit %d", cs.Name, t.ExitCode), retryable: false}
 		}
 	}
 	if pod.Status.Reason != "" {
-		return pod.Status.Reason // e.g. Evicted, NodeLost
+		return terminationInfo{reason: pod.Status.Reason, retryable: true} // Evicted, NodeLost, ...
 	}
-	return "unknown failure"
+	return terminationInfo{reason: "unknown failure", retryable: true}
 }
 
 // setCondition upserts a condition by type.

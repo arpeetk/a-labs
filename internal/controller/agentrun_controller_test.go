@@ -156,6 +156,35 @@ func TestReconcileResumesOnFailure(t *testing.T) {
 	}
 }
 
+func TestReconcileDeterministicFailureDoesNotRetry(t *testing.T) {
+	run := testRun()
+	r, c := newReconciler(t, run)
+	reconcile(t, r, run) // Pending
+	reconcile(t, r, run) // create pod r-abc-0
+
+	// Harness exits 1 on its own (a deterministic app/finalize error) — NOT OOM.
+	setPodPhase(t, c, run.Namespace, "r-abc-0", corev1.PodFailed, func(p *corev1.Pod) {
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name:  ContainerHarness,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
+		}}
+	})
+	reconcile(t, r, run)
+
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseFailed {
+		t.Fatalf("phase = %q, want Failed (fail fast, no retry)", got.Status.Phase)
+	}
+	if got.Status.RestartCount != 0 {
+		t.Fatalf("restartCount = %d, want 0 (must not re-run a deterministic failure)", got.Status.RestartCount)
+	}
+	// The failed pod is NOT deleted/recreated (no resume happened).
+	var pod corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-0"}, &pod); err != nil {
+		t.Errorf("expected pod to remain for diagnosis, got %v", err)
+	}
+}
+
 func TestReconcileFailsAfterRetryBudget(t *testing.T) {
 	run := testRun()
 	run.Spec.Retry.MaxRestarts = 1

@@ -4,6 +4,16 @@
 // image (claude-code, codex, byo) reads this file on startup (spec §5.4).
 package runspec
 
+// Harness process exit codes (spec §5.4). The operator reads the exit code to
+// decide whether a failed run may be retried: a clean error is deterministic and
+// must not be retried (it would just repeat and re-spend the agent's tokens),
+// while ExitRetryable signals a transient condition worth a fresh pod.
+const (
+	ExitSuccess   = 0
+	ExitError     = 1  // deterministic failure — do NOT retry
+	ExitRetryable = 75 // transient failure — the operator may retry (EX_TEMPFAIL)
+)
+
 const (
 	// MountPath is where the RunSpec ConfigMap is mounted in the pod.
 	MountPath = "/etc/wren"

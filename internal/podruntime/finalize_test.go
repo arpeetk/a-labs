@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
@@ -16,6 +18,23 @@ import (
 	"github.com/summiteight/wren/internal/github"
 	"github.com/summiteight/wren/internal/runspec"
 )
+
+func TestRunHarnessRetryableWhenProxyDown(t *testing.T) {
+	// Proxy configured but nothing listening → RunHarness aborts with ErrRetryable
+	// (so the operator retries instead of running the harness with no egress).
+	t.Setenv("WREN_EGRESS_PROXY", "http://127.0.0.1:1")
+	old := proxyWaitTimeout
+	proxyWaitTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { proxyWaitTimeout = old })
+
+	specPath := writeRunSpec(t, t.TempDir(), runspec.RunSpec{
+		RunID: "r-1", Harness: "mock", Prompt: "x", WorkspacePath: t.TempDir(),
+	})
+	err := RunHarness(context.Background(), &bytes.Buffer{}, specPath)
+	if !errors.Is(err, ErrRetryable) {
+		t.Fatalf("err = %v, want ErrRetryable", err)
+	}
+}
 
 // bareOrigin builds a bare repo with a commit on main and returns its path.
 func bareOrigin(t *testing.T) string {

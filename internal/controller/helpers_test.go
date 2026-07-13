@@ -9,51 +9,39 @@ import (
 	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
 )
 
+func termPod(name string, code int32, reason string) *corev1.Pod {
+	return &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+		Name:  name,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: code, Reason: reason}},
+	}}}}
+}
+
 func TestClassifyTermination(t *testing.T) {
 	cases := []struct {
-		name string
-		pod  *corev1.Pod
-		want string
+		name          string
+		pod           *corev1.Pod
+		wantReason    string
+		wantRetryable bool
 	}{
+		{"oom", termPod(ContainerHarness, 137, "OOMKilled"), "OOMKilled", true},
+		{"harness clean error is fatal", termPod(ContainerHarness, 2, ""), "harness exit 2", false},
+		{"retryable exit code", termPod(ContainerHarness, 75, ""), "harness requested retry", true},
 		{
-			name: "oom",
-			pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
-				Name:  ContainerHarness,
-				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
-			}}}},
-			want: "OOMKilled",
-		},
-		{
-			name: "nonzero exit",
-			pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
-				Name:  ContainerHarness,
-				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 2}},
-			}}}},
-			want: "harness exit 2",
-		},
-		{
-			name: "init container failure",
+			name: "init container failure is fatal",
 			pod: &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
 				Name:  InitHydrate,
 				State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1}},
 			}}}},
-			want: "hydrate exit 1",
+			wantReason: "hydrate exit 1", wantRetryable: false,
 		},
-		{
-			name: "evicted",
-			pod:  &corev1.Pod{Status: corev1.PodStatus{Reason: "Evicted"}},
-			want: "Evicted",
-		},
-		{
-			name: "unknown",
-			pod:  &corev1.Pod{Status: corev1.PodStatus{}},
-			want: "unknown failure",
-		},
+		{"evicted is retryable", &corev1.Pod{Status: corev1.PodStatus{Reason: "Evicted"}}, "Evicted", true},
+		{"unknown is retryable", &corev1.Pod{Status: corev1.PodStatus{}}, "unknown failure", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := classifyTermination(tc.pod); got != tc.want {
-				t.Errorf("classifyTermination = %q, want %q", got, tc.want)
+			got := classifyTermination(tc.pod)
+			if got.reason != tc.wantReason || got.retryable != tc.wantRetryable {
+				t.Errorf("classifyTermination = %+v, want {%q %v}", got, tc.wantReason, tc.wantRetryable)
 			}
 		})
 	}
