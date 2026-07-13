@@ -1,0 +1,16 @@
+# wren-runtime: the multi-call in-pod binary (harness + sidecars).
+# Static build → distroless nonroot (uid 65532), compatible with the operator's
+# hardened pod securityContext (runAsNonRoot, readOnlyRootFilesystem).
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -o /out/wren-runtime ./cmd/wren-runtime
+
+FROM gcr.io/distroless/static:nonroot
+COPY --from=build /out/wren-runtime /usr/local/bin/wren-runtime
+USER 65532:65532
+# Default role is "harness" (no argument), so a harness image entrypoint is just
+# this binary; the operator overrides args for sidecar roles.
+ENTRYPOINT ["/usr/local/bin/wren-runtime"]

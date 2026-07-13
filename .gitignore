@@ -13,5 +13,11 @@ mobile/.expo/
 mobile/dist/
 mobile/.env
 
+# Go
+/bin/
+*.test
+*.out
+coverage.*
+
 # General
 .DS_Store
