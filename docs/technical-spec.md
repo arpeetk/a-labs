@@ -1,18 +1,19 @@
 # Wren — Technical Specification
 
-> **Status:** Draft v0.3 (living) · **Owner:** Platform / Software Factory · **Last updated:** 2026-07-10
+> **Status:** Draft v0.4 (living) · **Owner:** Platform / Software Factory · **Last updated:** 2026-07-13
 >
 > `Wren` is a working name for the platform and its CLI binary (`wren`). Names are placeholders and can change without affecting the design.
 
 ### Implementation status (living — updated as we build)
 
-Milestone **M0** in progress. Built and tested (unit + real-cluster e2e on **kind and real GKE**):
+The **core of milestone M0 — Journey A (task → PR)** — is built and validated end-to-end (unit tests + real-cluster e2e on **kind and real GKE**). A few M0 hardening items remain (see "Next milestones"). Built and validated:
 
 - **CLI** (`cmd/wren`) — command tree; `login`, `run create/list/get` wired to the control-plane HTTP API.
 - **Operator** (`cmd/wren-operator`, `internal/controller`) — `AgentRun` reconciler (hardened pod + workspace PVC + RunSpec ConfigMap, lifecycle, crash-resume), `AgentPool` skeleton. CRDs + RBAC + manager manifests under `config/`.
 - **Control plane** (`cmd/wren-apiserver`, `internal/{apiserver,coreapi,store,launcher}`) — Runs + Projects services; creates `AgentRun` CRs and mirrors CR status back.
-- **Harness runtime** (`cmd/wren-runtime`, `internal/{harness,podruntime}`) — the multi-call in-pod binary implementing the §5.4 contract: harness runner (event stream + workspace write) plus M0 stand-in sidecars (egress-proxy/checkpointer/gateway) and hydrate. Adapters: **mock** (deterministic, no key) and a **claude-code** stub. One container image (`build/Dockerfile.runtime`).
-- **GitHub PR / finalize** (`internal/{github,gitwork,finalize}`) — GitHub App installation-token minting (§5.7), go-git clone/commit/push (distroless-friendly, no git binary), and the finalize step (commit → push branch → open PR with rubric body). Hydrate does a real clone when a repo+token are configured; finalize opens the PR. Operator injects `GITHUB_TOKEN` from a Secret into the runner (M0 stand-in for egress-proxy injection). **Verified with a real live PR** against `arpeetk/a-labs` (Journey A produced an actual open PR).
+- **Harness runtime** (`cmd/wren-runtime`, `internal/{harness,podruntime}`) — the multi-call in-pod binary implementing the §5.4 contract. Adapters: **claude-code** (real — drives the bundled `claude` CLI headless in the cloned workspace and parses its stream-json events into Wren events + token usage) and **mock** (deterministic, keyless). Images: `build/Dockerfile.{runtime,claude-code}`.
+- **Egress-proxy** (`internal/egress`) — the pod's controlled egress: enforces a domain allowlist and **injects the GitHub token + model key** for github.com / api.github.com / api.anthropic.com. The credentials live only on the proxy container; the runner holds no secret.
+- **GitHub PR / finalize** (`internal/{github,gitwork,finalize}`) — go-git clone/commit/push (distroless-friendly, no git binary) + open a PR with the rubric body, plus a GitHub **App installation-token minter**. Hydrate clones and finalize pushes/opens the PR *through the egress-proxy*.
 - **Verified e2e on kind AND real GKE (Journey A):** `wren run create` → CR (carrying `repo`) → operator schedules the hardened pod → egress-proxy (holds creds) → hydrate clones via proxy → **the real Claude Code agent does the task** (Bash/Write tools, autonomous) → finalize opens a **real PR** through the proxy → pod `Completed` → run **`Succeeded`** → `wren run get` reflects it. On GKE: image pulled from Artifact Registry, workspace on a Persistent Disk, runner container held **no token or model key** (both injected at the proxy).
 
 **M0 implementation decisions (deviations from the target design, to revisit):**
@@ -20,23 +21,19 @@ Milestone **M0** in progress. Built and tested (unit + real-cluster e2e on **kin
 - **Transport:** control-plane API is **HTTP/JSON** (net/http) for M0; the target gRPC + Connect (§5.1/§5.2) is a fast-follow.
 - **Store:** **in-memory** (`internal/store.Memory`) for M0; Cloud SQL / Postgres is the target (§5.2).
 - **Auth:** caller identity via a trusted **`X-Wren-User` header** stand-in for M0; OIDC/SSO at a gateway is the target (§7).
-- **GitHub token delivery:** the runner reads a `GITHUB_TOKEN` from env (a mounted Secret) as the M0 stand-in; the secure design injects a per-run installation token at the **egress-proxy** so it never enters the runner (§5.6/§5.7). The App-token minter is built; the injection path lands with the egress-proxy.
+- **Control-plane hosting:** the operator + apiserver run **locally against the cluster** for M0; the target is **in-cluster Deployments** (§5.2) with a Service/Ingress — that plus the GitHub App is the next milestone (a real handover).
+- **GitHub credentials:** a **PAT** (mounted into the egress-proxy) for M0; the target is per-run, repo-scoped **GitHub App installation tokens** minted by the control plane (§5.7). The App-token minter is already built.
+- **Egress enforcement:** the runner *cooperatively* routes through the egress-proxy; because pod containers share a network namespace, physically preventing a bypass needs NetworkPolicy / iptables uid-redirect (§5.6, next-up hardening).
 - **Isolation:** agent pods run under `runc`; gVisor/Kata deferred to M4 (§5.6), as already noted.
 
-**Recently completed:**
+**Next milestones (not yet built):**
 
-- **Egress-proxy + credential injection** (`internal/egress`) — the proxy now enforces the domain allowlist and injects credentials for `github.com` / `api.github.com` / `api.anthropic.com`. Credentials live only on the proxy container; **the runner holds no token**. Verified with a live PR where the harness container had no `GITHUB_TOKEN`. *Remaining hardening (next-up):* enforce that the runner cannot **bypass** the proxy — in-pod containers share a network namespace, so this needs uid-based iptables redirection (Istio-style) or a separate egress pod + `NetworkPolicy` default-deny.
+1. **In-cluster control plane + GitHub App** — run the operator + apiserver as in-cluster Deployments (published images, apiserver Service/Ingress) and mint per-run, repo-scoped **GitHub App** installation tokens in place of the PAT. This makes the platform self-hosting and the handover real.
+2. **Egress bypass enforcement** — NetworkPolicy + iptables uid-redirect (or a separate egress pod) so the runner physically cannot skip the proxy.
 
-**Not yet built in M0** (next-up in **bold**):
+Also pending: real **checkpointer** (GCS snapshot) + checkpoint-restore hydrate (stubs today), `wren project`/`mcp`/`fleet`/`usage`/`run logs` server-side, Postgres store, gRPC/Connect transport, isolated agent node pool.
 
-- **Bypass enforcement** for the egress-proxy (iptables uid-redirect or egress pod + NetworkPolicy) — until then the runner *cooperatively* routes through the proxy.
-- Real **Claude Code** adapter (now unblocked by the egress path; `ANTHROPIC_API_KEY` is injected at the proxy via `ANTHROPIC_BASE_URL`).
-- Real **checkpointer** (GCS snapshot) + resume-from-checkpoint hydrate; both are stubs today.
-- GitHub **App setup flow** (`wren setup`); the per-run installation-token minter is already built (`internal/github`).
-- `wren project` / `mcp` / `fleet` / `usage` and `run logs` server-side.
-- Postgres store, gRPC/Connect transport, isolated agent node pool.
-
-**Repo:** the M0 codebase is on GitHub at `arpeetk/a-labs` (checked in via PR #2, branch `wren/m0-foundations`). Contributor/agent working guide: [`AGENTS.md`](../AGENTS.md) — read it before making changes.
+**Repo:** the M0 codebase is on GitHub at `arpeetk/a-labs` (PR #2, branch `wren/m0-foundations`). Contributor/agent working guide: [`AGENTS.md`](../AGENTS.md) — read it before making changes.
 
 ---
 
@@ -224,6 +221,29 @@ sequenceDiagram
 - **Operator** — Kubernetes controller reconciling `AgentRun`/`AgentPool` CRs into pods, volumes, network policy, and lifecycle (including crash-resume).
 - **Agent pod** — the sandbox: harness runner + gateway + checkpointer + egress-proxy sidecars.
 - **GCP data plane** — GKE, Regional PD, GCS, Secret Manager, Artifact Registry, Cloud SQL, observability.
+
+### 3.1 Module map (as built)
+
+Where each architectural piece lives in the code (M0):
+
+| Component | Package(s) | Notes |
+|---|---|---|
+| CLI | `cmd/wren`, `internal/{cli,client,config}` | cobra tree, HTTP client, local config |
+| Control-plane API | `cmd/wren-apiserver`, `internal/apiserver` | HTTP/JSON handlers (§5.2 REST) |
+| Control-plane logic | `internal/coreapi` | Runs + Projects services, config resolution, CR mapping |
+| Persistence | `internal/store` | `Store` interface + in-memory impl |
+| Cluster bridge | `internal/launcher` | creates/reads `AgentRun` CRs (hides Kubernetes) |
+| CRDs | `api/v1alpha1` | `AgentRun`, `AgentPool` (+ generated DeepCopy / CRD YAML) |
+| Operator | `cmd/wren-operator`, `internal/controller` | reconcilers + hardened pod builder |
+| In-pod runtime | `cmd/wren-runtime`, `internal/podruntime` | harness / hydrate / sidecar roles |
+| Harness adapters | `internal/harness` | claude-code (real), mock; the event protocol |
+| Egress-proxy | `internal/egress` | allowlist + credential injection |
+| GitHub / PR | `internal/{github,gitwork,finalize}` | App-token minter, go-git ops, finalize→PR |
+| Harness contract | `internal/runspec` | RunSpec + exit-code contract |
+| Deploy | `config/`, `build/`, `hack/` | kustomize manifests, Dockerfiles, `setup.sh` |
+
+Every logic package ships unit tests (controller-runtime fake client, `httptest`,
+local bare git repos). Build/test conventions: [`AGENTS.md`](../AGENTS.md).
 
 ---
 
@@ -496,7 +516,7 @@ The agent runs untrusted, model-generated code. **v1 relies on hardened-containe
 
 ### 5.7 GitHub integration
 
-> **M0 status:** the **finalize** step is built (`internal/{github,gitwork,finalize}`): go-git clone/commit/push + open a PR with the rubric body, plus a GitHub **App installation-token minter**. A real live PR has been produced end-to-end against `arpeetk/a-labs`. Two gaps vs. the target below: (1) the token reaches the runner via a mounted `GITHUB_TOKEN` Secret rather than being injected at the egress-proxy (stand-in until the proxy lands); (2) the branch is `wren/<sanitized-user>/<run-id>` — the `-<slug>` suffix and rubric *validation* are not yet implemented. The App *setup* flow (`wren setup`) is also pending.
+> **M0 status:** the **finalize** step is built (`internal/{github,gitwork,finalize}`): go-git clone/commit/push + open a PR with the rubric body, plus a GitHub **App installation-token minter**. Real live PRs have been produced end-to-end against `arpeetk/a-labs` on kind and GKE, with the token injected at the **egress-proxy** (the runner holds nothing). Remaining vs. the target: (1) the token is a **PAT** in the proxy secret rather than a per-run App installation token (the minter exists; wiring is the next milestone); (2) the branch is `wren/<sanitized-user>/<run-id>` — the `-<slug>` suffix and rubric *validation* are not yet implemented; (3) the App *setup* flow (`wren setup`) is pending.
 
 **Auth model: a GitHub App** (org-installed), not PATs.
 
@@ -606,7 +626,7 @@ Everything is provisioned by **Terraform modules** shipped with Wren so `wren se
 v1 targets multi-harness + steering; the build is sequenced but all lands within v1.
 
 - **M0 — Foundations.** Control-plane skeleton (auth, projects, runs), operator + `AgentRun` CRD, **Claude Code** harness, async task→PR, Regional PD workspace + GCS checkpointer, hardened `runc` pod on an isolated agent node pool, egress-proxy, GitHub App + repo-scoped tokens, `run create/get/logs`. *(Journey A + C end-to-end.)*
-  - **Done:** operator (`AgentRun` reconcile + crash-resume, `AgentPool` skeleton), control-plane Runs/Projects services + HTTP API, CLI `run create/list/get`, CR-status mirroring, the `wren-runtime` harness/sidecar image (mock harness), and **GitHub PR/finalize** (App-token minter, go-git clone/commit/push, finalize→PR with rubric; hydrate clones when configured). Verified e2e on kind: **Journey A to `Succeeded`**, including a **real live PR** on `arpeetk/a-labs`, and the **egress-proxy** (credential injection + allowlist) with the runner holding no token. **Remaining:** proxy **bypass enforcement** (iptables/NetworkPolicy — next up), real Claude Code adapter, real checkpointer (GCS) + checkpoint-restore, GitHub App setup flow, `run logs`, isolated node pool, Postgres store, gRPC transport.
+  - **Done:** operator (`AgentRun` reconcile + crash-resume with retry classification, `AgentPool` skeleton); control-plane Runs/Projects services + HTTP API; CLI `run create/list/get`; CR-status mirroring; the `wren-runtime` image + the **real Claude Code agent**; the **egress-proxy** (credential injection + allowlist, runner holds no secret); and **GitHub PR/finalize**. **Verified e2e on kind and real GKE: Journey A to `Succeeded` with a real Claude agent opening a real PR** on `arpeetk/a-labs`. **Remaining:** in-cluster control plane + **GitHub App** tokens, proxy **bypass enforcement** (NetworkPolicy/iptables), real checkpointer (GCS) + checkpoint-restore, `run logs`, isolated node pool, Postgres store, gRPC transport.
 - **M1 — Breadth.** **Codex** + **BYO** harness adapters, MCP config service + `wren mcp`, usage metering (tokens/CPU/mem) + `wren usage`, `fleet` views, RBAC.
 - **M2 — Interactive.** agent-gateway + steering stream, `run attach/steer`, tool-permission routing, rubric validation modes.
 - **M3 — Scale & polish.** `AgentPool` warm pools, quotas/budgets with hard-cap pause, Terraform-driven `wren setup`, read-only web dashboard.
