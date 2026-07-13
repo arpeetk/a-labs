@@ -146,21 +146,21 @@ sequenceDiagram
     end
     participant GH as GitHub
 
-    Eng->>CLI: wren run create --project X --task "..."
+    Eng->>CLI: wren run create --project X --task
     CLI->>CP: POST /v1/runs (identity header)
     CP->>CP: resolve project config
     CP->>Op: create AgentRun CR
     CP-->>CLI: run id (phase Pending)
     CLI-->>Eng: submitted r-8f3a2c
-    Op->>Proxy: schedule pod; mount GitHub token + model key
-    Op->>Run: start hydrate then harness then finalize (no token)
+    Op->>Proxy: schedule pod, mount GitHub and model creds
+    Op->>Run: start hydrate then harness then finalize (no creds)
     Run->>Proxy: clone repo
     Proxy->>GH: git clone (token injected)
     Run->>Run: harness performs the task
-    Run->>Proxy: push branch and open PR
-    Proxy->>GH: git push + create PR (token injected)
+    Run->>Proxy: push branch, open PR
+    Proxy->>GH: git push, create PR (token injected)
     GH-->>Run: PR URL
-    Run-->>Op: status Succeeded + PR URL
+    Run-->>Op: status Succeeded, PR URL
     Op-->>CP: mirror CR status
     Eng->>CLI: wren run get r-8f3a2c
     CLI->>CP: GET /v1/runs/r-8f3a2c
