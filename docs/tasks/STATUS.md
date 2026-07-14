@@ -6,11 +6,11 @@ transition; this file is the single glance-view for the sprint.
 
 | WS | Title | Brief | State | Worker/branch | Blocker |
 |----|-------|-------|-------|---------------|---------|
-| 0  | e2e validation loop | [WS-0](WS-0-e2e-loop.md) | ready | — | none (dispatch first, alone) |
-| 1  | Egress enforcement | [WS-1](WS-1-egress-enforcement.md) | ready | — | WS-0 merged |
-| 3  | Postgres store | [WS-3](WS-3-postgres-store.md) | ready | — | WS-0 merged |
-| 4  | `run logs` | [WS-4](WS-4-run-logs.md) | ready | — | WS-0 merged |
-| 7  | CI + community | [WS-7](WS-7-ci-community.md) | ready | — | WS-0 merged (e2e job needs it) |
+| 0  | e2e validation loop | [WS-0](WS-0-e2e-loop.md) | merged | #12 | done — gate live on main |
+| 1  | Egress enforcement | [WS-1](WS-1-egress-enforcement.md) | dispatched | ws1-egress-enforcement | none (human review before merge) |
+| 3  | Postgres store | [WS-3](WS-3-postgres-store.md) | dispatched | ws3-postgres-store | none |
+| 4  | `run logs` | [WS-4](WS-4-run-logs.md) | dispatched | ws4-run-logs | none |
+| 7  | CI + community | [WS-7](WS-7-ci-community.md) | dispatched | ws7-ci-community | none (e2e job active now WS-0 merged) |
 | 2  | GitHub App tokens | [WS-2](WS-2-github-app.md) | draft | — | WS-1 merged (pod.go); GitHub App created (human) |
 | 5  | Helm chart | [WS-5](WS-5-helm-chart.md) | draft | — | WS-1 merged (manifests settle) |
 | 8  | Claims truthing | [WS-8](WS-8-claims-truthing.md) | ready | — | WS-1 outcome known |
