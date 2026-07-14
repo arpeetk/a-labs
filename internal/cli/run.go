@@ -64,12 +64,14 @@ func newRunCreateCmd() *cobra.Command {
 	f.StringVar(&opts.Project, "project", "", "project (registered repo) to run against")
 	f.StringVar(&opts.Task, "task", "", "task prompt")
 	f.StringVar(&taskFile, "file", "", "read the task prompt from a file")
-	f.StringVar(&opts.Harness, "harness", "claude-code", "agent harness: claude-code|codex|byo")
+	// These default to empty so the project's configured defaults apply; a flag
+	// override only takes effect when explicitly set.
+	f.StringVar(&opts.Harness, "harness", "", "agent harness override: claude-code|codex|byo (default: project's)")
 	f.BoolVar(&opts.Interactive, "interactive", false, "attach and allow steering after submit")
 	f.StringVar(&opts.BaseRef, "base", "", "base git ref (default: repo default branch)")
-	f.StringVar(&opts.CPU, "cpu", "", "CPU request (e.g. 2)")
-	f.StringVar(&opts.Memory, "mem", "", "memory request (e.g. 4Gi)")
-	f.StringVar(&opts.Runtime, "runtime", "runc", "sandbox runtime: runc|gvisor|kata")
+	f.StringVar(&opts.CPU, "cpu", "", "CPU request override (e.g. 2)")
+	f.StringVar(&opts.Memory, "mem", "", "memory request override (e.g. 4Gi)")
+	f.StringVar(&opts.Runtime, "runtime", "", "sandbox runtime override: runc|gvisor|kata (default: project's)")
 	return cmd
 }
 

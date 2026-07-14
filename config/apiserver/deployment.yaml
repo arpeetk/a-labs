@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wren-apiserver
+  namespace: wren-system
+  labels:
+    app.kubernetes.io/name: wren-apiserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: wren-apiserver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: wren-apiserver
+    spec:
+      serviceAccountName: wren-apiserver
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: apiserver
+        image: wren/apiserver:dev
+        args:
+        - --addr=:8090
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+        ports:
+        - name: http
+          containerPort: 8090
+        livenessProbe:
+          httpGet: { path: /healthz, port: 8090 }
+          initialDelaySeconds: 5
+          periodSeconds: 20
+        readinessProbe:
+          httpGet: { path: /healthz, port: 8090 }
+          initialDelaySeconds: 3
+          periodSeconds: 10
+        resources:
+          requests: { cpu: 100m, memory: 128Mi }
+          limits: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wren-apiserver
+  namespace: wren-system
+  labels:
+    app.kubernetes.io/name: wren-apiserver
+spec:
+  # ClusterIP by default: reach it with `kubectl port-forward` (M0). The apiserver
+  # has only the X-Wren-User stand-in for auth, so do NOT expose it publicly until
+  # OIDC lands (M1). For a trusted network, switch to type: LoadBalancer.
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: wren-apiserver
+  ports:
+  - name: http
+    port: 8090
+    targetPort: 8090

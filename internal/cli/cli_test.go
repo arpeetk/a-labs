@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -121,6 +122,41 @@ func TestPlaceholderReportsMilestone(t *testing.T) {
 	_, err = run(t, "mcp", "add")
 	if err == nil || !strings.Contains(err.Error(), "not implemented") {
 		t.Fatalf("expected mcp add placeholder, got %v", err)
+	}
+}
+
+// TestRunCreateHarnessDefaultsToProject guards a regression where the CLI's
+// --harness flag defaulted to "claude-code" and thus always overrode a project's
+// configured default. Unset, it must be omitted so the project default applies.
+func TestRunCreateHarnessDefaultsToProject(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/runs" {
+			gotBody = nil
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{"id":"r-1","phase":"Pending"}`))
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if _, err := execIn(t, dir, "login", "--control-plane", srv.URL, "--user", "me"); err != nil {
+		t.Fatal(err)
+	}
+	// No --harness → omitted from the request (project default applies).
+	if _, err := execIn(t, dir, "run", "create", "--project", "p", "--task", "t"); err != nil {
+		t.Fatal(err)
+	}
+	if h, ok := gotBody["harness"]; ok && h != "" {
+		t.Errorf("harness should be omitted when --harness unset, got %v", h)
+	}
+	// Explicit override is sent through.
+	if _, err := execIn(t, dir, "run", "create", "--project", "p", "--task", "t", "--harness", "codex"); err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["harness"] != "codex" {
+		t.Errorf("explicit --harness override not sent, got %v", gotBody["harness"])
 	}
 }
 

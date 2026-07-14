@@ -27,11 +27,14 @@ spec:
           type: RuntimeDefault
       containers:
       - name: operator
-        image: wren/operator:latest
+        image: wren/operator:dev
         args:
         - --leader-elect
         - --health-probe-bind-address=:8081
         - --metrics-bind-address=:8080
+        # The image agent pods pull for sidecar/init roles. Override per cluster
+        # (e.g. an Artifact Registry path on GKE).
+        - --runtime-image=wren/runtime:dev
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

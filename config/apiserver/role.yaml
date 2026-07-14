@@ -1,0 +1,19 @@
+# The control-plane API server creates AgentRun CRs, ensures per-user run
+# namespaces, and (for the GitHub App flow) writes per-run credential Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: wren-apiserver-role
+rules:
+- apiGroups: ["wren.dev"]
+  resources: ["agentruns"]
+  verbs: ["create", "get", "list", "watch", "update", "delete"]
+- apiGroups: ["wren.dev"]
+  resources: ["agentruns/status"]
+  verbs: ["get"]
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["create", "get", "list"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["create", "get", "update", "delete"]

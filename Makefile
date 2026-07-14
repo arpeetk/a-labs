@@ -23,12 +23,27 @@ build-apiserver: ## Build the wren-apiserver (control plane) into ./bin
 build-runtime: ## Build the wren-runtime (in-pod harness/sidecars) into ./bin
 	go build -o bin/wren-runtime ./cmd/wren-runtime
 
-RUNTIME_IMAGE ?= wren/runtime:dev
+RUNTIME_IMAGE   ?= wren/runtime:dev
+OPERATOR_IMAGE  ?= wren/operator:dev
+APISERVER_IMAGE ?= wren/apiserver:dev
+KIND_CLUSTER    ?= wren-test
+
 docker-runtime: ## Build the wren-runtime container image
 	docker build -f build/Dockerfile.runtime -t $(RUNTIME_IMAGE) .
 
-kind-load: docker-runtime ## Load the runtime image into a kind cluster (KIND_CLUSTER)
-	kind load docker-image $(RUNTIME_IMAGE) --name $(or $(KIND_CLUSTER),wren-test)
+docker-operator: ## Build the wren-operator container image
+	docker build --build-arg BIN=wren-operator -f build/Dockerfile.gobin -t $(OPERATOR_IMAGE) .
+
+docker-apiserver: ## Build the wren-apiserver container image
+	docker build --build-arg BIN=wren-apiserver -f build/Dockerfile.gobin -t $(APISERVER_IMAGE) .
+
+docker-images: docker-runtime docker-operator docker-apiserver ## Build all container images
+
+kind-load: docker-images ## Build + load all images into a kind cluster (KIND_CLUSTER)
+	kind load docker-image $(RUNTIME_IMAGE) $(OPERATOR_IMAGE) $(APISERVER_IMAGE) --name $(KIND_CLUSTER)
+
+deploy: ## Install CRDs + RBAC + operator + apiserver in-cluster (current kube context)
+	kubectl apply -k config/default
 
 cover: ## Run tests and print per-package coverage
 	go test -cover ./...
