@@ -79,9 +79,9 @@ func (s *Service) CreateProject(ctx context.Context, p *store.Project) (*store.P
 	if strings.TrimSpace(p.Name) == "" {
 		return nil, fmt.Errorf("%w: project name is required", ErrValidation)
 	}
-	if strings.TrimSpace(p.Repo) == "" {
-		return nil, fmt.Errorf("%w: project repo is required", ErrValidation)
-	}
+	// repo is OPTIONAL: a repo-less project is the keyless design — its runs have
+	// an empty RunSpec.Repo, so hydrate's clone and finalize's PR are both skipped
+	// (see internal/podruntime). This is what `make e2e` exercises with no creds.
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = s.now()
 	}

@@ -31,12 +31,22 @@ func seedProject(t *testing.T, svc *Service, p *store.Project) {
 func TestCreateProjectValidation(t *testing.T) {
 	svc, _, _ := newService(t)
 	ctx := context.Background()
+	// name is required.
 	if _, err := svc.CreateProject(ctx, &store.Project{Repo: "x/y"}); !errors.Is(err, ErrValidation) {
 		t.Errorf("missing name = %v", err)
 	}
-	if _, err := svc.CreateProject(ctx, &store.Project{Name: "p"}); !errors.Is(err, ErrValidation) {
-		t.Errorf("missing repo = %v", err)
+	// repo is OPTIONAL: a keyless (repo-less) project creates successfully.
+	keyless, err := svc.CreateProject(ctx, &store.Project{Name: "keyless", DefaultHarness: "mock"})
+	if err != nil {
+		t.Fatalf("empty-repo project should be valid: %v", err)
 	}
+	if keyless.Repo != "" {
+		t.Errorf("keyless project repo = %q, want empty", keyless.Repo)
+	}
+	if keyless.CreatedAt.IsZero() {
+		t.Error("CreatedAt not set (empty-repo)")
+	}
+	// A project with a repo still creates.
 	p, err := svc.CreateProject(ctx, &store.Project{Name: "p", Repo: "x/y"})
 	if err != nil {
 		t.Fatal(err)

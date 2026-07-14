@@ -9,7 +9,7 @@ LDFLAGS := -X $(PKG)/internal/cli.Version=$(VERSION) \
 
 CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@latest
 
-.PHONY: build build-operator generate manifests deploy-manifests test vet fmt tidy clean
+.PHONY: build build-operator generate manifests deploy deploy-manifests e2e test vet fmt tidy clean
 
 build: ## Build the wren CLI into ./bin
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/wren
@@ -44,6 +44,9 @@ kind-load: docker-images ## Build + load all images into a kind cluster (KIND_CL
 
 deploy: ## Install CRDs + RBAC + operator + apiserver in-cluster (current kube context)
 	kubectl apply -k config/default
+
+e2e: ## Keyless end-to-end test on kind (the WS-0 merge gate); E2E_KEEP=1 keeps the cluster
+	./hack/e2e.sh
 
 cover: ## Run tests and print per-package coverage
 	go test -cover ./...
