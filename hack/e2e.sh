@@ -27,6 +27,11 @@ RUN_TIMEOUT="${RUN_TIMEOUT:-300}"   # seconds to wait for the run to reach Succe
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-180}"
 APISERVER_LOCAL_PORT="${APISERVER_LOCAL_PORT:-18090}"
 
+# Hermetic CLI config so `wren login` never clobbers the developer's real
+# ~/.config/wren/config.yaml. Cleaned up on exit.
+WREN_CONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wren-e2e-cfg.XXXXXX")"
+export WREN_CONFIG_DIR
+
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -79,6 +84,7 @@ cleanup() {
   if [ "$STATUS" != "ok" ]; then
     dump_diagnostics
   fi
+  [ -n "${WREN_CONFIG_DIR:-}" ] && rm -rf "$WREN_CONFIG_DIR" 2>/dev/null || true
   if [ "${E2E_KEEP:-0}" = "1" ]; then
     log "E2E_KEEP=1 — leaving cluster '$KIND_CLUSTER' up (kind delete cluster --name $KIND_CLUSTER to remove)"
   else
@@ -102,9 +108,13 @@ else
 fi
 k cluster-info >/dev/null || die "cannot reach cluster context $KCTX"
 
-# --- 2. images: build + load ---
+# --- 2. images: build + load; build the CLI ---
 log "building + loading images into kind ('make kind-load')"
 make kind-load KIND_CLUSTER="$KIND_CLUSTER"
+log "building the wren CLI ('make build')"
+make build
+WREN="$REPO_ROOT/bin/wren"
+[ -x "$WREN" ] || die "wren CLI not built at $WREN"
 
 # The failure-path demo swaps in a non-existent runtime image so the agent pod
 # never pulls, exercising the log-dump + non-zero-exit path. The operator picks
@@ -144,73 +154,39 @@ for i in $(seq 1 30); do
 done
 log "apiserver reachable"
 
-# --- 5. exercise the apiserver create-project path (control-plane smoke) ---
-# The apiserver's CreateProject requires a non-empty repo (validation we must not
-# change), so this call registers a project WITH a placeholder repo purely to
-# prove the deployed control plane accepts writes. Gotcha: the JSON fields are
-# `defaultModel`/`defaultHarness`, and the apiserver rejects unknown fields
-# (DisallowUnknownFields).
-#
-# The KEYLESS run itself (below) is submitted as an AgentRun CR with an EMPTY
-# repo — the operator's mock-harness path then skips hydrate's clone and
-# finalize's PR (both key off spec.Repo == ""), which is the credential-free
-# design. We cannot get an empty repo through CreateProject, and a placeholder
-# repo would make hydrate attempt a proxy clone with no GitHub route and FAIL —
-# so the run is driven straight at the operator. This still exercises the full
-# merge-gate surface: images, control-plane deploy, apiserver reachability +
-# writes, operator reconcile, pod build, mock harness, and status.
+# --- 5. register a keyless project (mock harness, NO repo) ---
+# The keyless design: a project with no repo → its runs carry an empty
+# RunSpec.Repo → hydrate's clone and finalize's PR are both skipped. CreateProject
+# now accepts an empty repo (coreapi), so we register the project through the
+# deployed apiserver. Gotcha: the project JSON fields are `defaultHarness` /
+# `defaultModel` (NOT `harness`/`model`), and the apiserver rejects unknown
+# fields (DisallowUnknownFields).
 PROJECT="e2e-mock"
-log "smoke-testing apiserver: create project '$PROJECT'"
+log "creating keyless project '$PROJECT' (defaultHarness: mock, no repo)"
 create_out="$(curl -fsS -X POST "${API}/v1/projects" \
   -H 'X-Wren-User: e2e' -H 'Content-Type: application/json' \
-  -d "{\"name\":\"${PROJECT}\",\"repo\":\"wren-e2e/keyless\",\"defaultHarness\":\"mock\",\"harnessImage\":\"wren/runtime:dev\",\"defaultModel\":\"mock\",\"cpu\":\"100m\",\"memory\":\"128Mi\",\"disk\":\"1Gi\"}" 2>&1)" \
+  -d "{\"name\":\"${PROJECT}\",\"defaultHarness\":\"mock\",\"harnessImage\":\"wren/runtime:dev\",\"defaultModel\":\"mock\",\"cpu\":\"100m\",\"memory\":\"128Mi\",\"disk\":\"1Gi\"}" 2>&1)" \
   || die "create project failed: $create_out"
 
-# --- 6. submit a keyless run (empty repo → hydrate + finalize skip) ---
-RUN_ID="e2e-$(date +%s)"
-RUN_NS="wren-e2e-runs"
-log "creating namespace '$RUN_NS' and keyless AgentRun '$RUN_ID' (mock harness, empty repo)"
-k create namespace "$RUN_NS" --dry-run=client -o yaml | k apply -f - >/dev/null
-cat <<EOF | k apply -f - >/dev/null
-apiVersion: wren.dev/v1alpha1
-kind: AgentRun
-metadata:
-  name: ${RUN_ID}
-  namespace: ${RUN_NS}
-  labels:
-    wren.dev/run: ${RUN_ID}
-    wren.dev/project: ${PROJECT}
-spec:
-  project: ${PROJECT}
-  repo: ""
-  user: e2e
-  harness:
-    kind: mock
-    image: wren/runtime:dev
-    model: mock
-  task:
-    prompt: "e2e: verify the keyless loop"
-    baseRef: main
-  interactive: false
-  sandbox:
-    runtimeClass: runc
-    resources:
-      cpu: 100m
-      memory: 128Mi
-      ephemeralDisk: 1Gi
-  workspace:
-    pvc:
-      size: 1Gi
-    checkpoint:
-      bucket: ""
-EOF
+# --- 6. submit + poll the run through the wren CLI (CLI → apiserver → operator) ---
+log "wren login → ${API}"
+"$WREN" login --control-plane "127.0.0.1:${APISERVER_LOCAL_PORT}" --user e2e >/dev/null \
+  || die "wren login failed"
 
-log "polling AgentRun/$RUN_ID for Succeeded (timeout ${RUN_TIMEOUT}s)"
+log "wren run create --project $PROJECT"
+run_out="$("$WREN" run create --project "$PROJECT" --task "e2e: verify the keyless loop" 2>&1)" \
+  || die "wren run create failed: $run_out"
+RUN_ID="$(printf '%s' "$run_out" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+RUN_NS="$(printf '%s' "$run_out" | sed -n 's/.*"namespace"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+[ -n "$RUN_ID" ] || die "could not parse run id from: $run_out"
+log "run id=$RUN_ID namespace=${RUN_NS:-<unknown>} — polling 'wren run get' for Succeeded (timeout ${RUN_TIMEOUT}s)"
+
 deadline=$(( $(date +%s) + RUN_TIMEOUT ))
 phase=""
 last=""
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  phase="$(k -n "$RUN_NS" get agentrun "$RUN_ID" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+  get_out="$("$WREN" run get "$RUN_ID" 2>/dev/null || true)"
+  phase="$(printf '%s' "$get_out" | sed -n 's/.*"phase"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
   case "$phase" in
     Succeeded) log "run reached Succeeded"; break ;;
     Failed)    die "run entered Failed phase" ;;
@@ -221,11 +197,11 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
 done
 [ "$phase" = "Succeeded" ] || die "run did not reach Succeeded within ${RUN_TIMEOUT}s (last phase='${phase:-<none>}')"
 
-# --- 7. assert the run's terminal state + PR was skipped (keyless) ---
-log "verifying terminal state (Succeeded, no PR)"
-[ "$(k -n "$RUN_NS" get agentrun "$RUN_ID" -o jsonpath='{.status.phase}')" = "Succeeded" ] \
-  || die "final phase not Succeeded"
-pr_url="$(k -n "$RUN_NS" get agentrun "$RUN_ID" -o jsonpath='{.status.pr.url}' 2>/dev/null || true)"
+# --- 7. assert terminal state + that no PR was opened (keyless) ---
+log "verifying terminal state (Succeeded, no PR) via 'wren run get'"
+final="$("$WREN" run get "$RUN_ID" 2>/dev/null || true)"
+printf '%s' "$final" | grep -q '"phase"[[:space:]]*:[[:space:]]*"Succeeded"' || die "final phase not Succeeded"
+pr_url="$(printf '%s' "$final" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 [ -z "$pr_url" ] || warn "expected no PR in keyless mode, got: $pr_url"
 
 STATUS="ok"

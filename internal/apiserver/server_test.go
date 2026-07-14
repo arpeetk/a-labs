@@ -62,9 +62,14 @@ func TestCreateProjectAndGet(t *testing.T) {
 
 func TestCreateProjectValidation(t *testing.T) {
 	h, _ := newTestServer(t)
-	w := do(t, h, "POST", "/v1/projects", "u@x", `{"name":"p"}`) // no repo
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("code = %d, want 400", w.Code)
+	// Missing name → 400.
+	if w := do(t, h, "POST", "/v1/projects", "u@x", `{"repo":"x/y"}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing name code = %d, want 400", w.Code)
+	}
+	// Repo is OPTIONAL (keyless design): a repo-less project is accepted.
+	w := do(t, h, "POST", "/v1/projects", "u@x", `{"name":"keyless","defaultHarness":"mock"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("keyless project code = %d, want 201, body=%s", w.Code, w.Body.String())
 	}
 }
 
