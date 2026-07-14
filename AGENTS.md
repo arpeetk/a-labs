@@ -183,6 +183,32 @@ kind delete cluster --name wren-test
 Without a `GITHUB_TOKEN` Secret the run still reaches `Succeeded` (finalize skips
 the PR). With one, it opens a real PR.
 
+### Testing
+
+Unit tests: `make test vet` (see §4). For the full loop, `make e2e` is the
+**keyless end-to-end gate** — the objective merge check every workstream rides:
+
+```sh
+export PATH="/opt/homebrew/bin:$PATH"
+make e2e                 # kind cluster → build+load images → deploy control plane
+                         # → keyless mock run → assert Succeeded → teardown
+E2E_KEEP=1 make e2e      # keep the cluster + control plane up for debugging
+E2E_BAD_IMAGE=1 make e2e # failure-path demo: bad runtime image → log dump, non-zero exit
+```
+
+It needs **Docker + kind** and runs in <10 min with **zero credentials**: the run
+uses the mock harness with an **empty repo**, so hydrate's clone and finalize's PR
+are both skipped (the keyless design). It is idempotent (creates or reuses the
+`${KIND_CLUSTER:-wren-e2e}` cluster) and, on failure, dumps the operator/apiserver
+logs, the AgentRun YAML, and every agent-pod container's logs before exiting
+non-zero. The script (`hack/e2e.sh`) submits the run as an AgentRun CR directly
+because `CreateProject` requires a non-empty repo — see the comment there.
+
+The egress-proxy's credentialed upstreams are env-overridable (`WREN_GITHUB_UPSTREAM`,
+`WREN_GITHUB_API_UPSTREAM`, `WREN_ANTHROPIC_UPSTREAM`; default to the real
+endpoints) — the enabler for a later gitea-backed `e2e-pr` tier that asserts a
+real PR without touching github.com.
+
 ---
 
 ## 8. Status & M0 stand-ins (things deliberately not "real" yet)

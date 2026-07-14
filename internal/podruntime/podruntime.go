@@ -286,21 +286,45 @@ func RunEgressProxy(ctx context.Context, out io.Writer) error {
 	return nil
 }
 
+// Default upstreams for the egress-proxy's credentialed routes. Each is
+// overridable via an env var so an e2e tier can point the proxy at a local
+// stand-in (e.g. a gitea server for the gitea-backed e2e-pr tier) without
+// touching production defaults. See envUpstream.
+const (
+	defaultGitHubUpstream    = "https://github.com"
+	defaultGitHubAPIUpstream = "https://api.github.com"
+	defaultAnthropicUpstream = "https://api.anthropic.com"
+)
+
+// envUpstream returns the override from env if set (trimmed, non-empty),
+// otherwise def. The default behavior is unchanged when the var is unset.
+func envUpstream(envVar, def string) string {
+	if v := strings.TrimSpace(os.Getenv(envVar)); v != "" {
+		return v
+	}
+	return def
+}
+
 // egressConfigFromEnv builds the proxy config from the egress-proxy container's
-// environment (its mounted credentials + the run's allowlist).
+// environment (its mounted credentials + the run's allowlist). The upstream
+// URLs default to the real endpoints but are env-overridable (WREN_*_UPSTREAM)
+// so a local e2e tier can retarget them.
 func egressConfigFromEnv() egress.Config {
 	cfg := egress.Config{Allowlist: splitAllowlist(os.Getenv("WREN_EGRESS_ALLOWLIST"))}
 	if tok := os.Getenv("GITHUB_TOKEN"); tok != "" {
 		cfg.Routes = append(cfg.Routes,
-			egress.Route{Prefix: egress.RouteGitHub, Upstream: "https://github.com",
-				Auth: egress.BasicAuth{Username: "x-access-token", Password: tok}},
-			egress.Route{Prefix: egress.RouteGitHubAPI, Upstream: "https://api.github.com",
-				Auth: egress.HeaderAuth{Key: "Authorization", Value: "Bearer " + tok}},
+			egress.Route{Prefix: egress.RouteGitHub,
+				Upstream: envUpstream("WREN_GITHUB_UPSTREAM", defaultGitHubUpstream),
+				Auth:     egress.BasicAuth{Username: "x-access-token", Password: tok}},
+			egress.Route{Prefix: egress.RouteGitHubAPI,
+				Upstream: envUpstream("WREN_GITHUB_API_UPSTREAM", defaultGitHubAPIUpstream),
+				Auth:     egress.HeaderAuth{Key: "Authorization", Value: "Bearer " + tok}},
 		)
 	}
 	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
 		cfg.Routes = append(cfg.Routes, egress.Route{Prefix: egress.RouteAnthropic,
-			Upstream: "https://api.anthropic.com", Auth: egress.HeaderAuth{Key: "x-api-key", Value: key}})
+			Upstream: envUpstream("WREN_ANTHROPIC_UPSTREAM", defaultAnthropicUpstream),
+			Auth:     egress.HeaderAuth{Key: "x-api-key", Value: key}})
 	}
 	return cfg
 }
