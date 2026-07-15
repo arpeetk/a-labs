@@ -113,3 +113,15 @@ func (m *Memory) UpdateRun(_ context.Context, r *Run) error {
 	m.runs[r.ID] = &cp
 	return nil
 }
+
+var _ upserter = (*Memory)(nil)
+
+// UpsertRun inserts a run or overwrites an existing one by ID. It backs
+// reconcile-on-boot (see boot.go); not part of the Store interface.
+func (m *Memory) UpsertRun(_ context.Context, r *Run) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cp := *r
+	m.runs[r.ID] = &cp
+	return nil
+}

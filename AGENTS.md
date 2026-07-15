@@ -222,7 +222,7 @@ real PR without touching github.com.
   the runner can *bypass* it (needs iptables uid-redirect or egress pod +
   NetworkPolicy). **checkpointer / gateway** sidecars are still liveness stand-ins.
 - **Transport:** control-plane API is HTTP/JSON (target: gRPC + Connect).
-- **Store:** in-memory (target: Cloud SQL / Postgres).
+- **Store:** in-memory (default) **or** Postgres (`--store=postgres` + `DATABASE_URL`, `internal/store.Postgres`; pgx/v5, embedded migrations, reconcile-on-boot). Managed Cloud SQL provisioning is the remaining target (WS-5 Helm).
 - **Auth:** `X-Wren-User` header (target: OIDC/SSO).
 - **Kernel isolation:** `runc` (gVisor/Kata deferred to M4).
 
