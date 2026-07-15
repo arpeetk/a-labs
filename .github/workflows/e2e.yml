@@ -1,0 +1,53 @@
+name: e2e
+
+# Keyless end-to-end gate on kind (the WS-0 merge gate, `make e2e`). Drives the
+# real path CLI -> apiserver -> operator with the mock harness, no credentials,
+# no repo. See AGENTS.md §7 and hack/e2e.sh.
+#
+# hack/e2e.sh creates and tears down its OWN kind cluster (KIND_CLUSTER, default
+# wren-e2e) via `kind create cluster`, so we install the kind + kubectl binaries
+# and let the script own the cluster lifecycle rather than pre-creating one with
+# helm/kind-action (whose cluster name the script would not reuse). Docker is
+# preinstalled on ubuntu-latest runners.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  e2e:
+    name: kind e2e (make e2e)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # Provides the `kind` binary; skipClusterCreation because hack/e2e.sh
+      # creates its own cluster (matching KIND_CLUSTER=wren-e2e).
+      - name: install kind
+        uses: helm/kind-action@v1
+        with:
+          version: v0.32.0
+          install_only: true
+
+      - name: setup kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: make e2e
+        run: make e2e
