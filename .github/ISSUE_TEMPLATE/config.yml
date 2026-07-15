@@ -1,0 +1,12 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/summiteight/wren/blob/main/SECURITY.md
+    about: >-
+      Do NOT open a public issue for security vulnerabilities. Follow the private
+      disclosure process in SECURITY.md instead.
+  - name: Question or discussion
+    url: https://github.com/summiteight/wren/discussions
+    about: >-
+      For usage questions, ideas, and open-ended discussion, please use GitHub
+      Discussions rather than an issue.

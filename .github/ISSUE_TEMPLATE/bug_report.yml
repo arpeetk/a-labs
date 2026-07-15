@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a defect in Wren (CLI, control plane, operator, or runtime).
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for filing a bug. **Do not report security vulnerabilities here** —
+        follow [SECURITY.md](../blob/main/SECURITY.md) for private disclosure.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and the impact.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps. Include the exact commands (e.g. the `wren ...` invocation) where possible.
+      placeholder: |
+        1. wren run create --project ... --task ...
+        2. wren run get <id>
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: component
+    attributes:
+      label: Component & version
+      description: >-
+        Which component (CLI / apiserver / operator / runtime)? Output of
+        `wren version` (or the commit SHA), plus Go, kind, and kubectl versions
+        if relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      description: Relevant logs. For e2e failures, include the operator/apiserver log dump. Please redact any secrets.
+      render: shell
+    validations:
+      required: false

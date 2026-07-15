@@ -1,0 +1,40 @@
+name: Configuration / setup question
+description: Trouble configuring or operating Wren (control plane, kind, deployment, config file).
+labels: ["question", "config"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        For open-ended discussion, prefer
+        [Discussions](../../discussions). Use this template when you have a
+        specific setup/config problem that may be a documentation gap or a bug.
+        **Never** include real credentials or tokens.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to configure?
+      description: e.g. control-plane deployment, egress-proxy upstreams, CLI config, kind e2e.
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: What have you tried?
+      description: Commands, config file contents (redacted), and what happened.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Go version, kind/kubectl versions, cluster type (kind / GKE / other).
+    validations:
+      required: true
+  - type: checkboxes
+    id: docs-checked
+    attributes:
+      label: Checked the docs?
+      options:
+        - label: I read the relevant parts of AGENTS.md / README / SETUP.md and it didn't cover this.
+          required: false

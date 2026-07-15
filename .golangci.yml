@@ -1,0 +1,35 @@
+# golangci-lint configuration (v2 schema).
+# Deliberately minimal — the goal is signal, not a wall of noise. Start from the
+# small default-plus set the team agreed on; expand only when a real bug class
+# justifies it. See CONTRIBUTING.md.
+version: "2"
+
+linters:
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - misspell
+  settings:
+    misspell:
+      locale: US
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      # Generated deepcopy code is not ours to lint.
+      - path: zz_generated\.deepcopy\.go
+        linters:
+          - errcheck
+          - staticcheck
+      # Test files legitimately ignore some errors (t.Cleanup teardown, etc.).
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt

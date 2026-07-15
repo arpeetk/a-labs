@@ -1,0 +1,88 @@
+name: CI
+
+# Fast per-PR gate: build, test, format, vet, lint, vuln scan. Mirrors the
+# commands in AGENTS.md (§3 build, §4 test/vet/fmt). The local Go 1.26 PATH
+# gotcha from AGENTS.md is irrelevant here — setup-go pins the toolchain.
+# Target: < 5 min wall clock.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  build-test:
+    name: build / test / vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt (check)
+        run: |
+          # `make fmt` writes in place; in CI we only check for drift.
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files. Run 'make fmt':"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: build
+        run: go build ./...
+
+      - name: vet
+        run: make vet
+
+      - name: test (race)
+        run: go test -race ./...
+
+  lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: golangci-lint
+        # action v8 supports golangci-lint v2 (v6 and earlier are v1-only, and
+        # our .golangci.yml uses the v2 schema). Pin the binary to match local dev.
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.12.2
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: govulncheck
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
