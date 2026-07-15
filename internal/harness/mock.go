@@ -30,6 +30,12 @@ func (m Mock) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (Resul
 		return Result{}, err
 	}
 
+	// Egress canary (WS-1): when the operator signals enforcement, prove the
+	// runner is physically confined to the proxy. A bypass fails the run.
+	if err := RunCanary(ctx, em); err != nil {
+		return Result{}, err
+	}
+
 	// Produce a workspace change, as a real harness would.
 	em.ToolCall("write_file")
 	marker := filepath.Join(spec.WorkspacePath, "WREN_MOCK.md")

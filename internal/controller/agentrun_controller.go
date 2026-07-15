@@ -64,6 +64,13 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.setPhase(ctx, &run, wrenv1.PhasePending, "Admitted", "run accepted")
 	}
 
+	// Record the egress-enforcement posture on the run so an operator can see,
+	// per run, whether the runner is physically confined to the proxy. Only the
+	// weaker "off" mode needs a visible marker (iptables is the safe default).
+	if err := r.ensureEgressCondition(ctx, &run); err != nil {
+		return ctrl.Result{}, fmt.Errorf("record egress condition: %w", err)
+	}
+
 	// Ensure the durable prerequisites exist before the pod.
 	if err := r.ensurePVC(ctx, &run); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensure workspace pvc: %w", err)
@@ -79,6 +86,49 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	lg.V(1).Info("reconciled", "phase", run.Status.Phase, "pod", pod.Name, "podPhase", pod.Status.Phase)
 	return r.reconcilePodState(ctx, &run, pod)
+}
+
+// egressEnforcementConditionType is the condition type recording the egress
+// bypass-prevention posture (spec §5.6, WS-1).
+const egressEnforcementConditionType = "EgressEnforcement"
+
+// ensureEgressCondition records an EgressEnforcement=Disabled condition when the
+// operator runs with --egress-enforcement=off, so the weaker posture is visible
+// on `wren run get`. With enforcement on (the default) it sets Enforced=True.
+// Idempotent: it persists only when the condition would actually change.
+func (r *AgentRunReconciler) ensureEgressCondition(ctx context.Context, run *wrenv1.AgentRun) error {
+	var want metav1.Condition
+	if r.PodConfig.enforcementMode() == EgressEnforcementOff {
+		want = metav1.Condition{
+			Type:    egressEnforcementConditionType,
+			Status:  metav1.ConditionFalse,
+			Reason:  "Disabled",
+			Message: "egress bypass enforcement disabled (--egress-enforcement=off); the runner can bypass the proxy",
+		}
+	} else {
+		want = metav1.Condition{
+			Type:    egressEnforcementConditionType,
+			Status:  metav1.ConditionTrue,
+			Reason:  "Iptables",
+			Message: "egress locked down via iptables uid-match; the runner cannot bypass the proxy",
+		}
+	}
+	if existing := findCondition(run, egressEnforcementConditionType); existing != nil &&
+		existing.Status == want.Status && existing.Reason == want.Reason {
+		return nil
+	}
+	setCondition(run, want)
+	return r.Status().Update(ctx, run)
+}
+
+// findCondition returns the condition of the given type, or nil.
+func findCondition(run *wrenv1.AgentRun, condType string) *metav1.Condition {
+	for i := range run.Status.Conditions {
+		if run.Status.Conditions[i].Type == condType {
+			return &run.Status.Conditions[i]
+		}
+	}
+	return nil
 }
 
 // ensurePVC creates the workspace PVC if it does not already exist. The PVC name

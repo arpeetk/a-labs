@@ -6,6 +6,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -251,5 +252,48 @@ func TestReconcileTerminalIsNoop(t *testing.T) {
 	err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-0"}, &pod)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected no pod for terminal run, got err=%v", err)
+	}
+}
+
+// findCond returns the condition of a given type from a run's status, or nil.
+func findCond(run *wrenv1.AgentRun, condType string) *metav1.Condition {
+	for i := range run.Status.Conditions {
+		if run.Status.Conditions[i].Type == condType {
+			return &run.Status.Conditions[i]
+		}
+	}
+	return nil
+}
+
+func TestReconcile_EgressEnforcementOff_WritesDisabledCondition(t *testing.T) {
+	run := testRun()
+	r, c := newReconciler(t, run)
+	r.PodConfig.EgressEnforcement = EgressEnforcementOff
+
+	reconcile(t, r, run) // admit
+	reconcile(t, r, run) // provision (sets condition + creates children)
+
+	cond := findCond(getRun(t, c, run), egressEnforcementConditionType)
+	if cond == nil {
+		t.Fatal("expected EgressEnforcement condition")
+	}
+	if cond.Status != metav1.ConditionFalse || cond.Reason != "Disabled" {
+		t.Errorf("condition = %s/%s, want False/Disabled", cond.Status, cond.Reason)
+	}
+}
+
+func TestReconcile_EgressEnforcementIptables_WritesEnforcedCondition(t *testing.T) {
+	run := testRun()
+	r, c := newReconciler(t, run) // default PodConfig → iptables
+
+	reconcile(t, r, run) // admit
+	reconcile(t, r, run) // provision
+
+	cond := findCond(getRun(t, c, run), egressEnforcementConditionType)
+	if cond == nil {
+		t.Fatal("expected EgressEnforcement condition")
+	}
+	if cond.Status != metav1.ConditionTrue || cond.Reason != "Iptables" {
+		t.Errorf("condition = %s/%s, want True/Iptables", cond.Status, cond.Reason)
 	}
 }

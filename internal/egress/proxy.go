@@ -4,12 +4,15 @@
 // so the untrusted runner never holds a secret, and (2) enforces a domain
 // allowlist for any other egress (HTTP forward + CONNECT tunneling).
 //
-// Note on enforcement: because containers in a pod share a network namespace,
-// this sidecar cannot by itself stop a runner from bypassing it. Bypass
-// prevention requires uid-based iptables redirection (Istio-style) or a separate
-// egress pod + NetworkPolicy — a documented follow-up. What this delivers today
-// is that credentials live only in the proxy, and the runner is configured to
-// route through it.
+// Enforcement (WS-1): the runner is *physically* prevented from bypassing this
+// proxy by in-pod iptables uid-isolation — the `egress-lockdown` init container
+// rejects all OUTPUT except (a) traffic to the proxy's localhost port and (b)
+// traffic owned by the proxy's own uid (65533). The runner (uid 65532) can reach
+// nothing but the proxy; the proxy resolves DNS and reaches the world. Because
+// pod containers share a network namespace, NetworkPolicy alone cannot make that
+// distinction — hence the uid-match. This package additionally hardens the
+// forward path: CONNECT is restricted to :443, hop-by-hop and inbound
+// credential headers are stripped, and the forward transport carries timeouts.
 package egress
 
 import (
@@ -56,9 +59,22 @@ type compiledRoute struct {
 	rp     *httputil.ReverseProxy
 }
 
+// forwardTransport is the transport used for the allowlist HTTP forward path.
+// It carries dial/response/idle timeouts so a slow or hung upstream cannot pin
+// a runner request open indefinitely (a small DoS / resource-exhaustion guard).
+func forwardTransport() *http.Transport {
+	return &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   15 * time.Second,
+		ExpectContinueTimeout: 5 * time.Second,
+	}
+}
+
 // New compiles a Proxy from config.
 func New(cfg Config) (*Proxy, error) {
-	p := &Proxy{allow: cfg.Allowlist, fwd: &http.Transport{}}
+	p := &Proxy{allow: cfg.Allowlist, fwd: forwardTransport()}
 	for _, rt := range cfg.Routes {
 		u, err := url.Parse(rt.Upstream)
 		if err != nil {
@@ -115,7 +131,18 @@ func (p *Proxy) Allowed(host string) bool {
 	return false
 }
 
+// connectPort is the only port CONNECT tunnels may target. Restricting to 443
+// keeps the tunnel to TLS: a runner cannot open an arbitrary-port raw tunnel
+// (e.g. to a plaintext service or an exfil listener) through the proxy. A
+// package var (not const) only so the tunnel test can point at an ephemeral
+// listener; production never changes it.
+var connectPort = "443"
+
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
+	if port := portOf(r.Host); port != connectPort {
+		http.Error(w, "egress: CONNECT allowed only to port "+connectPort, http.StatusForbidden)
+		return
+	}
 	if !p.Allowed(r.Host) {
 		http.Error(w, "egress blocked: "+stripPort(r.Host), http.StatusForbidden)
 		return
@@ -147,12 +174,17 @@ func (p *Proxy) handleHTTPForward(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.RequestURI = ""
+	// Scrub hop-by-hop headers and any credential the runner tried to smuggle
+	// out: the proxy is the sole credential authority, so an inbound
+	// Authorization/Proxy-Authorization is never forwarded upstream.
+	scrubForwardHeaders(r.Header)
 	resp, err := p.fwd.RoundTrip(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
+	removeHopByHop(resp.Header)
 	for k, vs := range resp.Header {
 		for _, v := range vs {
 			w.Header().Add(k, v)
@@ -173,6 +205,52 @@ func stripPort(hostport string) string {
 		return h
 	}
 	return hostport
+}
+
+// portOf returns the port component of a host:port, or "" if none is present.
+func portOf(hostport string) string {
+	if _, p, err := net.SplitHostPort(hostport); err == nil {
+		return p
+	}
+	return ""
+}
+
+// hopByHopHeaders are per-connection headers that must not be forwarded end to
+// end (RFC 7230 §6.1). We also strip inbound credential headers so the runner
+// cannot inject its own auth on the forward path — the proxy owns credentials.
+var hopByHopHeaders = []string{
+	"Connection",
+	"Proxy-Connection",
+	"Keep-Alive",
+	"Proxy-Authenticate",
+	"Proxy-Authorization",
+	"Te",
+	"Trailer",
+	"Transfer-Encoding",
+	"Upgrade",
+}
+
+// removeHopByHop deletes hop-by-hop headers, including any listed in the
+// request's Connection header (RFC 7230 §6.1).
+func removeHopByHop(h http.Header) {
+	for _, c := range h.Values("Connection") {
+		for _, f := range strings.Split(c, ",") {
+			if f = strings.TrimSpace(f); f != "" {
+				h.Del(f)
+			}
+		}
+	}
+	for _, name := range hopByHopHeaders {
+		h.Del(name)
+	}
+}
+
+// scrubForwardHeaders strips hop-by-hop headers and inbound credentials on the
+// forward (runner → upstream) path.
+func scrubForwardHeaders(h http.Header) {
+	removeHopByHop(h)
+	h.Del("Authorization")
+	h.Del("Proxy-Authorization")
 }
 
 func singleJoin(a, b string) string {

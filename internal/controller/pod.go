@@ -18,7 +18,15 @@ const (
 	ContainerGateway      = "agent-gateway"
 	ContainerCheckpointer = "checkpointer"
 	ContainerEgressProxy  = "egress-proxy"
+	InitEgressLockdown    = "egress-lockdown"
 	InitHydrate           = "hydrate"
+
+	// UIDs (spec §5.6). The runner and every runner-side container use the image
+	// default (runnerUID); the egress-proxy gets a distinct uid so the lockdown
+	// iptables rules can uid-match it (accept the proxy's egress, reject the
+	// runner's). Never collapse these two — the uid gap is the security boundary.
+	runnerUID int64 = 65532
+	proxyUID  int64 = 65533
 
 	VolumeWorkspace = "workspace"
 	VolumeIPC       = "ipc"
@@ -47,6 +55,22 @@ type Images struct {
 	Runtime string
 }
 
+// EgressEnforcement selects how the runner is prevented from bypassing the
+// egress-proxy (spec §5.6, WS-1).
+type EgressEnforcement string
+
+const (
+	// EgressEnforcementIptables (default) injects a privileged egress-lockdown
+	// init container that installs iptables OUTPUT rules restricting the runner
+	// to the proxy. Requires a cluster that admits privileged init containers.
+	EgressEnforcementIptables EgressEnforcement = "iptables"
+	// EgressEnforcementOff omits the lockdown container — an escape hatch for
+	// clusters that forbid privileged init containers (e.g. GKE Autopilot). The
+	// operator records an EgressEnforcement=Disabled condition so the weaker
+	// posture is visible on every run.
+	EgressEnforcementOff EgressEnforcement = "off"
+)
+
 // PodConfig is the operator-level configuration applied to every agent pod.
 type PodConfig struct {
 	Images Images
@@ -56,6 +80,17 @@ type PodConfig struct {
 	AnthropicKeySecret string
 	// EgressPort is the localhost port the egress-proxy listens on.
 	EgressPort string
+	// EgressEnforcement selects the bypass-prevention mechanism (default
+	// iptables). Empty is treated as iptables.
+	EgressEnforcement EgressEnforcement
+}
+
+// enforcementMode normalizes the configured mode, defaulting to iptables.
+func (c PodConfig) enforcementMode() EgressEnforcement {
+	if c.EgressEnforcement == EgressEnforcementOff {
+		return EgressEnforcementOff
+	}
+	return EgressEnforcementIptables
 }
 
 func (c PodConfig) egressPort() string {
@@ -137,6 +172,27 @@ func hardened(readOnlyRoot bool) *corev1.SecurityContext {
 	}
 }
 
+// lockdownSecurityContext is the security context for the egress-lockdown init
+// container. It is the ONE privileged exception in the pod: it must run as root
+// with NET_ADMIN+NET_RAW to program iptables in the pod's network namespace. It
+// drops every other capability, keeps privilege-escalation off, and still uses
+// the runtime-default seccomp profile — so the blast radius is exactly "can edit
+// this pod's netfilter rules", nothing more. It runs to completion before any
+// runner-side container starts (spec §5.6, WS-1).
+func lockdownSecurityContext() *corev1.SecurityContext {
+	return &corev1.SecurityContext{
+		RunAsNonRoot:             ptr(false),
+		RunAsUser:                ptr(int64(0)),
+		AllowPrivilegeEscalation: ptr(false),
+		ReadOnlyRootFilesystem:   ptr(true),
+		Capabilities: &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+			Add:  []corev1.Capability{"NET_ADMIN", "NET_RAW"},
+		},
+		SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+	}
+}
+
 // buildWorkspacePVC returns the desired workspace PersistentVolumeClaim.
 func buildWorkspacePVC(run *wrenv1.AgentRun) *corev1.PersistentVolumeClaim {
 	pvc := &corev1.PersistentVolumeClaim{
@@ -206,12 +262,17 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 	egressProxyEnv = append(egressProxyEnv, secretEnv("GITHUB_TOKEN", cfg.GitHubTokenSecret, "token")...)
 	egressProxyEnv = append(egressProxyEnv, secretEnv("ANTHROPIC_API_KEY", cfg.AnthropicKeySecret, "key")...)
 
+	// The egress-proxy runs as a distinct uid (proxyUID) so the lockdown iptables
+	// rules can uid-match it. Its container security context is the hardened
+	// baseline with RunAsUser pinned — do not let it default to the runner uid.
+	proxySecCtx := hardened(true)
+	proxySecCtx.RunAsUser = ptr(proxyUID)
 	egressProxy := corev1.Container{
 		Name:            ContainerEgressProxy,
 		Image:           images.Runtime,
 		Args:            []string{ContainerEgressProxy},
 		RestartPolicy:   &sidecar,
-		SecurityContext: hardened(true),
+		SecurityContext: proxySecCtx,
 		Env:             egressProxyEnv,
 	}
 
@@ -256,17 +317,25 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 		VolumeMounts: []corev1.VolumeMount{ipcMount},
 	}
 
+	harnessEnv := append([]corev1.EnvVar{
+		{Name: "WREN_RUN_ID", Value: run.Name},
+		{Name: "WREN_MODE", Value: string(mode(resume))},
+		runSpecEnv,
+		{Name: "HOME", Value: MountHome},
+	}, proxyEnv...)
+	// When enforcement is on, tell the harness to run its egress canary (a direct
+	// dial/HTTPS attempt that MUST fail). Off mode omits the flag so the canary
+	// is skipped — there is no lockdown to prove.
+	if cfg.enforcementMode() == EgressEnforcementIptables {
+		harnessEnv = append(harnessEnv, corev1.EnvVar{Name: "WREN_EXPECT_ENFORCEMENT", Value: "1"})
+	}
+
 	harness := corev1.Container{
 		Name:            ContainerHarness,
 		Image:           run.Spec.Harness.Image,
 		SecurityContext: hardened(true),
 		Resources:       resources(run.Spec.Sandbox.Resources),
-		Env: append([]corev1.EnvVar{
-			{Name: "WREN_RUN_ID", Value: run.Name},
-			{Name: "WREN_MODE", Value: string(mode(resume))},
-			runSpecEnv,
-			{Name: "HOME", Value: MountHome},
-		}, proxyEnv...),
+		Env:             harnessEnv,
 		VolumeMounts: []corev1.VolumeMount{
 			workspaceMount,
 			ipcMount,
@@ -314,11 +383,42 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 				FSGroup:        ptr(int64(10001)),
 				SeccompProfile: &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 			},
-			// Order matters: egress-proxy up first, then hydrate (which needs
-			// egress to clone), then the remaining sidecars, then the harness.
-			InitContainers: []corev1.Container{egressProxy, hydrate, checkpointer, gateway},
+			// Order matters: egress-lockdown runs FIRST (to completion) so iptables
+			// is in place before anything else touches the network; then the
+			// egress-proxy sidecar comes up; then hydrate (which needs egress to
+			// clone); then the remaining sidecars; then the harness.
+			InitContainers: initContainers(cfg, egressProxy, hydrate, checkpointer, gateway),
 			Containers:     []corev1.Container{harness},
 			Volumes:        volumes,
+		},
+	}
+}
+
+// initContainers assembles the pod's init-container list, prepending the
+// privileged egress-lockdown container when enforcement is on. With enforcement
+// off the lockdown container is omitted entirely (the escape hatch); the run's
+// EgressEnforcement=Disabled condition then records the weaker posture.
+func initContainers(cfg PodConfig, egressProxy, hydrate, checkpointer, gateway corev1.Container) []corev1.Container {
+	rest := []corev1.Container{egressProxy, hydrate, checkpointer, gateway}
+	if cfg.enforcementMode() == EgressEnforcementOff {
+		return rest
+	}
+	return append([]corev1.Container{buildLockdownContainer(cfg)}, rest...)
+}
+
+// buildLockdownContainer builds the egress-lockdown init container: the
+// wren-runtime image invoked with the egress-lockdown role, running privileged
+// enough to program iptables and nothing more. It carries the proxy port and
+// uid the iptables rules match on.
+func buildLockdownContainer(cfg PodConfig) corev1.Container {
+	return corev1.Container{
+		Name:            InitEgressLockdown,
+		Image:           cfg.Images.Runtime,
+		Args:            []string{InitEgressLockdown},
+		SecurityContext: lockdownSecurityContext(),
+		Env: []corev1.EnvVar{
+			{Name: "WREN_EGRESS_PORT", Value: cfg.egressPort()},
+			{Name: "WREN_PROXY_UID", Value: fmt.Sprintf("%d", proxyUID)},
 		},
 	}
 }

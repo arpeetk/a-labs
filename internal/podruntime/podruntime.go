@@ -359,11 +359,12 @@ func RunSidecar(ctx context.Context, out io.Writer, name string) error {
 
 // Roles that the dispatcher understands.
 const (
-	RoleHarness      = "harness"
-	RoleHydrate      = "hydrate"
-	RoleEgressProxy  = "egress-proxy"
-	RoleCheckpointer = "checkpointer"
-	RoleGateway      = "agent-gateway"
+	RoleHarness        = "harness"
+	RoleHydrate        = "hydrate"
+	RoleEgressProxy    = "egress-proxy"
+	RoleEgressLockdown = "egress-lockdown"
+	RoleCheckpointer   = "checkpointer"
+	RoleGateway        = "agent-gateway"
 )
 
 // Dispatch runs the named role to completion.
@@ -375,6 +376,8 @@ func Dispatch(ctx context.Context, out io.Writer, role, specPath string) error {
 		return RunHydrate(ctx, out, specPath)
 	case RoleEgressProxy:
 		return RunEgressProxy(ctx, out)
+	case RoleEgressLockdown:
+		return RunLockdown(ctx, out, DefaultLockdownConfig())
 	case RoleCheckpointer, RoleGateway:
 		return RunSidecar(ctx, out, role)
 	default:
