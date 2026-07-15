@@ -19,7 +19,7 @@ func newRunCmd() *cobra.Command {
 		newRunCreateCmd(),
 		newRunListCmd(),
 		newRunGetCmd(),
-		placeholder("run", "logs", "Stream logs from a run", "M0"),
+		newRunLogsCmd(),
 		placeholder("run", "stop", "Stop a run", "M0"),
 		placeholder("run", "resume", "Resume a Failed or Interrupted run", "M0"),
 		placeholder("run", "rm", "Delete a run", "M0"),
@@ -93,6 +93,26 @@ func newRunListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&scope, "scope", "mine", "which runs to show: mine|team|all")
+	return cmd
+}
+
+func newRunLogsCmd() *cobra.Command {
+	var opts client.LogsOptions
+	cmd := &cobra.Command{
+		Use:   "logs <run-id>",
+		Short: "Stream logs from a run's pod",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := clientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+			return c.StreamLogs(context.Background(), args[0], opts, cmd.OutOrStdout())
+		},
+	}
+	f := cmd.Flags()
+	f.BoolVarP(&opts.Follow, "follow", "f", false, "follow the log stream (tail -f)")
+	f.StringVar(&opts.Container, "container", "", "container to tail: harness (default)|agent-gateway|egress-proxy|checkpointer|hydrate")
 	return cmd
 }
 

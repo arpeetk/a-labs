@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
 	"github.com/summiteight/wren/internal/coreapi"
 	"github.com/summiteight/wren/internal/launcher"
 	"github.com/summiteight/wren/internal/store"
@@ -15,9 +16,16 @@ import (
 
 func newTestServer(t *testing.T) (http.Handler, *store.Memory) {
 	t.Helper()
+	h, _, st := newTestServerWithLauncher(t)
+	return h, st
+}
+
+func newTestServerWithLauncher(t *testing.T) (http.Handler, *launcher.Fake, *store.Memory) {
+	t.Helper()
 	st := store.NewMemory()
-	svc := coreapi.New(st, launcher.NewFake(), coreapi.DefaultDefaults())
-	return New(svc).Handler(), st
+	lc := launcher.NewFake()
+	svc := coreapi.New(st, lc, coreapi.DefaultDefaults())
+	return New(svc, lc).Handler(), lc, st
 }
 
 func do(t *testing.T, h http.Handler, method, path, user, body string) *httptest.ResponseRecorder {
@@ -142,6 +150,90 @@ func TestGetRunNotFound(t *testing.T) {
 	h, _ := newTestServer(t)
 	if w := do(t, h, "GET", "/v1/runs/nope", "u@x", ""); w.Code != http.StatusNotFound {
 		t.Fatalf("code = %d, want 404", w.Code)
+	}
+}
+
+// createRunViaAPI registers a project and submits a run, returning the run's ID
+// and namespace so log tests can drive the fake launcher directly.
+func createRunViaAPI(t *testing.T, h http.Handler) (id, ns string) {
+	t.Helper()
+	do(t, h, "POST", "/v1/projects", "u@x", `{"name":"p","repo":"x/y"}`)
+	w := do(t, h, "POST", "/v1/runs", "arpeet@x", `{"project":"p","task":"do it"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create run code = %d, body=%s", w.Code, w.Body.String())
+	}
+	var run store.Run
+	if err := json.Unmarshal(w.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+	return run.ID, run.Namespace
+}
+
+func TestRunLogsStream(t *testing.T) {
+	h, lc, _ := newTestServerWithLauncher(t)
+	id, ns := createRunViaAPI(t, h)
+
+	// Move it past Pending and seed harness logs (operator would do this).
+	lc.SetStatus(ns, id, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning})
+	lc.SetLogs(ns, id, "harness", "event: started\nevent: tool_use\nevent: done\n")
+
+	w := do(t, h, "GET", "/v1/runs/"+id+"/logs", "arpeet@x", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("logs code = %d, body=%s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Errorf("content-type = %q", ct)
+	}
+	if !strings.Contains(w.Body.String(), "event: done") {
+		t.Errorf("body missing log lines: %q", w.Body.String())
+	}
+}
+
+func TestRunLogsContainerSelector(t *testing.T) {
+	h, lc, _ := newTestServerWithLauncher(t)
+	id, ns := createRunViaAPI(t, h)
+	lc.SetStatus(ns, id, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning})
+	lc.SetLogs(ns, id, "egress-proxy", "proxy line\n")
+
+	w := do(t, h, "GET", "/v1/runs/"+id+"/logs?container=egress-proxy", "u@x", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "proxy line") {
+		t.Fatalf("container-selected logs = %d %q", w.Code, w.Body.String())
+	}
+}
+
+func TestRunLogsPending(t *testing.T) {
+	h, _, _ := newTestServerWithLauncher(t)
+	id, _ := createRunViaAPI(t, h) // fresh run is Pending, no CR status set
+
+	w := do(t, h, "GET", "/v1/runs/"+id+"/logs", "u@x", "")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("pending logs code = %d, want 409", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Pending") {
+		t.Errorf("pending hint missing: %q", w.Body.String())
+	}
+}
+
+func TestRunLogsNoPod(t *testing.T) {
+	h, lc, _ := newTestServerWithLauncher(t)
+	id, ns := createRunViaAPI(t, h)
+	// Finished run whose pod is gone: not Pending, but no logs seeded → ErrNoPod.
+	lc.SetStatus(ns, id, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseSucceeded})
+
+	w := do(t, h, "GET", "/v1/runs/"+id+"/logs", "u@x", "")
+	if w.Code != http.StatusConflict {
+		t.Fatalf("no-pod logs code = %d, want 409", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Succeeded") {
+		t.Errorf("phase hint missing: %q", w.Body.String())
+	}
+}
+
+func TestRunLogsUnknownRun(t *testing.T) {
+	h, _, _ := newTestServerWithLauncher(t)
+	w := do(t, h, "GET", "/v1/runs/ghost/logs", "u@x", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("unknown-run logs code = %d, want 404", w.Code)
 	}
 }
 

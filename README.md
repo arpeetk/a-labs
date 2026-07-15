@@ -61,11 +61,12 @@ wren login --control-plane wren.corp.internal --user you   # SSO lands in M1
 wren run create --project payments-api --task "Fix the flaky retry in checkout"
 wren run get    r-9d4c09a          # phase, PR url, token usage, restart count
 wren run list   --scope mine
+wren run logs   r-9d4c09a -f        # tail the agent's live logs (--container to pick a sidecar)
 ```
 
 Each run is attributable, resumable, and produces a reviewable PR — not a mystery
-diff. (`run logs`, `attach`/`steer`, `fleet`, and `usage` are milestone-tagged
-in the CLI and land in M1–M2.)
+diff. (`attach`/`steer`, `fleet`, and `usage` are milestone-tagged in the CLI and
+land in M1–M2.)
 
 ## Installing Wren (admin / handover)
 
