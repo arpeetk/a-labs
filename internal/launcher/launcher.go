@@ -52,6 +52,10 @@ type Launcher interface {
 	EnsureNamespace(ctx context.Context, ns string) error
 	CreateRun(ctx context.Context, run *wrenv1.AgentRun) error
 	GetRun(ctx context.Context, ns, name string) (*wrenv1.AgentRun, error)
+	// ListRuns returns every AgentRun across all namespaces. The apiserver uses
+	// it at boot to re-learn in-flight runs into the store (reconcile-on-boot),
+	// so a restarted apiserver does not forget runs.
+	ListRuns(ctx context.Context) ([]wrenv1.AgentRun, error)
 	DeleteRun(ctx context.Context, ns, name string) error
 	// StreamLogs opens the log stream of the run's current pod. container
 	// defaults to DefaultLogContainer when empty and is validated against the
@@ -118,6 +122,14 @@ func (k *K8s) GetRun(ctx context.Context, ns, name string) (*wrenv1.AgentRun, er
 		return nil, err
 	}
 	return &run, nil
+}
+
+func (k *K8s) ListRuns(ctx context.Context) ([]wrenv1.AgentRun, error) {
+	var list wrenv1.AgentRunList
+	if err := k.c.List(ctx, &list); err != nil {
+		return nil, err
+	}
+	return list.Items, nil
 }
 
 func (k *K8s) DeleteRun(ctx context.Context, ns, name string) error {

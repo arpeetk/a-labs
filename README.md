@@ -120,7 +120,7 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Control plane | ✅ runs locally against the cluster | in-cluster Deployments |
 | GitHub creds | ✅ PAT in the proxy secret | per-run **GitHub App** tokens |
 | API transport | HTTP/JSON | gRPC + Connect |
-| Store | in-memory | Cloud SQL / Postgres |
+| Store | ✅ in-memory (default) **or** Postgres (`--store=postgres`) | managed Cloud SQL, Helm-provisioned (WS-5) |
 | Auth | `X-Wren-User` header | OIDC / SSO |
 | Isolation | hardened `runc` pods | + gVisor/Kata (deferred, M4) |
 
@@ -139,7 +139,7 @@ cmd/
 internal/
   cli/ client/ config/     CLI command tree, HTTP client, local config
   apiserver/ coreapi/       control-plane HTTP handlers + Runs/Projects logic
-  store/ launcher/          persistence (in-memory) + AgentRun CR creation
+  store/ launcher/          persistence (in-memory + Postgres) + AgentRun CR creation
   controller/               AgentRun/AgentPool reconcilers + pod builder
   harness/ podruntime/      harness adapters (claude-code, mock) + in-pod roles
   egress/                   the credential-injecting allowlist proxy

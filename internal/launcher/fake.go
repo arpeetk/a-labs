@@ -63,6 +63,16 @@ func (f *Fake) GetRun(_ context.Context, ns, name string) (*wrenv1.AgentRun, err
 	return run.DeepCopy(), nil
 }
 
+func (f *Fake) ListRuns(_ context.Context) ([]wrenv1.AgentRun, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]wrenv1.AgentRun, 0, len(f.Runs))
+	for _, run := range f.Runs {
+		out = append(out, *run.DeepCopy())
+	}
+	return out, nil
+}
+
 func (f *Fake) DeleteRun(_ context.Context, ns, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

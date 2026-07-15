@@ -212,6 +212,74 @@ func (s *Service) ListRuns(ctx context.Context, scope, user string) ([]*store.Ru
 	return s.store.ListRuns(ctx, f)
 }
 
+// ReconcileFromCluster re-learns in-flight runs from the AgentRun CRs into the
+// store at apiserver boot. The CR is the source of truth for run status, so a
+// restarted apiserver (especially one backed by a store it just migrated to)
+// re-derives its worklist here instead of forgetting runs (implementation-plan
+// §WS-3). It upserts every CR's store row and returns the number reconciled;
+// individual failures are logged by the caller via the returned error slice.
+func (s *Service) ReconcileFromCluster(ctx context.Context) (int, error) {
+	crs, err := s.launcher.ListRuns(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list AgentRuns: %w", err)
+	}
+	n := 0
+	for i := range crs {
+		cr := &crs[i]
+		// Merge onto any existing store row: the CR is authoritative for status,
+		// but an empty CR field must not clobber known store data (same rule as
+		// GetRun's mirroring — status is only written when the CR carries it).
+		existing, _ := s.store.GetRun(ctx, cr.Name)
+		rec := runFromCR(cr, existing)
+		if err := store.UpsertRun(ctx, s.store, rec); err != nil {
+			return n, fmt.Errorf("upsert run %s: %w", rec.ID, err)
+		}
+		n++
+	}
+	return n, nil
+}
+
+// runFromCR maps an AgentRun CR onto a store.Run for reconcile-on-boot. The CR
+// spec carries the immutable submission fields; the CR status is authoritative
+// for phase/PR/restartCount, but only overwrites the prior store row when it
+// actually carries a value (an unstarted CR has empty status — we keep the
+// store's last-known phase). Fields the CR does not carry at all (the original
+// submission timestamp) fall back to the store row, then to the CR creation
+// time. prior may be nil (run unknown to the store).
+func runFromCR(cr *wrenv1.AgentRun, prior *store.Run) *store.Run {
+	rec := &store.Run{
+		ID:           cr.Name,
+		Project:      cr.Spec.Project,
+		User:         cr.Spec.User,
+		Prompt:       cr.Spec.Task.Prompt,
+		Harness:      string(cr.Spec.Harness.Kind),
+		Model:        cr.Spec.Harness.Model,
+		BaseRef:      cr.Spec.Task.BaseRef,
+		Interactive:  cr.Spec.Interactive,
+		Runtime:      string(cr.Spec.Sandbox.RuntimeClass),
+		Namespace:    cr.Namespace,
+		Phase:        string(cr.Status.Phase),
+		PRURL:        cr.Status.PR.URL,
+		RestartCount: cr.Status.RestartCount,
+		CreatedAt:    cr.CreationTimestamp.Time,
+	}
+	if prior != nil {
+		if rec.Phase == "" {
+			rec.Phase = prior.Phase
+		}
+		if rec.PRURL == "" {
+			rec.PRURL = prior.PRURL
+		}
+		if !prior.CreatedAt.IsZero() {
+			rec.CreatedAt = prior.CreatedAt // keep the true submission time
+		}
+	}
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = time.Now()
+	}
+	return rec
+}
+
 // --- internals ---
 
 type effectiveConfig struct {

@@ -228,6 +228,83 @@ func TestListRunsScope(t *testing.T) {
 	}
 }
 
+// TestReconcileFromCluster simulates a restarted apiserver with an empty store
+// (the durability hole WS-3 closes): the AgentRun CR still exists in the
+// cluster, so reconcile-on-boot must re-learn the run with the CR's phase.
+func TestReconcileFromCluster(t *testing.T) {
+	svc, st, fl := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "p", Repo: "x/y"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "p", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Operator advanced the run; then the store is wiped (fresh backing store on
+	// restart / mid-migration). The CR remains in the cluster.
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning, RestartCount: 2})
+	if err := st.UpdateRun(ctx, &store.Run{ID: run.ID}); err == nil {
+		// Wipe by constructing a new store and re-pointing the service at it.
+	}
+	fresh := store.NewMemory()
+	svc.store = fresh
+
+	if _, err := fresh.GetRun(ctx, run.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("precondition: fresh store should not know the run: %v", err)
+	}
+
+	n, err := svc.ReconcileFromCluster(ctx)
+	if err != nil {
+		t.Fatalf("ReconcileFromCluster: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("reconciled %d runs, want 1", n)
+	}
+	got, err := fresh.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatalf("run not re-learned: %v", err)
+	}
+	if got.Phase != string(wrenv1.PhaseRunning) || got.RestartCount != 2 {
+		t.Errorf("re-learned run = %+v, want phase Running restart 2", got)
+	}
+	if got.Project != "p" || got.User != "u@x" || got.Prompt != "hi" {
+		t.Errorf("re-learned run lost spec fields: %+v", got)
+	}
+	// Idempotent: a second boot must not error or duplicate.
+	if _, err := svc.ReconcileFromCluster(ctx); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+	all, _ := fresh.ListRuns(ctx, store.RunFilter{})
+	if len(all) != 1 {
+		t.Errorf("reconcile not idempotent: %d runs", len(all))
+	}
+}
+
+// TestReconcilePreservesPhaseWhenCRHasNoStatus covers the restart-with-no-status
+// case (the manual durability check): an unstarted run's CR carries empty
+// status, so reconcile must keep the store's last-known phase rather than blank
+// it. This mirrors GetRun's "only overwrite when the CR carries a value" rule.
+func TestReconcilePreservesPhaseWhenCRHasNoStatus(t *testing.T) {
+	svc, st, _ := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "p", Repo: "x/y"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "p", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The CR in the Fake has empty status (operator never ran). The store row is
+	// the CreateRun-set "Pending". Reconcile must not blank it.
+	if _, err := svc.ReconcileFromCluster(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Phase != string(wrenv1.PhasePending) {
+		t.Errorf("reconcile blanked a known phase: got %q, want Pending", got.Phase)
+	}
+}
+
 func TestSanitizeLabel(t *testing.T) {
 	cases := map[string]string{
 		"Arpeet@Corp.com": "arpeet-corp-com",

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8090", "HTTP listen address")
+	storeKind := flag.String("store", "memory", "store backend: memory|postgres")
 	flag.Parse()
 
 	cfg, err := ctrl.GetConfig()
@@ -35,8 +37,25 @@ func main() {
 		log.Fatalf("build launcher: %v", err)
 	}
 
-	// M0 uses an in-memory store; the Postgres implementation is a fast-follow.
-	svc := coreapi.New(store.NewMemory(), lc, coreapi.DefaultDefaults())
+	// Store selection: memory (default, dev/tests) or durable Postgres. The DSN
+	// comes from DATABASE_URL (spec §5.2 / implementation-plan §WS-3).
+	st, cleanup, err := buildStore(*storeKind)
+	if err != nil {
+		log.Fatalf("build store: %v", err)
+	}
+	defer cleanup()
+
+	svc := coreapi.New(st, lc, coreapi.DefaultDefaults())
+
+	// Reconcile-on-boot: re-learn in-flight runs from the AgentRun CRs so a
+	// restarted apiserver (or one that just migrated stores) does not forget
+	// them. Non-fatal: a fresh install with an unreachable list still serves.
+	if n, err := svc.ReconcileFromCluster(context.Background()); err != nil {
+		log.Printf("reconcile-on-boot: %v (continuing)", err)
+	} else if n > 0 {
+		log.Printf("reconcile-on-boot: re-learned %d run(s) from the cluster", n)
+	}
+
 	srv := &http.Server{
 		Addr:              *addr,
 		Handler:           apiserver.New(svc, lc).Handler(),
@@ -58,4 +77,25 @@ func main() {
 	defer cancel()
 	_ = srv.Shutdown(ctx)
 	log.Print("wren-apiserver stopped")
+}
+
+// buildStore selects the store backend. It returns the Store and a cleanup func
+// (a no-op for memory; pool.Close for postgres).
+func buildStore(kind string) (store.Store, func(), error) {
+	switch kind {
+	case "", "memory":
+		return store.NewMemory(), func() {}, nil
+	case "postgres":
+		dsn := os.Getenv("DATABASE_URL")
+		if dsn == "" {
+			return nil, nil, errors.New("--store=postgres requires DATABASE_URL")
+		}
+		pg, err := store.NewPostgres(context.Background(), dsn)
+		if err != nil {
+			return nil, nil, err
+		}
+		return pg, pg.Close, nil
+	default:
+		return nil, nil, fmt.Errorf("unknown store %q (want memory|postgres)", kind)
+	}
 }

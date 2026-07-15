@@ -19,7 +19,7 @@ The **core of milestone M0 — Journey A (task → PR)** — is built and valida
 **M0 implementation decisions (deviations from the target design, to revisit):**
 
 - **Transport:** control-plane API is **HTTP/JSON** (net/http) for M0; the target gRPC + Connect (§5.1/§5.2) is a fast-follow.
-- **Store:** **in-memory** (`internal/store.Memory`) for M0; Cloud SQL / Postgres is the target (§5.2).
+- **Store:** two impls behind the `Store` interface — **in-memory** (`internal/store.Memory`, the default for dev/tests) and **Postgres** (`internal/store.Postgres`, pgx/v5, embedded forward-only migrations) selectable via `--store=postgres` + `DATABASE_URL`. On boot the apiserver reconciles run rows from the AgentRun CRs, so a restart re-learns in-flight runs. Managed Cloud SQL + Helm-provisioned DSN is the remaining target (§5.2, WS-5).
 - **Auth:** caller identity via a trusted **`X-Wren-User` header** stand-in for M0; OIDC/SSO at a gateway is the target (§7).
 - **Control-plane hosting:** the operator + apiserver run **locally against the cluster** for M0; the target is **in-cluster Deployments** (§5.2) with a Service/Ingress — that plus the GitHub App is the next milestone (a real handover).
 - **GitHub credentials:** a **PAT** (mounted into the egress-proxy) for M0; the target is per-run, repo-scoped **GitHub App installation tokens** minted by the control plane (§5.7). The App-token minter is already built.
@@ -31,7 +31,7 @@ The **core of milestone M0 — Journey A (task → PR)** — is built and valida
 1. **In-cluster control plane + GitHub App** — run the operator + apiserver as in-cluster Deployments (published images, apiserver Service/Ingress) and mint per-run, repo-scoped **GitHub App** installation tokens in place of the PAT. This makes the platform self-hosting and the handover real.
 2. **Egress bypass enforcement** — NetworkPolicy + iptables uid-redirect (or a separate egress pod) so the runner physically cannot skip the proxy.
 
-Also pending: real **checkpointer** (GCS snapshot) + checkpoint-restore hydrate (stubs today), `wren project`/`mcp`/`fleet`/`usage` server-side, historical/aggregated logs (GCS) and multi-restart `--previous` for `run logs` (live-tail lands now), Postgres store, gRPC/Connect transport, isolated agent node pool.
+Also pending: real **checkpointer** (GCS snapshot) + checkpoint-restore hydrate (stubs today), `wren project`/`mcp`/`fleet`/`usage` server-side, historical/aggregated logs (GCS) and multi-restart `--previous` for `run logs` (live-tail lands now), managed Postgres provisioning (the store impl exists — see above), gRPC/Connect transport, isolated agent node pool.
 
 **Repo:** the M0 codebase is on GitHub at `arpeetk/a-labs` (PR #2, branch `wren/m0-foundations`). Contributor/agent working guide: [`AGENTS.md`](../AGENTS.md) — read it before making changes.
 
@@ -231,7 +231,7 @@ Where each architectural piece lives in the code (M0):
 | CLI | `cmd/wren`, `internal/{cli,client,config}` | cobra tree, HTTP client, local config |
 | Control-plane API | `cmd/wren-apiserver`, `internal/apiserver` | HTTP/JSON handlers (§5.2 REST) |
 | Control-plane logic | `internal/coreapi` | Runs + Projects services, config resolution, CR mapping |
-| Persistence | `internal/store` | `Store` interface + in-memory impl |
+| Persistence | `internal/store` | `Store` interface + in-memory and Postgres (pgx/v5) impls |
 | Cluster bridge | `internal/launcher` | creates/reads `AgentRun` CRs (hides Kubernetes) |
 | CRDs | `api/v1alpha1` | `AgentRun`, `AgentPool` (+ generated DeepCopy / CRD YAML) |
 | Operator | `cmd/wren-operator`, `internal/controller` | reconcilers + hardened pod builder |
