@@ -208,10 +208,47 @@ func TestRunCommandsHitControlPlane(t *testing.T) {
 	}
 }
 
-func TestRunLogsPlaceholder(t *testing.T) {
-	_, err := run(t, "run", "logs", "r-1")
-	if err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("expected run logs placeholder, got %v", err)
+func TestRunLogsStreamsToStdout(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.String()
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("event: started\nevent: done\n"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if _, err := execIn(t, dir, "login", "--control-plane", srv.URL, "--user", "me"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := execIn(t, dir, "run", "logs", "-f", "r-1", "--container", "harness")
+	if err != nil {
+		t.Fatalf("run logs: %v", err)
+	}
+	if !strings.Contains(out, "event: done") {
+		t.Errorf("logs output = %q", out)
+	}
+	if !strings.Contains(gotPath, "/v1/runs/r-1/logs") || !strings.Contains(gotPath, "follow=true") || !strings.Contains(gotPath, "container=harness") {
+		t.Errorf("request path = %q", gotPath)
+	}
+}
+
+// TestRunLogsNonZeroOn4xx: a 409 from the control plane surfaces as a non-nil
+// error (the CLI exits non-zero) and the error message carries the hint.
+func TestRunLogsNonZeroOn4xx(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"run is Pending: no pod yet"}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if _, err := execIn(t, dir, "login", "--control-plane", srv.URL, "--user", "me"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := execIn(t, dir, "run", "logs", "r-1")
+	if err == nil || !strings.Contains(err.Error(), "Pending") {
+		t.Fatalf("expected Pending conflict error, got %v", err)
 	}
 }
 

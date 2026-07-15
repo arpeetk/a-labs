@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -98,6 +99,58 @@ func (c *Client) GetRun(ctx context.Context, id string) (*Run, error) {
 		return nil, err
 	}
 	return &run, nil
+}
+
+// LogsOptions selects which container to tail and whether to follow the stream.
+type LogsOptions struct {
+	Container string
+	Follow    bool
+}
+
+// StreamLogs copies a run's pod logs to w. With Follow set it blocks until the
+// stream ends (or ctx is canceled). A 4xx/5xx from the control plane is
+// returned as an error (the CLI exits non-zero); the body is not written.
+func (c *Client) StreamLogs(ctx context.Context, id string, opts LogsOptions, w io.Writer) error {
+	q := url.Values{}
+	if opts.Follow {
+		q.Set("follow", "true")
+	}
+	if opts.Container != "" {
+		q.Set("container", opts.Container)
+	}
+	path := "/v1/runs/" + id + "/logs"
+	if enc := q.Encode(); enc != "" {
+		path += "?" + enc
+	}
+	// A followed stream has no fixed length; use a client without the default
+	// 30s timeout so long-running tails are not cut off. Cancellation flows
+	// through ctx instead.
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	if err != nil {
+		return err
+	}
+	if c.user != "" {
+		req.Header.Set("X-Wren-User", c.user)
+	}
+	resp, err := c.streamClient().Do(req)
+	if err != nil {
+		return fmt.Errorf("control plane request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("control plane error (%s): %s", resp.Status, errorMessage(resp.Body))
+	}
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		return fmt.Errorf("read log stream: %w", err)
+	}
+	return nil
+}
+
+// streamClient returns an HTTP client with no overall timeout, suitable for a
+// followed (open-ended) log stream. It reuses the base client's transport.
+func (c *Client) streamClient() *http.Client {
+	return &http.Client{Transport: c.http.Transport}
 }
 
 // do performs a JSON request/response against the control plane.

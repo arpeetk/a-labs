@@ -39,7 +39,7 @@ func main() {
 	svc := coreapi.New(store.NewMemory(), lc, coreapi.DefaultDefaults())
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           apiserver.New(svc).Handler(),
+		Handler:           apiserver.New(svc, lc).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

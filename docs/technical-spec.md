@@ -8,7 +8,7 @@
 
 The **core of milestone M0 — Journey A (task → PR)** — is built and validated end-to-end (unit tests + real-cluster e2e on **kind and real GKE**). A few M0 hardening items remain (see "Next milestones"). Built and validated:
 
-- **CLI** (`cmd/wren`) — command tree; `login`, `run create/list/get` wired to the control-plane HTTP API.
+- **CLI** (`cmd/wren`) — command tree; `login`, `run create/list/get/logs` wired to the control-plane HTTP API (`run logs [-f] [--container]` streams pod logs — resolves the run's current pod by the `wren.dev/run` label and tails the `pods/log` subresource).
 - **Operator** (`cmd/wren-operator`, `internal/controller`) — `AgentRun` reconciler (hardened pod + workspace PVC + RunSpec ConfigMap, lifecycle, crash-resume), `AgentPool` skeleton. CRDs + RBAC + manager manifests under `config/`.
 - **Control plane** (`cmd/wren-apiserver`, `internal/{apiserver,coreapi,store,launcher}`) — Runs + Projects services; creates `AgentRun` CRs and mirrors CR status back.
 - **Harness runtime** (`cmd/wren-runtime`, `internal/{harness,podruntime}`) — the multi-call in-pod binary implementing the §5.4 contract. Adapters: **claude-code** (real — drives the bundled `claude` CLI headless in the cloned workspace and parses its stream-json events into Wren events + token usage) and **mock** (deterministic, keyless). Images: `build/Dockerfile.{runtime,claude-code}`.
@@ -31,7 +31,7 @@ The **core of milestone M0 — Journey A (task → PR)** — is built and valida
 1. **In-cluster control plane + GitHub App** — run the operator + apiserver as in-cluster Deployments (published images, apiserver Service/Ingress) and mint per-run, repo-scoped **GitHub App** installation tokens in place of the PAT. This makes the platform self-hosting and the handover real.
 2. **Egress bypass enforcement** — NetworkPolicy + iptables uid-redirect (or a separate egress pod) so the runner physically cannot skip the proxy.
 
-Also pending: real **checkpointer** (GCS snapshot) + checkpoint-restore hydrate (stubs today), `wren project`/`mcp`/`fleet`/`usage`/`run logs` server-side, Postgres store, gRPC/Connect transport, isolated agent node pool.
+Also pending: real **checkpointer** (GCS snapshot) + checkpoint-restore hydrate (stubs today), `wren project`/`mcp`/`fleet`/`usage` server-side, historical/aggregated logs (GCS) and multi-restart `--previous` for `run logs` (live-tail lands now), Postgres store, gRPC/Connect transport, isolated agent node pool.
 
 **Repo:** the M0 codebase is on GitHub at `arpeetk/a-labs` (PR #2, branch `wren/m0-foundations`). Contributor/agent working guide: [`AGENTS.md`](../AGENTS.md) — read it before making changes.
 
@@ -626,7 +626,7 @@ Everything is provisioned by **Terraform modules** shipped with Wren so `wren se
 v1 targets multi-harness + steering; the build is sequenced but all lands within v1.
 
 - **M0 — Foundations.** Control-plane skeleton (auth, projects, runs), operator + `AgentRun` CRD, **Claude Code** harness, async task→PR, Regional PD workspace + GCS checkpointer, hardened `runc` pod on an isolated agent node pool, egress-proxy, GitHub App + repo-scoped tokens, `run create/get/logs`. *(Journey A + C end-to-end.)*
-  - **Done:** operator (`AgentRun` reconcile + crash-resume with retry classification, `AgentPool` skeleton); control-plane Runs/Projects services + HTTP API; CLI `run create/list/get`; CR-status mirroring; the `wren-runtime` image + the **real Claude Code agent**; the **egress-proxy** (credential injection + allowlist, runner holds no secret); and **GitHub PR/finalize**. **Verified e2e on kind and real GKE: Journey A to `Succeeded` with a real Claude agent opening a real PR** on `arpeetk/a-labs`. **Remaining:** in-cluster control plane + **GitHub App** tokens, proxy **bypass enforcement** (NetworkPolicy/iptables), real checkpointer (GCS) + checkpoint-restore, `run logs`, isolated node pool, Postgres store, gRPC transport.
+  - **Done:** operator (`AgentRun` reconcile + crash-resume with retry classification, `AgentPool` skeleton); control-plane Runs/Projects services + HTTP API; CLI `run create/list/get`; CR-status mirroring; the `wren-runtime` image + the **real Claude Code agent**; the **egress-proxy** (credential injection + allowlist, runner holds no secret); and **GitHub PR/finalize**. **Verified e2e on kind and real GKE: Journey A to `Succeeded` with a real Claude agent opening a real PR** on `arpeetk/a-labs`. `run logs [-f]` (live pod-log tail via `pods/log`) landed. **Remaining:** in-cluster control plane + **GitHub App** tokens, proxy **bypass enforcement** (NetworkPolicy/iptables), real checkpointer (GCS) + checkpoint-restore, isolated node pool, Postgres store, gRPC transport.
 - **M1 — Breadth.** **Codex** + **BYO** harness adapters, MCP config service + `wren mcp`, usage metering (tokens/CPU/mem) + `wren usage`, `fleet` views, RBAC.
 - **M2 — Interactive.** agent-gateway + steering stream, `run attach/steer`, tool-permission routing, rubric validation modes.
 - **M3 — Scale & polish.** `AgentPool` warm pools, quotas/budgets with hard-cap pause, Terraform-driven `wren setup`, read-only web dashboard.

@@ -14,6 +14,14 @@ rules:
 - apiGroups: [""]
   resources: ["namespaces"]
   verbs: ["create", "get", "list"]
+# Resolve the run's current pod by the wren.dev/run label, then stream its logs
+# via the pods/log subresource (`wren run logs`). Read-only.
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get"]
 - apiGroups: [""]
   resources: ["secrets"]
   verbs: ["create", "get", "update", "delete"]

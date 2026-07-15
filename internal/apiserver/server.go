@@ -7,21 +7,28 @@
 package apiserver
 
 import (
+	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 
+	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
 	"github.com/summiteight/wren/internal/coreapi"
+	"github.com/summiteight/wren/internal/launcher"
 	"github.com/summiteight/wren/internal/store"
 )
 
 // Server is the HTTP handler for the control-plane API.
 type Server struct {
 	svc *coreapi.Service
+	lc  launcher.Launcher
 }
 
-// New builds a Server.
-func New(svc *coreapi.Service) *Server { return &Server{svc: svc} }
+// New builds a Server. The launcher is used directly for the pods/log stream
+// (run logs), which is not part of the coreapi request/response surface.
+func New(svc *coreapi.Service, lc launcher.Launcher) *Server { return &Server{svc: svc, lc: lc} }
 
 // Handler returns the configured HTTP mux.
 func (s *Server) Handler() http.Handler {
@@ -30,6 +37,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/runs", s.createRun)
 	mux.HandleFunc("GET /v1/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
+	mux.HandleFunc("GET /v1/runs/{id}/logs", s.runLogs)
 	mux.HandleFunc("POST /v1/projects", s.createProject)
 	mux.HandleFunc("GET /v1/projects", s.listProjects)
 	mux.HandleFunc("GET /v1/projects/{name}", s.getProject)
@@ -102,6 +110,64 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+// runLogs streams a run's pod logs as plaintext (chunked, flush-per-line). It
+// resolves the run's namespace from the store, rejects runs that have no pod
+// yet/anymore with a 409 + phase hint, and honors ?follow= and ?container=.
+func (s *Server) runLogs(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	run, err := s.svc.GetRun(r.Context(), id)
+	if err != nil {
+		writeServiceErr(w, err) // 404 for unknown run
+		return
+	}
+	// A Pending run has not been scheduled onto a pod yet — short-circuit before
+	// touching the cluster so the caller gets a crisp hint.
+	if run.Phase == string(wrenv1.PhasePending) {
+		writeErr(w, http.StatusConflict, errors.New("run is Pending: no pod yet"))
+		return
+	}
+
+	container := r.URL.Query().Get("container")
+	follow := r.URL.Query().Get("follow") == "true"
+
+	stream, err := s.lc.StreamLogs(r.Context(), run.Namespace, id, container, follow)
+	if err != nil {
+		switch {
+		case errors.Is(err, launcher.ErrNoPod):
+			writeErr(w, http.StatusConflict, fmt.Errorf("no pod for run (phase %s)", run.Phase))
+		default:
+			writeErr(w, http.StatusBadGateway, err)
+		}
+		return
+	}
+	defer stream.Close()
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+
+	// Copy line-by-line so `-f` tails feel live: flush after each newline.
+	br := bufio.NewReader(stream)
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			if _, werr := w.Write(line); werr != nil {
+				return // client hung up
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err != nil {
+			if err != io.EOF {
+				// Best-effort: surface a trailing note; headers already sent.
+				_, _ = w.Write([]byte("\n[log stream error: " + err.Error() + "]\n"))
+			}
+			return
+		}
+	}
 }
 
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
