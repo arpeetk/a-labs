@@ -10,7 +10,7 @@ transition; this file is the single glance-view for the sprint.
 | 1  | Egress enforcement | [WS-1](WS-1-egress-enforcement.md) | dispatched | ws1-egress-enforcement | none (human review before merge) |
 | 3  | Postgres store | [WS-3](WS-3-postgres-store.md) | dispatched | ws3-postgres-store | none |
 | 4  | `run logs` | [WS-4](WS-4-run-logs.md) | dispatched | ws4-run-logs | none |
-| 7  | CI + community | [WS-7](WS-7-ci-community.md) | dispatched | ws7-ci-community | none (e2e job active now WS-0 merged) |
+| 7  | CI + community | [WS-7](WS-7-ci-community.md) | merged | #13 | done — CI/e2e/CodeQL live on main |
 | 2  | GitHub App tokens | [WS-2](WS-2-github-app.md) | draft | — | WS-1 merged (pod.go); GitHub App created (human) |
 | 5  | Helm chart | [WS-5](WS-5-helm-chart.md) | draft | — | WS-1 merged (manifests settle) |
 | 8  | Claims truthing | [WS-8](WS-8-claims-truthing.md) | ready | — | WS-1 outcome known |
@@ -31,4 +31,15 @@ transition; this file is the single glance-view for the sprint.
 
 Things hand-offs said were NOT verified; burn down before launch.
 
-- (empty)
+- **WS-7 CI never executed** (no `act` locally): first real run of ci/e2e/codeql
+  happens on the next PR — watch that the golangci-lint@v8, govulncheck, CodeQL
+  autobuild, and `make e2e`-on-runner all pass within budget.
+- **Lint findings on main** (surfaced by WS-7's golangci-lint; main lint check is
+  red until cleared):
+  1. `internal/podruntime/podruntime.go` + `_test.go` — misspell `cancelled`→`canceled`. Owner: **WS-1** (its lane) — apply at WS-1 merge.
+  2. `internal/harness/mock.go:57` — `unused` dead `truncate`. Owner: **WS-1** (touches mock.go) — remove/keep at WS-1 merge.
+  3. `api/v1alpha1/scheme.go:7` — staticcheck `SA1019` `scheme.Builder` deprecated. Owner: orchestrator cleanup / **WS-8** — real fix, not mechanical.
+  4. `internal/github/github_test.go:86` — `QF1002` tagged switch (cosmetic). Owner: **WS-2** (github lane).
+- **WS-7 repo-settings checklist** (human, GitHub UI): branch protection on `main`
+  (require CI + e2e checks), DCO app, merge queue, enable Discussions, CodeQL in
+  Security tab. See WS-7 hand-off for specifics.
