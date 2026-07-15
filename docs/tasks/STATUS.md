@@ -8,8 +8,8 @@ transition; this file is the single glance-view for the sprint.
 |----|-------|-------|-------|---------------|---------|
 | 0  | e2e validation loop | [WS-0](WS-0-e2e-loop.md) | merged | #12 | done — gate live on main |
 | 1  | Egress enforcement | [WS-1](WS-1-egress-enforcement.md) | dispatched | ws1-egress-enforcement | none (human review before merge) |
-| 3  | Postgres store | [WS-3](WS-3-postgres-store.md) | dispatched | ws3-postgres-store | none |
-| 4  | `run logs` | [WS-4](WS-4-run-logs.md) | dispatched | ws4-run-logs | none |
+| 3  | Postgres store | [WS-3](WS-3-postgres-store.md) | merged | #15 | done — pgx/v5 + reconcile-on-boot |
+| 4  | `run logs` | [WS-4](WS-4-run-logs.md) | merged | #14 | done — live-tail streaming |
 | 7  | CI + community | [WS-7](WS-7-ci-community.md) | merged | #13 | done — CI/e2e/CodeQL live on main |
 | 2  | GitHub App tokens | [WS-2](WS-2-github-app.md) | draft | — | WS-1 merged (pod.go); GitHub App created (human) |
 | 5  | Helm chart | [WS-5](WS-5-helm-chart.md) | draft | — | WS-1 merged (manifests settle) |
