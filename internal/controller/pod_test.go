@@ -276,11 +276,28 @@ func TestBuildAgentPod_ProxyUIDSeparation(t *testing.T) {
 	if proxy.SecurityContext.RunAsUser == nil || *proxy.SecurityContext.RunAsUser != proxyUID {
 		t.Errorf("egress-proxy RunAsUser = %v, want %d", proxy.SecurityContext.RunAsUser, proxyUID)
 	}
-	// The runner/harness must NOT be pinned to the proxy uid (it keeps the image
-	// default). If they collided, the uid-match lockdown would not distinguish
-	// them — the core of the boundary.
+	// Every non-proxy container must be pinned to the runner uid. The pin — not
+	// the image's USER — is the boundary: a harness image that baked in
+	// USER 65533 would otherwise inherit the proxy's iptables exemption, and
+	// Kubernetes overrides the image USER with RunAsUser. (The lockdown init
+	// container is the one root exception; it programs the rules and exits.)
+	uidOf := func(c *corev1.Container) int64 {
+		if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil {
+			return -1
+		}
+		return *c.SecurityContext.RunAsUser
+	}
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		if c.Name == ContainerEgressProxy || c.Name == InitEgressLockdown {
+			continue
+		}
+		if got := uidOf(c); got != runnerUID {
+			t.Errorf("init container %q RunAsUser = %d, want pinned runner uid %d", c.Name, got, runnerUID)
+		}
+	}
 	h := containerByName(pod.Spec.Containers, ContainerHarness)
-	if h.SecurityContext != nil && h.SecurityContext.RunAsUser != nil && *h.SecurityContext.RunAsUser == proxyUID {
-		t.Error("harness must not share the egress-proxy uid (would break the lockdown boundary)")
+	if got := uidOf(h); got != runnerUID {
+		t.Errorf("harness RunAsUser = %d, want pinned runner uid %d (an unpinned harness image could set USER %d and bypass the lockdown)", got, runnerUID, proxyUID)
 	}
 }

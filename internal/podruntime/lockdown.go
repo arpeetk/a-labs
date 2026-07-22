@@ -94,10 +94,12 @@ func RunLockdown(ctx context.Context, out io.Writer, cfg LockdownConfig) error {
 		return err
 	}
 	// IPv6: if the stack is present, lock it down too so the runner cannot use an
-	// IPv6 default route to escape. A missing ip6tables binary is not fatal
-	// (IPv4-only nodes, e.g. many kind setups) — but if the binary IS present and
-	// applying the rules fails, we fail closed: a half-applied IPv6 chain that
-	// left the default at ACCEPT would be an exfil path.
+	// IPv6 default route to escape. A rule-application failure fails closed (a
+	// half-applied chain left at default-ACCEPT is an exfil path) — and so does
+	// a live stack with no binary to program it: skipping then would leave the
+	// runner a wide-open v6 route the IPv4 rules say nothing about, and the
+	// (IPv4-only) canary cannot catch it. Only a genuinely disabled IPv6 stack
+	// skips the lockdown.
 	if cfg.IPv6 {
 		if bin := ip6tablesBinary(); bin != "" {
 			if err := applyRules(ctx, em, bin, iptablesRules(cfg, rejectIPv6)); err != nil {
@@ -105,8 +107,12 @@ func RunLockdown(ctx context.Context, out io.Writer, cfg LockdownConfig) error {
 				return fmt.Errorf("egress-lockdown ip6tables: %w", err)
 			}
 			em.Message("egress-lockdown: ip6tables OUTPUT default-reject installed")
+		} else if ipv6StackPresent() {
+			err := fmt.Errorf("egress-lockdown: IPv6 stack present but no ip6tables binary found; refusing to leave IPv6 egress open")
+			em.Errorf(err.Error())
+			return err
 		} else {
-			em.Message("egress-lockdown: no ip6tables binary found; IPv4-only lockdown")
+			em.Message("egress-lockdown: IPv6 stack disabled; IPv4-only lockdown")
 		}
 	}
 	em.Message("egress-lockdown: OUTPUT default-reject installed; runner egress restricted to the proxy")
@@ -137,8 +143,9 @@ func iptablesBinary() string {
 	return "iptables-nft" // let exec surface a clear not-found error
 }
 
-// ip6tablesBinary returns the IPv6 binary if present, else "".
-func ip6tablesBinary() string {
+// ip6tablesBinary returns the IPv6 binary if present, else "". A package var
+// so tests can simulate a host without one.
+var ip6tablesBinary = func() string {
 	if b := os.Getenv("WREN_IP6TABLES_BIN"); b != "" {
 		return b
 	}
@@ -148,4 +155,13 @@ func ip6tablesBinary() string {
 		}
 	}
 	return ""
+}
+
+// ipv6StackPresent reports whether the pod's network namespace has a live IPv6
+// stack. The kernel creates /proc/net/if_inet6 when the stack registers (it
+// lists at least ::1) and omits it when IPv6 is disabled — e.g. via
+// ipv6.disable=1. A package var so tests can simulate dual-stack hosts.
+var ipv6StackPresent = func() bool {
+	_, err := os.Stat("/proc/net/if_inet6")
+	return err == nil
 }

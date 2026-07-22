@@ -81,6 +81,15 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	pod, err := r.ensurePod(ctx, &run)
 	if err != nil {
+		// An admission rejection (Forbidden) is permanent: no pod with this
+		// spec will ever be admitted — e.g. the privileged egress-lockdown init
+		// container on GKE Autopilot or in a PSA-restricted namespace. Fail the
+		// run deterministically with the escape hatch, rather than requeuing
+		// forever while the run hangs in Provisioning.
+		if apierrors.IsForbidden(err) {
+			return r.setPhase(ctx, &run, wrenv1.PhaseFailed, "PodAdmissionForbidden",
+				"agent pod rejected by apiserver admission (Forbidden): this cluster may forbid the privileged egress-lockdown init container — run the operator with --egress-enforcement=off (weaker: the runner can bypass the proxy) or use a cluster/namespace that admits it")
+		}
 		return ctrl.Result{}, fmt.Errorf("ensure pod: %w", err)
 	}
 

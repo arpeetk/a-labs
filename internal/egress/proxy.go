@@ -87,6 +87,12 @@ func New(cfg Config) (*Proxy, error) {
 				req.URL.Host = target.Host
 				req.Host = target.Host
 				req.URL.Path = singleJoin(target.Path, strings.TrimPrefix(req.URL.Path, prefix))
+				// The proxy is the sole credential authority on the reverse
+				// path too. Apply uses Set — it replaces only its OWN header,
+				// so an inbound Authorization would otherwise ride the
+				// x-api-key (Anthropic) route upstream untouched. Scrub first,
+				// then inject.
+				scrubForwardHeaders(req.Header)
 				if auth != nil {
 					auth.Apply(req)
 				}

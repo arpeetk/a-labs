@@ -4,6 +4,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -49,7 +50,10 @@ func main() {
 	case controller.EgressEnforcementIptables, controller.EgressEnforcementOff:
 		podCfg.EgressEnforcement = controller.EgressEnforcement(egressEnforcement)
 	default:
-		ctrl.Log.WithName("setup").Error(nil, "invalid --egress-enforcement (want iptables|off)", "value", egressEnforcement)
+		// ctrl.Log has no sink until SetLogger runs below — a log line here is
+		// silently discarded. Write to stderr so an invalid flag is not a
+		// silent CrashLoopBackOff.
+		fmt.Fprintf(os.Stderr, "wren-operator: invalid --egress-enforcement %q (want iptables|off)\n", egressEnforcement)
 		os.Exit(1)
 	}
 

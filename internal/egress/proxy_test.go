@@ -152,6 +152,51 @@ func TestReverseRouteHeaderAuth(t *testing.T) {
 	}
 }
 
+// A runner-supplied credential must never ride a credentialed reverse route
+// upstream: Apply only overwrites its own header (x-api-key here), so without
+// scrubbing an inbound Authorization would leak to api.anthropic.com.
+func TestReverseRouteScrubsInboundCreds(t *testing.T) {
+	var gotAuth, gotProxyAuth, gotKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotProxyAuth = r.Header.Get("Proxy-Authorization")
+		gotKey = r.Header.Get("x-api-key")
+	}))
+	defer upstream.Close()
+
+	p, err := New(Config{Routes: []Route{{
+		Prefix: "/anthropic/", Upstream: upstream.URL, Auth: HeaderAuth{Key: "x-api-key", Value: "sk-secret"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(p)
+	defer front.Close()
+
+	req, err := http.NewRequest(http.MethodPost, front.URL+"/anthropic/v1/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer runner-smuggled")
+	req.Header.Set("Proxy-Authorization", "Basic abc")
+	req.Header.Set("x-api-key", "runner-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "" {
+		t.Errorf("inbound Authorization leaked upstream on reverse route: %q", gotAuth)
+	}
+	if gotProxyAuth != "" {
+		t.Errorf("inbound Proxy-Authorization leaked upstream on reverse route: %q", gotProxyAuth)
+	}
+	if gotKey != "sk-secret" {
+		t.Errorf("x-api-key = %q, want the proxy-injected credential (runner's overwritten)", gotKey)
+	}
+}
+
 func TestForwardProxyAllowlist(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "upstream-ok")

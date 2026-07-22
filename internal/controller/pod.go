@@ -21,10 +21,13 @@ const (
 	InitEgressLockdown    = "egress-lockdown"
 	InitHydrate           = "hydrate"
 
-	// UIDs (spec §5.6). The runner and every runner-side container use the image
-	// default (runnerUID); the egress-proxy gets a distinct uid so the lockdown
-	// iptables rules can uid-match it (accept the proxy's egress, reject the
-	// runner's). Never collapse these two — the uid gap is the security boundary.
+	// UIDs (spec §5.6). Every runner-side container is pinned to runnerUID; the
+	// egress-proxy is pinned to proxyUID so the lockdown iptables rules can
+	// uid-match it (accept the proxy's egress, reject the runner's). Never
+	// collapse these two — the uid gap is the security boundary. The pin (not
+	// the image's USER) is what makes it hold: Kubernetes overrides the image
+	// USER with RunAsUser, so a project-supplied harness image cannot bake in
+	// USER 65533 and inherit the proxy's iptables exemption.
 	runnerUID int64 = 65532
 	proxyUID  int64 = 65533
 
@@ -161,12 +164,16 @@ func resources(rs wrenv1.ResourceSpec) corev1.ResourceRequirements {
 }
 
 // hardened returns the per-container security context applied to every
-// container in the agent pod (spec §5.6, pod hardening).
+// container in the agent pod (spec §5.6, pod hardening). It pins the runner
+// uid so the uid-match lockdown boundary holds by construction: no container
+// image can choose the egress-proxy's uid via its own USER. The egress-proxy
+// overrides the pin with proxyUID (see buildAgentPod).
 func hardened(readOnlyRoot bool) *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		AllowPrivilegeEscalation: ptr(false),
 		ReadOnlyRootFilesystem:   ptr(readOnlyRoot),
 		RunAsNonRoot:             ptr(true),
+		RunAsUser:                ptr(runnerUID),
 		Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 		SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
 	}
@@ -263,8 +270,7 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 	egressProxyEnv = append(egressProxyEnv, secretEnv("ANTHROPIC_API_KEY", cfg.AnthropicKeySecret, "key")...)
 
 	// The egress-proxy runs as a distinct uid (proxyUID) so the lockdown iptables
-	// rules can uid-match it. Its container security context is the hardened
-	// baseline with RunAsUser pinned — do not let it default to the runner uid.
+	// rules can uid-match it: override the runner-uid pin from hardened().
 	proxySecCtx := hardened(true)
 	proxySecCtx.RunAsUser = ptr(proxyUID)
 	egressProxy := corev1.Container{

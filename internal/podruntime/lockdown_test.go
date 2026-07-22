@@ -77,6 +77,86 @@ func TestRunLockdownFailsClosedOnExecError(t *testing.T) {
 	}
 }
 
+// stubIPv6 fixes the IPv6 inputs (binary presence, stack presence) for a test
+// and restores them on cleanup.
+func stubIPv6(t *testing.T, bin string, stack bool) {
+	t.Helper()
+	restoreBin, restoreStack := ip6tablesBinary, ipv6StackPresent
+	ip6tablesBinary = func() string { return bin }
+	ipv6StackPresent = func() bool { return stack }
+	t.Cleanup(func() { ip6tablesBinary, ipv6StackPresent = restoreBin, restoreStack })
+}
+
+func okExec(t *testing.T, calls *[][]string) {
+	t.Helper()
+	restore := lockdownExec
+	lockdownExec = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		*calls = append(*calls, append([]string{name}, args...))
+		return nil, nil
+	}
+	t.Cleanup(func() { lockdownExec = restore })
+}
+
+func TestRunLockdownIPv6StackWithoutBinaryFailsClosed(t *testing.T) {
+	// A dual-stack pod whose image lacks ip6tables must NOT proceed: the runner
+	// could egress over IPv6, and the IPv4-only canary would never notice.
+	var calls [][]string
+	okExec(t, &calls)
+	stubIPv6(t, "", true)
+
+	var out bytes.Buffer
+	err := RunLockdown(context.Background(), &out, LockdownConfig{EgressPort: "8099", ProxyUID: "65533", IPv6: true})
+	if err == nil {
+		t.Fatal("expected fail-closed when IPv6 stack is live but ip6tables is missing")
+	}
+	if !strings.Contains(out.String(), "IPv6") {
+		t.Errorf("expected the failure to mention IPv6, got:\n%s", out.String())
+	}
+	// The IPv4 lockdown must already be in place (fail-closed ordering), but no
+	// further container may start — RunLockdown's error aborts the pod.
+	if len(calls) == 0 {
+		t.Error("expected IPv4 rules applied before the IPv6 failure")
+	}
+}
+
+func TestRunLockdownIPv6DisabledWithoutBinarySkips(t *testing.T) {
+	// A genuinely v6-disabled netns (no /proc/net/if_inet6) has no v6 route to
+	// escape through — the IPv4-only lockdown is complete.
+	var calls [][]string
+	okExec(t, &calls)
+	stubIPv6(t, "", false)
+
+	var out bytes.Buffer
+	if err := RunLockdown(context.Background(), &out, LockdownConfig{EgressPort: "8099", ProxyUID: "65533", IPv6: true}); err != nil {
+		t.Fatalf("RunLockdown with disabled IPv6 stack: %v", err)
+	}
+	if !strings.Contains(out.String(), "IPv4-only lockdown") {
+		t.Errorf("expected IPv4-only message, got:\n%s", out.String())
+	}
+}
+
+func TestRunLockdownAppliesIPv6RulesWhenBinaryPresent(t *testing.T) {
+	var calls [][]string
+	okExec(t, &calls)
+	stubIPv6(t, "ip6tables-nft", true)
+
+	var out bytes.Buffer
+	if err := RunLockdown(context.Background(), &out, LockdownConfig{EgressPort: "8099", ProxyUID: "65533", IPv6: true}); err != nil {
+		t.Fatalf("RunLockdown: %v", err)
+	}
+	wantV4 := iptablesRules(LockdownConfig{EgressPort: "8099", ProxyUID: "65533"}, rejectIPv4)
+	wantV6 := iptablesRules(LockdownConfig{EgressPort: "8099", ProxyUID: "65533"}, rejectIPv6)
+	if len(calls) != len(wantV4)+len(wantV6) {
+		t.Fatalf("applied %d rules, want %d (v4 %d + v6 %d)", len(calls), len(wantV4)+len(wantV6), len(wantV4), len(wantV6))
+	}
+	// The v6 REJECT must use the v6 reject type — a rejected rule would leave
+	// the v6 chain at default-ACCEPT.
+	last := calls[len(calls)-1]
+	if !contains(last, "icmp6-port-unreachable") {
+		t.Errorf("final v6 rule = %v, want reject-with icmp6-port-unreachable", last)
+	}
+}
+
 func TestDefaultLockdownConfigDefaults(t *testing.T) {
 	t.Setenv(envEgressPort, "")
 	t.Setenv(envProxyUID, "")
