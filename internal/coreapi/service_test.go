@@ -232,7 +232,7 @@ func TestListRunsScope(t *testing.T) {
 // (the durability hole WS-3 closes): the AgentRun CR still exists in the
 // cluster, so reconcile-on-boot must re-learn the run with the CR's phase.
 func TestReconcileFromCluster(t *testing.T) {
-	svc, st, fl := newService(t)
+	svc, _, fl := newService(t)
 	ctx := context.Background()
 	seedProject(t, svc, &store.Project{Name: "p", Repo: "x/y"})
 	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "p", User: "u@x", Prompt: "hi"})
@@ -242,9 +242,8 @@ func TestReconcileFromCluster(t *testing.T) {
 	// Operator advanced the run; then the store is wiped (fresh backing store on
 	// restart / mid-migration). The CR remains in the cluster.
 	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning, RestartCount: 2})
-	if err := st.UpdateRun(ctx, &store.Run{ID: run.ID}); err == nil {
-		// Wipe by constructing a new store and re-pointing the service at it.
-	}
+	// Wipe the store by constructing a new one and re-pointing the service at
+	// it (a fresh backing store on restart / mid-migration). The CR remains.
 	fresh := store.NewMemory()
 	svc.store = fresh
 
