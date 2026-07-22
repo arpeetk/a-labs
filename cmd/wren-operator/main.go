@@ -4,6 +4,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,10 +38,24 @@ func main() {
 	flag.StringVar(&podCfg.GitHubTokenSecret, "github-token-secret", "wren-github-token", "Secret (key \"token\") injected as GITHUB_TOKEN into the egress-proxy; empty to disable")
 	flag.StringVar(&podCfg.AnthropicKeySecret, "anthropic-key-secret", "wren-anthropic-key", "Secret (key \"key\") injected as ANTHROPIC_API_KEY into the egress-proxy; empty to disable")
 	flag.StringVar(&podCfg.EgressPort, "egress-port", "", "egress-proxy localhost port (default 8099)")
+	var egressEnforcement string
+	flag.StringVar(&egressEnforcement, "egress-enforcement", string(controller.EgressEnforcementIptables),
+		"egress bypass enforcement: iptables (privileged lockdown init container, default) | off (escape hatch for clusters that forbid privileged init containers, e.g. GKE Autopilot)")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+
+	switch controller.EgressEnforcement(egressEnforcement) {
+	case controller.EgressEnforcementIptables, controller.EgressEnforcementOff:
+		podCfg.EgressEnforcement = controller.EgressEnforcement(egressEnforcement)
+	default:
+		// ctrl.Log has no sink until SetLogger runs below — a log line here is
+		// silently discarded. Write to stderr so an invalid flag is not a
+		// silent CrashLoopBackOff.
+		fmt.Fprintf(os.Stderr, "wren-operator: invalid --egress-enforcement %q (want iptables|off)\n", egressEnforcement)
+		os.Exit(1)
+	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 	setupLog := ctrl.Log.WithName("setup")

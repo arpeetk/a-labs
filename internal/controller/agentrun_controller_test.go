@@ -2,15 +2,19 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
 )
@@ -251,5 +255,92 @@ func TestReconcileTerminalIsNoop(t *testing.T) {
 	err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-0"}, &pod)
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("expected no pod for terminal run, got err=%v", err)
+	}
+}
+
+// findCond returns the condition of a given type from a run's status, or nil.
+func findCond(run *wrenv1.AgentRun, condType string) *metav1.Condition {
+	for i := range run.Status.Conditions {
+		if run.Status.Conditions[i].Type == condType {
+			return &run.Status.Conditions[i]
+		}
+	}
+	return nil
+}
+
+func TestReconcile_EgressEnforcementOff_WritesDisabledCondition(t *testing.T) {
+	run := testRun()
+	r, c := newReconciler(t, run)
+	r.PodConfig.EgressEnforcement = EgressEnforcementOff
+
+	reconcile(t, r, run) // admit
+	reconcile(t, r, run) // provision (sets condition + creates children)
+
+	cond := findCond(getRun(t, c, run), egressEnforcementConditionType)
+	if cond == nil {
+		t.Fatal("expected EgressEnforcement condition")
+	}
+	if cond.Status != metav1.ConditionFalse || cond.Reason != "Disabled" {
+		t.Errorf("condition = %s/%s, want False/Disabled", cond.Status, cond.Reason)
+	}
+}
+
+func TestReconcile_EgressEnforcementIptables_WritesEnforcedCondition(t *testing.T) {
+	run := testRun()
+	r, c := newReconciler(t, run) // default PodConfig → iptables
+
+	reconcile(t, r, run) // admit
+	reconcile(t, r, run) // provision
+
+	cond := findCond(getRun(t, c, run), egressEnforcementConditionType)
+	if cond == nil {
+		t.Fatal("expected EgressEnforcement condition")
+	}
+	if cond.Status != metav1.ConditionTrue || cond.Reason != "Iptables" {
+		t.Errorf("condition = %s/%s, want True/Iptables", cond.Status, cond.Reason)
+	}
+}
+
+// A pod the apiserver refuses to admit (e.g. the privileged egress-lockdown
+// init container on GKE Autopilot or a PSA-restricted namespace) must fail the
+// run deterministically — requeuing would hang it in Provisioning forever.
+func TestReconcile_PodCreateForbidden_FailsDeterministically(t *testing.T) {
+	run := testRun()
+	s := testScheme(t)
+	c := fake.NewClientBuilder().
+		WithScheme(s).
+		WithObjects(run).
+		WithStatusSubresource(&wrenv1.AgentRun{}, &corev1.Pod{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, cli client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, isPod := obj.(*corev1.Pod); isPod {
+					return apierrors.NewForbidden(corev1.Resource("pods"), obj.GetName(),
+						errors.New("admission webhook denied: privileged init containers are not allowed"))
+				}
+				return cli.Create(ctx, obj, opts...)
+			},
+		}).
+		Build()
+	r := &AgentRunReconciler{Client: c, Scheme: s, PodConfig: PodConfig{Images: testImages}}
+
+	reconcile(t, r, run) // admit
+	reconcile(t, r, run) // provision: pod create hits Forbidden
+
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseFailed {
+		t.Fatalf("phase = %q, want Failed (Forbidden is permanent; requeueing cannot fix it)", got.Status.Phase)
+	}
+	cond := findCond(got, "Ready")
+	if cond == nil || cond.Reason != "PodAdmissionForbidden" {
+		t.Fatalf("Ready condition = %+v, want reason PodAdmissionForbidden", cond)
+	}
+	if !strings.Contains(cond.Message, "--egress-enforcement=off") {
+		t.Errorf("message should point at the escape hatch, got: %s", cond.Message)
+	}
+
+	// Terminal: a further reconcile is a no-op (no error, no flap).
+	reconcile(t, r, run)
+	if got := getRun(t, c, run); got.Status.Phase != wrenv1.PhaseFailed {
+		t.Errorf("phase flapped after terminal failure: %q", got.Status.Phase)
 	}
 }

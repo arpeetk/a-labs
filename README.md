@@ -116,7 +116,7 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 |---|---|---|
 | Task → PR (Journey A) | ✅ real Claude agent → PR, on kind **and** GKE | same |
 | Crash-resume | ✅ retries infra failures, fails fast on deterministic ones | same |
-| Egress-proxy | ✅ injects creds + allowlist; runner holds no secret | + **bypass enforcement** (NetworkPolicy/iptables) |
+| Egress-proxy | ✅ injects creds + allowlist; runner holds no secret; **bypass enforced** (iptables uid-match; `--egress-enforcement=off` escape hatch) | GKE Standard verification + FQDN NetworkPolicy |
 | Control plane | ✅ runs locally against the cluster | in-cluster Deployments |
 | GitHub creds | ✅ PAT in the proxy secret | per-run **GitHub App** tokens |
 | API transport | HTTP/JSON | gRPC + Connect |
@@ -124,8 +124,8 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Auth | `X-Wren-User` header | OIDC / SSO |
 | Isolation | hardened `runc` pods | + gVisor/Kata (deferred, M4) |
 
-Next up: (1) in-cluster control plane + GitHub App, then (2) egress bypass
-enforcement.
+Next up: (1) in-cluster control plane + GitHub App. Egress bypass enforcement is
+now in place (iptables uid-match lockdown; verified on kind).
 
 ## Repository layout
 

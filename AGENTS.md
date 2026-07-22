@@ -218,9 +218,14 @@ real PR without touching github.com.
 - **Harness:** the **mock** adapter (deterministic, no key) is the default; the
   real Claude Code adapter needs `ANTHROPIC_API_KEY` + the egress path.
 - **Egress-proxy:** real — enforces the allowlist and injects github/anthropic
-  credentials (`internal/egress`); the runner holds no token. Not yet enforced:
-  the runner can *bypass* it (needs iptables uid-redirect or egress pod +
-  NetworkPolicy). **checkpointer / gateway** sidecars are still liveness stand-ins.
+  credentials (`internal/egress`); the runner holds no token. Bypass is
+  **enforced** (WS-1): an `egress-lockdown` init container iptables-rejects all
+  runner egress except via the proxy's uid (runner/proxy uids are pinned in the
+  pod spec; a startup canary proves it per run). `--egress-enforcement=off` is
+  the escape hatch for clusters that forbid privileged init containers (e.g.
+  GKE Autopilot) — `config/netpol/` has a weaker NetworkPolicy layer for that
+  path. Residual: a runc escape to the node (gVisor/Kata, M4).
+  **checkpointer / gateway** sidecars are still liveness stand-ins.
 - **Transport:** control-plane API is HTTP/JSON (target: gRPC + Connect).
 - **Store:** in-memory (default) **or** Postgres (`--store=postgres` + `DATABASE_URL`, `internal/store.Postgres`; pgx/v5, embedded migrations, reconcile-on-boot). Managed Cloud SQL provisioning is the remaining target (WS-5 Helm).
 - **Auth:** `X-Wren-User` header (target: OIDC/SSO).

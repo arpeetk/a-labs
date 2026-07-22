@@ -53,7 +53,12 @@ func TestConnectTunnelsAllowed(t *testing.T) {
 		}
 		_, _ = io.Copy(c, c)
 	}()
-	host, _, _ := net.SplitHostPort(ln.Addr().String())
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	// CONNECT is restricted to :443 in production; point the check at this test's
+	// ephemeral listener port for the happy-path tunnel assertion.
+	prevPort := connectPort
+	connectPort = port
+	defer func() { connectPort = prevPort }()
 
 	p, _ := New(Config{Allowlist: []string{host}})
 	front := httptest.NewServer(p)
@@ -147,6 +152,51 @@ func TestReverseRouteHeaderAuth(t *testing.T) {
 	}
 }
 
+// A runner-supplied credential must never ride a credentialed reverse route
+// upstream: Apply only overwrites its own header (x-api-key here), so without
+// scrubbing an inbound Authorization would leak to api.anthropic.com.
+func TestReverseRouteScrubsInboundCreds(t *testing.T) {
+	var gotAuth, gotProxyAuth, gotKey string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotProxyAuth = r.Header.Get("Proxy-Authorization")
+		gotKey = r.Header.Get("x-api-key")
+	}))
+	defer upstream.Close()
+
+	p, err := New(Config{Routes: []Route{{
+		Prefix: "/anthropic/", Upstream: upstream.URL, Auth: HeaderAuth{Key: "x-api-key", Value: "sk-secret"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(p)
+	defer front.Close()
+
+	req, err := http.NewRequest(http.MethodPost, front.URL+"/anthropic/v1/messages", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer runner-smuggled")
+	req.Header.Set("Proxy-Authorization", "Basic abc")
+	req.Header.Set("x-api-key", "runner-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "" {
+		t.Errorf("inbound Authorization leaked upstream on reverse route: %q", gotAuth)
+	}
+	if gotProxyAuth != "" {
+		t.Errorf("inbound Proxy-Authorization leaked upstream on reverse route: %q", gotProxyAuth)
+	}
+	if gotKey != "sk-secret" {
+		t.Errorf("x-api-key = %q, want the proxy-injected credential (runner's overwritten)", gotKey)
+	}
+}
+
 func TestForwardProxyAllowlist(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "upstream-ok")
@@ -213,5 +263,59 @@ func TestNoMatchingRoute(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// --- WS-1: proxy tightening ---
+
+func TestConnectPortRestrictedTo443(t *testing.T) {
+	// Host is allowed, but the port is not 443 → forbidden (no arbitrary-port
+	// tunnels through the proxy).
+	p, _ := New(Config{Allowlist: []string{"github.com"}})
+	front := httptest.NewServer(p)
+	defer front.Close()
+	resp := connectVia(t, front.URL, "github.com:22")
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("CONNECT to :22 = %d, want 403 (only :443 allowed)", resp.StatusCode)
+	}
+}
+
+func TestForwardStripsInboundCredsAndHopByHop(t *testing.T) {
+	var gotAuth, gotProxyAuth, gotConnClose string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotProxyAuth = r.Header.Get("Proxy-Authorization")
+		// A hop-by-hop header named in Connection must have been removed.
+		gotConnClose = r.Header.Get("X-Hop")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+	upURL, _ := url.Parse(upstream.URL)
+
+	p, _ := New(Config{Allowlist: []string{upURL.Hostname()}})
+	front := httptest.NewServer(p)
+	defer front.Close()
+	frontURL, _ := url.Parse(front.URL)
+	proxied := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(frontURL)}}
+
+	req, _ := http.NewRequest("GET", upstream.URL+"/x", nil)
+	req.Header.Set("Authorization", "Bearer runner-smuggled")
+	req.Header.Set("Proxy-Authorization", "Basic abc")
+	req.Header.Set("X-Hop", "should-be-dropped")
+	req.Header.Set("Connection", "X-Hop")
+	resp, err := proxied.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "" {
+		t.Errorf("inbound Authorization leaked upstream: %q", gotAuth)
+	}
+	if gotProxyAuth != "" {
+		t.Errorf("inbound Proxy-Authorization leaked upstream: %q", gotProxyAuth)
+	}
+	if gotConnClose != "" {
+		t.Errorf("Connection-listed hop-by-hop header leaked upstream: %q", gotConnClose)
 	}
 }

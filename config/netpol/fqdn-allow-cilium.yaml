@@ -1,0 +1,41 @@
+# EXAMPLE Cilium FQDN egress policy (NOT applied by default; requires Cilium /
+# GKE Dataplane V2). Plain Kubernetes NetworkPolicy cannot match on FQDN.
+#
+# This narrows agent-pod egress to the known Wren upstreams by DNS name. Combined
+# with the in-pod iptables lockdown (primary) and default-deny-egress.yaml
+# (backstop), it demonstrates FQDN-level allowlisting where the dataplane
+# supports it. Tune the FQDNs to your egress-proxy's configured allowlist and
+# adjust the endpointSelector to your run namespaces.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: wren-agent-egress-fqdn
+  labels:
+    app.kubernetes.io/part-of: wren
+spec:
+  endpointSelector:
+    matchLabels:
+      wren.dev/component: agent
+  egress:
+    # DNS to kube-dns, with L7 visibility so Cilium can learn the FQDN→IP mapping
+    # that toFQDNs enforces below.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              - matchPattern: "*"
+    # Egress only to the Wren upstreams, port 443.
+    - toFQDNs:
+        - matchName: github.com
+        - matchName: api.github.com
+        - matchName: api.anthropic.com
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP

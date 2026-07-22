@@ -64,6 +64,13 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return r.setPhase(ctx, &run, wrenv1.PhasePending, "Admitted", "run accepted")
 	}
 
+	// Record the egress-enforcement posture on the run so an operator can see,
+	// per run, whether the runner is physically confined to the proxy
+	// (EgressEnforcement=True/Iptables) or free to bypass it (False/Disabled).
+	if err := r.ensureEgressCondition(ctx, &run); err != nil {
+		return ctrl.Result{}, fmt.Errorf("record egress condition: %w", err)
+	}
+
 	// Ensure the durable prerequisites exist before the pod.
 	if err := r.ensurePVC(ctx, &run); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensure workspace pvc: %w", err)
@@ -74,11 +81,63 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	pod, err := r.ensurePod(ctx, &run)
 	if err != nil {
+		// An admission rejection (Forbidden) is permanent: no pod with this
+		// spec will ever be admitted — e.g. the privileged egress-lockdown init
+		// container on GKE Autopilot or in a PSA-restricted namespace. Fail the
+		// run deterministically with the escape hatch, rather than requeuing
+		// forever while the run hangs in Provisioning.
+		if apierrors.IsForbidden(err) {
+			return r.setPhase(ctx, &run, wrenv1.PhaseFailed, "PodAdmissionForbidden",
+				"agent pod rejected by apiserver admission (Forbidden): this cluster may forbid the privileged egress-lockdown init container — run the operator with --egress-enforcement=off (weaker: the runner can bypass the proxy) or use a cluster/namespace that admits it")
+		}
 		return ctrl.Result{}, fmt.Errorf("ensure pod: %w", err)
 	}
 
 	lg.V(1).Info("reconciled", "phase", run.Status.Phase, "pod", pod.Name, "podPhase", pod.Status.Phase)
 	return r.reconcilePodState(ctx, &run, pod)
+}
+
+// egressEnforcementConditionType is the condition type recording the egress
+// bypass-prevention posture (spec §5.6, WS-1).
+const egressEnforcementConditionType = "EgressEnforcement"
+
+// ensureEgressCondition records an EgressEnforcement=Disabled condition when the
+// operator runs with --egress-enforcement=off, so the weaker posture is visible
+// on `wren run get`. With enforcement on (the default) it sets Enforced=True.
+// Idempotent: it persists only when the condition would actually change.
+func (r *AgentRunReconciler) ensureEgressCondition(ctx context.Context, run *wrenv1.AgentRun) error {
+	var want metav1.Condition
+	if r.PodConfig.enforcementMode() == EgressEnforcementOff {
+		want = metav1.Condition{
+			Type:    egressEnforcementConditionType,
+			Status:  metav1.ConditionFalse,
+			Reason:  "Disabled",
+			Message: "egress bypass enforcement disabled (--egress-enforcement=off); the runner can bypass the proxy",
+		}
+	} else {
+		want = metav1.Condition{
+			Type:    egressEnforcementConditionType,
+			Status:  metav1.ConditionTrue,
+			Reason:  "Iptables",
+			Message: "egress locked down via iptables uid-match; the runner cannot bypass the proxy",
+		}
+	}
+	if existing := findCondition(run, egressEnforcementConditionType); existing != nil &&
+		existing.Status == want.Status && existing.Reason == want.Reason {
+		return nil
+	}
+	setCondition(run, want)
+	return r.Status().Update(ctx, run)
+}
+
+// findCondition returns the condition of the given type, or nil.
+func findCondition(run *wrenv1.AgentRun, condType string) *metav1.Condition {
+	for i := range run.Status.Conditions {
+		if run.Status.Conditions[i].Type == condType {
+			return &run.Status.Conditions[i]
+		}
+	}
+	return nil
 }
 
 // ensurePVC creates the workspace PVC if it does not already exist. The PVC name

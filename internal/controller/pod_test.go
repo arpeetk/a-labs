@@ -77,8 +77,9 @@ func TestBuildAgentPod(t *testing.T) {
 		t.Error("harness must run as non-root")
 	}
 
-	// Native sidecars + hydrate init, in order.
-	wantInit := []string{ContainerEgressProxy, InitHydrate, ContainerCheckpointer, ContainerGateway}
+	// egress-lockdown (enforcement default=iptables) runs first, then native
+	// sidecars + hydrate init, in order.
+	wantInit := []string{InitEgressLockdown, ContainerEgressProxy, InitHydrate, ContainerCheckpointer, ContainerGateway}
 	if len(pod.Spec.InitContainers) != len(wantInit) {
 		t.Fatalf("initContainers = %d, want %d", len(pod.Spec.InitContainers), len(wantInit))
 	}
@@ -159,4 +160,144 @@ func volumeMount(c corev1.Container, name string) *corev1.VolumeMount {
 		}
 	}
 	return nil
+}
+
+// --- WS-1: egress enforcement flag matrix, UIDs, caps ---
+
+func TestBuildAgentPod_EnforcementIptables_LockdownPresent(t *testing.T) {
+	for _, mode := range []EgressEnforcement{"", EgressEnforcementIptables} {
+		run := testRun()
+		pod := buildAgentPod(run, PodConfig{Images: testImages, EgressEnforcement: mode})
+
+		lock := containerByName(pod.Spec.InitContainers, InitEgressLockdown)
+		if lock == nil {
+			t.Fatalf("mode=%q: expected egress-lockdown init container", mode)
+		}
+		// It must be FIRST — iptables in place before anything touches the net.
+		if pod.Spec.InitContainers[0].Name != InitEgressLockdown {
+			t.Errorf("mode=%q: egress-lockdown must be the first init container, got %q", mode, pod.Spec.InitContainers[0].Name)
+		}
+		// Runs the lockdown role off the runtime image.
+		if lock.Image != testImages.Runtime {
+			t.Errorf("mode=%q: lockdown image = %q, want runtime image", mode, lock.Image)
+		}
+		if len(lock.Args) != 1 || lock.Args[0] != InitEgressLockdown {
+			t.Errorf("mode=%q: lockdown args = %v, want [%s]", mode, lock.Args, InitEgressLockdown)
+		}
+		// Not a sidecar — it runs to completion.
+		if lock.RestartPolicy != nil {
+			t.Errorf("mode=%q: lockdown must run-to-completion, not be a sidecar", mode)
+		}
+
+		// Security context: root + NET_ADMIN/NET_RAW only, no priv-esc, seccomp.
+		sc := lock.SecurityContext
+		if sc == nil {
+			t.Fatalf("mode=%q: lockdown missing securityContext", mode)
+		}
+		if sc.RunAsNonRoot == nil || *sc.RunAsNonRoot {
+			t.Errorf("mode=%q: lockdown must run as root (RunAsNonRoot=false)", mode)
+		}
+		if sc.RunAsUser == nil || *sc.RunAsUser != 0 {
+			t.Errorf("mode=%q: lockdown RunAsUser = %v, want 0", mode, sc.RunAsUser)
+		}
+		if sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+			t.Errorf("mode=%q: lockdown must not allow privilege escalation", mode)
+		}
+		if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+			t.Errorf("mode=%q: lockdown must keep the runtime-default seccomp profile", mode)
+		}
+		if sc.Capabilities == nil {
+			t.Fatalf("mode=%q: lockdown missing capabilities", mode)
+		}
+		if len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
+			t.Errorf("mode=%q: lockdown must Drop ALL, got %v", mode, sc.Capabilities.Drop)
+		}
+		wantAdd := map[corev1.Capability]bool{"NET_ADMIN": false, "NET_RAW": false}
+		for _, c := range sc.Capabilities.Add {
+			if _, ok := wantAdd[c]; !ok {
+				t.Errorf("mode=%q: unexpected added capability %q", mode, c)
+			}
+			wantAdd[c] = true
+		}
+		for c, seen := range wantAdd {
+			if !seen {
+				t.Errorf("mode=%q: lockdown missing capability %q", mode, c)
+			}
+		}
+
+		// Carries the proxy port + uid the iptables rules match on.
+		if v, _ := envValue(lock, "WREN_PROXY_UID"); v.Value != "65533" {
+			t.Errorf("mode=%q: lockdown WREN_PROXY_UID = %q, want 65533", mode, v.Value)
+		}
+		if v, _ := envValue(lock, "WREN_EGRESS_PORT"); v.Value == "" {
+			t.Errorf("mode=%q: lockdown missing WREN_EGRESS_PORT", mode)
+		}
+
+		// Enforcement-on signals the harness canary via WREN_EXPECT_ENFORCEMENT.
+		h := containerByName(pod.Spec.Containers, ContainerHarness)
+		if v, ok := envValue(h, "WREN_EXPECT_ENFORCEMENT"); !ok || v.Value != "1" {
+			t.Errorf("mode=%q: harness WREN_EXPECT_ENFORCEMENT = %q,%v, want 1,true", mode, v.Value, ok)
+		}
+	}
+}
+
+func TestBuildAgentPod_EnforcementOff_LockdownAbsent(t *testing.T) {
+	run := testRun()
+	pod := buildAgentPod(run, PodConfig{Images: testImages, EgressEnforcement: EgressEnforcementOff})
+
+	if lock := containerByName(pod.Spec.InitContainers, InitEgressLockdown); lock != nil {
+		t.Error("enforcement=off must omit the egress-lockdown init container")
+	}
+	// Original init order preserved (no lockdown prepended).
+	wantInit := []string{ContainerEgressProxy, InitHydrate, ContainerCheckpointer, ContainerGateway}
+	if len(pod.Spec.InitContainers) != len(wantInit) {
+		t.Fatalf("enforcement=off initContainers = %d, want %d", len(pod.Spec.InitContainers), len(wantInit))
+	}
+	for i, name := range wantInit {
+		if pod.Spec.InitContainers[i].Name != name {
+			t.Errorf("enforcement=off initContainer[%d] = %q, want %q", i, pod.Spec.InitContainers[i].Name, name)
+		}
+	}
+	// Canary must be skipped when there is no lockdown to prove.
+	h := containerByName(pod.Spec.Containers, ContainerHarness)
+	if _, ok := envValue(h, "WREN_EXPECT_ENFORCEMENT"); ok {
+		t.Error("enforcement=off must not set WREN_EXPECT_ENFORCEMENT on the harness")
+	}
+}
+
+func TestBuildAgentPod_ProxyUIDSeparation(t *testing.T) {
+	run := testRun()
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
+
+	proxy := containerByName(pod.Spec.InitContainers, ContainerEgressProxy)
+	if proxy == nil || proxy.SecurityContext == nil {
+		t.Fatal("missing egress-proxy or its securityContext")
+	}
+	if proxy.SecurityContext.RunAsUser == nil || *proxy.SecurityContext.RunAsUser != proxyUID {
+		t.Errorf("egress-proxy RunAsUser = %v, want %d", proxy.SecurityContext.RunAsUser, proxyUID)
+	}
+	// Every non-proxy container must be pinned to the runner uid. The pin — not
+	// the image's USER — is the boundary: a harness image that baked in
+	// USER 65533 would otherwise inherit the proxy's iptables exemption, and
+	// Kubernetes overrides the image USER with RunAsUser. (The lockdown init
+	// container is the one root exception; it programs the rules and exits.)
+	uidOf := func(c *corev1.Container) int64 {
+		if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil {
+			return -1
+		}
+		return *c.SecurityContext.RunAsUser
+	}
+	for i := range pod.Spec.InitContainers {
+		c := &pod.Spec.InitContainers[i]
+		if c.Name == ContainerEgressProxy || c.Name == InitEgressLockdown {
+			continue
+		}
+		if got := uidOf(c); got != runnerUID {
+			t.Errorf("init container %q RunAsUser = %d, want pinned runner uid %d", c.Name, got, runnerUID)
+		}
+	}
+	h := containerByName(pod.Spec.Containers, ContainerHarness)
+	if got := uidOf(h); got != runnerUID {
+		t.Errorf("harness RunAsUser = %d, want pinned runner uid %d (an unpinned harness image could set USER %d and bypass the lockdown)", got, runnerUID, proxyUID)
+	}
 }

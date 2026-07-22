@@ -1,14 +1,16 @@
 # Generic image for a Wren Go command (operator, apiserver, runtime).
 # Usage: docker build --build-arg BIN=wren-operator -f build/Dockerfile.gobin -t wren/operator:dev .
-FROM golang:1.26 AS build
+# Build on host platform, cross-compile for TARGETPLATFORM (no qemu emulation needed).
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+ARG TARGETOS=linux TARGETARCH=amd64
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN CGO_ENABLED=0 go mod download
 COPY . .
 ARG BIN
-RUN test -n "$BIN" && CGO_ENABLED=0 go build -trimpath -o /out/app ./cmd/${BIN}
+RUN test -n "$BIN" && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/app ./cmd/${BIN}
 
-FROM gcr.io/distroless/static:nonroot
+FROM --platform=$TARGETPLATFORM gcr.io/distroless/static:nonroot
 COPY --from=build /out/app /usr/local/bin/app
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/app"]

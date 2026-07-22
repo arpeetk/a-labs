@@ -1,0 +1,41 @@
+# Backstop default-deny egress for agent pods (NOT applied by default).
+#
+# This is the SECOND layer of egress containment. The primary control is the
+# in-pod iptables uid-lockdown (egress-lockdown init container). NetworkPolicy is
+# pod-scoped and cannot distinguish the runner from the egress-proxy inside the
+# same pod's network namespace, so it cannot by itself prevent an in-pod bypass —
+# it bounds egress at the pod boundary as defense-in-depth.
+#
+# Effect: agent pods (wren.dev/component=agent) may egress ONLY to DNS. All other
+# egress is denied — INCLUDING the egress-proxy's own path to GitHub/Anthropic,
+# because NetworkPolicy is pod-scoped and the proxy lives in the same pod.
+#
+# ⚠️ Applied ALONE, this policy therefore BREAKS runs (the proxy cannot reach its
+# upstreams). It is intended to be paired with an allow policy for the proxy's
+# destinations: fqdn-allow-cilium.yaml on a Cilium / GKE-Dataplane-V2 cluster
+# (precise, FQDN-scoped), or a port-443 egress allow on plain-NetworkPolicy
+# clusters (coarse — any host on :443, which weakens the point of the backstop).
+# Apply per run-namespace after review, together with its companion allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wren-agent-default-deny-egress
+  labels:
+    app.kubernetes.io/part-of: wren
+spec:
+  podSelector:
+    matchLabels:
+      wren.dev/component: agent
+  policyTypes:
+    - Egress
+  egress:
+    # DNS resolution (kube-dns / CoreDNS). Required so the egress-proxy can
+    # resolve its upstreams; the runner itself resolves nothing (the in-pod
+    # iptables REJECT covers DNS for the runner uid).
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

@@ -136,6 +136,16 @@ if [ -n "$RUNTIME_IMAGE_OVERRIDE" ]; then
     -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--runtime-image=${RUNTIME_IMAGE_OVERRIDE}\"}]" >/dev/null
 fi
 
+# Egress-enforcement override (WS-1). Default (unset) leaves the operator's own
+# default = iptables (the privileged egress-lockdown init container + canary).
+# Set E2E_EGRESS_ENFORCEMENT=off to exercise the escape hatch: no lockdown
+# container, canary skipped, and an EgressEnforcement=Disabled condition.
+if [ -n "${E2E_EGRESS_ENFORCEMENT:-}" ]; then
+  warn "E2E_EGRESS_ENFORCEMENT=${E2E_EGRESS_ENFORCEMENT} — patching operator --egress-enforcement"
+  k -n "$NS_SYSTEM" patch deploy/wren-operator --type=json \
+    -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--egress-enforcement=${E2E_EGRESS_ENFORCEMENT}\"}]" >/dev/null
+fi
+
 log "waiting for control-plane Deployments to be Ready (${DEPLOY_TIMEOUT}s)"
 k -n "$NS_SYSTEM" rollout status deploy/wren-operator  --timeout="${DEPLOY_TIMEOUT}s"
 k -n "$NS_SYSTEM" rollout status deploy/wren-apiserver --timeout="${DEPLOY_TIMEOUT}s"

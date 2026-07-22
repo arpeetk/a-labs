@@ -108,7 +108,7 @@ func TestDispatch(t *testing.T) {
 		t.Error("expected error for unknown role")
 	}
 
-	// Sidecar role stops when ctx is cancelled.
+	// Sidecar role stops when ctx is canceled.
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	if err := Dispatch(ctx, &bytes.Buffer{}, RoleGateway, specPath); err != nil {

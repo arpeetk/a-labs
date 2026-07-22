@@ -1,16 +1,55 @@
-# wren-runtime: the multi-call in-pod binary (harness + sidecars).
-# Static build → distroless nonroot (uid 65532), compatible with the operator's
-# hardened pod securityContext (runAsNonRoot, readOnlyRootFilesystem).
-FROM golang:1.26 AS build
+# wren-runtime: the multi-call in-pod binary (harness + sidecars + lockdown).
+# Static Go build → distroless base (glibc) so the egress-lockdown role can run
+# the iptables-nft userspace tool. Every role runs under the operator's hardened
+# pod securityContext EXCEPT egress-lockdown, the one deliberately-privileged
+# init container: it runs as root with NET_ADMIN/NET_RAW to program iptables and
+# then exits (see internal/podruntime/lockdown.go, spec §5.6).
+# Build stage runs on the host platform (arm64 Mac, amd64 CI) and cross-compiles
+# for TARGETPLATFORM. CGO_ENABLED=0 means no C toolchain is needed for the target,
+# so this works without qemu emulation regardless of host/target arch mismatch.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+ARG TARGETOS=linux TARGETARCH=amd64
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN CGO_ENABLED=0 go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -o /out/wren-runtime ./cmd/wren-runtime
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/wren-runtime ./cmd/wren-runtime
 
-FROM gcr.io/distroless/static:nonroot
+# iptables stage: pull the nft userspace tools from Debian and stage the applet
+# binaries under their dispatch names (xtables-nft-multi dispatches on argv[0]
+# basename, so a copy named iptables-nft / ip6tables-nft behaves as that tool).
+# MUST be bookworm (Debian 12) to match distroless/base-debian12's glibc — a
+# newer Debian's binaries can need glibc symbols the base doesn't ship.
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS iptables
+RUN apt-get update -qq \
+ && apt-get install -y -qq --no-install-recommends iptables \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /stage/sbin /stage/lib /stage/xtables \
+ && cp "$(readlink -f /usr/sbin/iptables-nft)"  /stage/sbin/iptables-nft \
+ && cp "$(readlink -f /usr/sbin/ip6tables-nft)" /stage/sbin/ip6tables-nft \
+ && cp /usr/lib/*-linux-gnu/libxtables.so.12 /stage/lib/ \
+ && cp /usr/lib/*-linux-gnu/libmnl.so.0      /stage/lib/ \
+ && cp /usr/lib/*-linux-gnu/libnftnl.so.11   /stage/lib/ \
+ # The nft match/target option parsers (--dport, --uid-owner, --ctstate,
+ # REJECT, ...) are dynamically-loaded xtables extension .so's; stage the whole
+ # dir and point XTABLES_LIBDIR at it in the final image.
+ && cp /usr/lib/*-linux-gnu/xtables/*.so /stage/xtables/
+
+FROM --platform=$TARGETPLATFORM gcr.io/distroless/base-debian12:nonroot
 COPY --from=build /out/wren-runtime /usr/local/bin/wren-runtime
+
+# iptables-nft (IPv4 + IPv6) + its three shared libs (glibc/ld already present
+# in distroless/base). The egress-lockdown role invokes them by name off PATH.
+COPY --from=iptables /stage/sbin/iptables-nft  /usr/sbin/iptables-nft
+COPY --from=iptables /stage/sbin/ip6tables-nft /usr/sbin/ip6tables-nft
+COPY --from=iptables /stage/lib/libxtables.so.12 /usr/lib/
+COPY --from=iptables /stage/lib/libmnl.so.0      /usr/lib/
+COPY --from=iptables /stage/lib/libnftnl.so.11   /usr/lib/
+# xtables extension parsers (--dport / --uid-owner / --ctstate / REJECT / ...).
+COPY --from=iptables /stage/xtables/ /usr/lib/xtables/
+ENV XTABLES_LIBDIR=/usr/lib/xtables
+
 USER 65532:65532
 # Default role is "harness" (no argument), so a harness image entrypoint is just
-# this binary; the operator overrides args for sidecar roles.
+# this binary; the operator overrides args for sidecar/init roles.
 ENTRYPOINT ["/usr/local/bin/wren-runtime"]

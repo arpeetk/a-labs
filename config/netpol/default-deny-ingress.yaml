@@ -1,0 +1,26 @@
+# Default-deny INGRESS for agent pods (NOT applied by default, but recommended).
+#
+# The egress-lockdown iptables rules govern OUTPUT only; replies on established
+# flows are allowed so kubelet probes and future in-cluster streams keep
+# working. That means a connection initiated INTO the pod (by any workload that
+# can reach the pod IP) would give the runner a bidirectional channel the
+# lockdown does not cut. Agent pods accept no inbound traffic by design today
+# (no probes, no services target them), so denying all ingress closes that
+# channel with zero functional cost.
+#
+# Revisit when the agent-gateway starts accepting control-plane connections
+# (interactive steering, M2): replace this with an allow scoped to the
+# control-plane namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: wren-agent-default-deny-ingress
+  labels:
+    app.kubernetes.io/part-of: wren
+spec:
+  podSelector:
+    matchLabels:
+      wren.dev/component: agent
+  policyTypes:
+    - Ingress
+  # No ingress rules: all inbound traffic to agent pods is denied.

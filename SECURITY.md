@@ -56,28 +56,31 @@ compromised runner.
 These are known gaps in the **current** state of the codebase. They are stated
 plainly on purpose; deploy accordingly.
 
-### 1. Egress is proxy-based but **not yet hard-enforced**
+### 1. Egress enforcement is on by default — know when you've turned it off
 
-Today the egress proxy (`internal/egress`) enforces a destination allowlist and
-injects credentials, so **the runner never holds a long-lived token** — that
-part of the design is real. However, the redirect through the proxy is currently
-**cooperative**: a hostile runner that ignores the configured proxy can attempt
-to reach the network directly. Hard enforcement — uid-based iptables redirection
-(Istio-style) or a dedicated egress pod plus a default-deny `NetworkPolicy` — is
-**not yet in place**.
+Egress is **hard-enforced by default**: an `egress-lockdown` init container
+installs iptables OUTPUT rules (IPv4 + IPv6) in the pod's network namespace so
+the untrusted runner (uid 65532, all capabilities dropped, no privilege
+escalation) can reach **nothing but the in-pod egress-proxy**; only the proxy
+(uid 65533) can reach the network, and it enforces the destination allowlist
+and injects credentials. Every run under enforcement executes a startup
+**canary** that fails the run if a direct connection ever succeeds, and carries
+an `EgressEnforcement=True` condition.
 
-**Implication:** until enforcement lands, treat the egress allowlist as a strong
-default and a credential-isolation mechanism, **not** as a containment boundary
-against a fully adversarial runner. Do not rely on it alone to prevent
-exfiltration by malicious model output on untrusted repos.
+Two caveats:
 
-> **Note for maintainers / orchestrator:** this statement reflects the state of
-> this branch's base. Workstream **WS-1** (egress enforcement — iptables
-> uid-match / NetworkPolicy) is being built in parallel and had **not merged**
-> when this file was written. **When WS-1 lands, update this section:** egress
-> becomes hard-enforced and this residual risk downgrades from "cooperative /
-> bypassable" to "enforced at the pod network boundary." Re-verify the wording
-> against `internal/egress` and the pod builder at that time.
+- **`--egress-enforcement=off` removes the containment boundary.** The lockdown
+  container needs root + `NET_ADMIN`/`NET_RAW`, which some platforms refuse
+  (GKE Autopilot; namespaces under a `restricted` Pod Security Admission
+  profile). In `off` mode the runner routes through the proxy *cooperatively*
+  and **can bypass it**; runs carry an explicit `EgressEnforcement=Disabled`
+  condition. Treat the allowlist as credential isolation only, not containment,
+  and pair `off` with the policies in `config/netpol/` (Cilium/FQDN-capable CNI
+  recommended).
+- **Inbound connections are not restricted by the lockdown** (its rules cover
+  OUTPUT; replies to established flows are allowed). Agent pods accept no
+  traffic by design — apply `config/netpol/default-deny-ingress.yaml` per run
+  namespace so no other workload can open a channel into a runner.
 
 ### 2. Control-plane auth is a header — do not expose it to the internet
 

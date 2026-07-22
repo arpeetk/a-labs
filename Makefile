@@ -9,7 +9,7 @@ LDFLAGS := -X $(PKG)/internal/cli.Version=$(VERSION) \
 
 CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@latest
 
-.PHONY: build build-operator generate manifests deploy deploy-manifests e2e test vet fmt tidy clean
+.PHONY: build build-operator generate manifests deploy deploy-manifests e2e e2e-gke docker-push-gke test vet fmt tidy clean
 
 build: ## Build the wren CLI into ./bin
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/wren
@@ -28,6 +28,14 @@ OPERATOR_IMAGE  ?= wren/operator:dev
 APISERVER_IMAGE ?= wren/apiserver:dev
 KIND_CLUSTER    ?= wren-test
 
+# GKE image vars — override via env or make flag. GKE_AR derives from
+# GKE_PROJECT and GKE_TAG defaults to the current commit, so
+# 'make docker-push-gke && make e2e-gke' agree at default settings
+# (hack/e2e-gke.sh consumes the same GKE_PROJECT/GKE_AR/GKE_TAG variables).
+GKE_PROJECT     ?= wren-gke-fdea81
+GKE_AR          ?= us-central1-docker.pkg.dev/$(GKE_PROJECT)/wren
+GKE_TAG         ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+
 docker-runtime: ## Build the wren-runtime container image
 	docker build -f build/Dockerfile.runtime -t $(RUNTIME_IMAGE) .
 
@@ -42,11 +50,24 @@ docker-images: docker-runtime docker-operator docker-apiserver ## Build all cont
 kind-load: docker-images ## Build + load all images into a kind cluster (KIND_CLUSTER)
 	kind load docker-image $(RUNTIME_IMAGE) $(OPERATOR_IMAGE) $(APISERVER_IMAGE) --name $(KIND_CLUSTER)
 
+# Build linux/amd64 images (required for GKE Standard x86 nodes) and push to AR.
+# Usage: make docker-push-gke [GKE_PROJECT=…] [GKE_AR=…] [GKE_TAG=…]
+docker-push-gke: ## Build linux/amd64 images and push to Artifact Registry (GKE_AR/GKE_TAG overridable)
+	docker build --platform linux/amd64 -f build/Dockerfile.runtime \
+	  -t $(GKE_AR)/runtime:$(GKE_TAG) . && docker push $(GKE_AR)/runtime:$(GKE_TAG)
+	docker build --platform linux/amd64 --build-arg BIN=wren-operator -f build/Dockerfile.gobin \
+	  -t $(GKE_AR)/operator:$(GKE_TAG) . && docker push $(GKE_AR)/operator:$(GKE_TAG)
+	docker build --platform linux/amd64 --build-arg BIN=wren-apiserver -f build/Dockerfile.gobin \
+	  -t $(GKE_AR)/apiserver:$(GKE_TAG) . && docker push $(GKE_AR)/apiserver:$(GKE_TAG)
+
 deploy: ## Install CRDs + RBAC + operator + apiserver in-cluster (current kube context)
 	kubectl apply -k config/default
 
 e2e: ## Keyless end-to-end test on kind (the WS-0 merge gate); E2E_KEEP=1 keeps the cluster
 	./hack/e2e.sh
+
+e2e-gke: ## Egress-enforcement e2e on a GKE Standard cluster (existing cluster; push images first with docker-push-gke)
+	./hack/e2e-gke.sh
 
 cover: ## Run tests and print per-package coverage
 	go test -cover ./...
