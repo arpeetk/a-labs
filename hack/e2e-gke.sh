@@ -17,6 +17,11 @@
 #   GKE_CLUSTER=wren-e2e GKE_ZONE=us-central1-a hack/e2e-gke.sh
 #   E2E_EGRESS_ENFORCEMENT=off hack/e2e-gke.sh   # test the off path
 #   E2E_KEEP=1 hack/e2e-gke.sh                   # skip namespace teardown
+#
+# Images come from Artifact Registry — push them first:
+#   make docker-push-gke
+# GKE_PROJECT / GKE_AR / GKE_TAG are shared with that Makefile target, so
+# 'make docker-push-gke && make e2e-gke' is consistent at default settings.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,7 +30,12 @@ cd "$REPO_ROOT"
 GKE_PROJECT="${GKE_PROJECT:-wren-gke-fdea81}"
 GKE_ZONE="${GKE_ZONE:-us-central1-a}"
 GKE_CLUSTER="${GKE_CLUSTER:-wren-e2e}"
-OVERLAY="${OVERLAY:-config/gke-e2e}"
+# Image coordinates — the single source of truth, consumed by both this script
+# and 'make docker-push-gke' (same variable names). GKE_AR derives from the
+# project so GKE_PROJECT=x flows to cluster AND registry; GKE_TAG defaults to
+# the current commit so push and consume can never disagree by default.
+GKE_AR="${GKE_AR:-us-central1-docker.pkg.dev/${GKE_PROJECT}/wren}"
+GKE_TAG="${GKE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo dev)}"
 NS_SYSTEM="wren-system"
 RUN_TIMEOUT="${RUN_TIMEOUT:-300}"
 DEPLOY_TIMEOUT="${DEPLOY_TIMEOUT:-300}"
@@ -112,8 +122,22 @@ WREN="$REPO_ROOT/bin/wren"
 [ -x "$WREN" ] || die "wren CLI not found at $WREN"
 
 # --- 3. deploy the in-cluster control plane ---
-log "deploying control plane via $OVERLAY"
-k apply -k "$OVERLAY"
+log "deploying control plane (config/default) with ${GKE_AR} images tagged ${GKE_TAG}"
+k apply -k config/default
+
+# Point the control plane at the AR images pushed by 'make docker-push-gke'.
+# config/default pins wren/*:dev (the kind flow); override here so no registry
+# or tag is baked into committed manifests. The appended --runtime-image wins
+# over the base manifest's arg (Go flags: last occurrence wins).
+k -n "$NS_SYSTEM" set image deploy/wren-operator  operator="${GKE_AR}/operator:${GKE_TAG}"
+k -n "$NS_SYSTEM" set image deploy/wren-apiserver apiserver="${GKE_AR}/apiserver:${GKE_TAG}"
+k -n "$NS_SYSTEM" patch deploy/wren-operator --type=json \
+  -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--runtime-image=${GKE_AR}/runtime:${GKE_TAG}\"}]"
+# Always pull, so a re-pushed tag is never served stale from the node cache.
+k -n "$NS_SYSTEM" patch deploy/wren-operator --type=json \
+  -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/imagePullPolicy\",\"value\":\"Always\"}]"
+k -n "$NS_SYSTEM" patch deploy/wren-apiserver --type=json \
+  -p="[{\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/imagePullPolicy\",\"value\":\"Always\"}]"
 
 # Patch egress enforcement if the caller overrides it (default = iptables from operator flag).
 if [ -n "${E2E_EGRESS_ENFORCEMENT:-}" ]; then
@@ -141,11 +165,10 @@ log "apiserver reachable at ${API}"
 
 # --- 5. register a keyless project ---
 PROJECT="gke-e2e-mock"
-AR="us-central1-docker.pkg.dev/wren-gke-fdea81/wren"
 log "creating keyless project '$PROJECT'"
 create_out="$(curl -fsS -X POST "${API}/v1/projects" \
   -H 'X-Wren-User: e2e' -H 'Content-Type: application/json' \
-  -d "{\"name\":\"${PROJECT}\",\"defaultHarness\":\"mock\",\"harnessImage\":\"${AR}/runtime:ws1\",\"defaultModel\":\"mock\",\"cpu\":\"100m\",\"memory\":\"128Mi\",\"disk\":\"1Gi\"}" 2>&1)" \
+  -d "{\"name\":\"${PROJECT}\",\"defaultHarness\":\"mock\",\"harnessImage\":\"${GKE_AR}/runtime:${GKE_TAG}\",\"defaultModel\":\"mock\",\"cpu\":\"100m\",\"memory\":\"128Mi\",\"disk\":\"1Gi\"}" 2>&1)" \
   || die "create project failed: $create_out"
 
 # --- 6. login + submit run ---
