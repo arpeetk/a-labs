@@ -9,9 +9,9 @@
 The **core of milestone M0 — Journey A (task → PR)** — is built and validated end-to-end (unit tests + real-cluster e2e on **kind and real GKE**). A few M0 hardening items remain (see "Next milestones"). Built and validated:
 
 - **CLI** (`cmd/wren`) — command tree; `login`, `run create/list/get/logs` wired to the control-plane HTTP API (`run logs [-f] [--container]` streams pod logs — resolves the run's current pod by the `wren.dev/run` label and tails the `pods/log` subresource).
-- **Operator** (`cmd/wren-operator`, `internal/controller`) — `AgentRun` reconciler (hardened pod + workspace PVC + RunSpec ConfigMap, lifecycle, crash-resume), `AgentPool` skeleton. CRDs + RBAC + manager manifests under `config/`.
+- **Operator** (`cmd/wren-operator`, `internal/controller`) — `AgentRun` reconciler (hardened pod + workspace PVC + RunSpec ConfigMap, lifecycle, crash-resume via PVC reattach + resume-mode — see the §5.5 v0.1 status), `AgentPool` skeleton. CRDs + RBAC + manager manifests under `config/`.
 - **Control plane** (`cmd/wren-apiserver`, `internal/{apiserver,coreapi,store,launcher}`) — Runs + Projects services; creates `AgentRun` CRs and mirrors CR status back.
-- **Harness runtime** (`cmd/wren-runtime`, `internal/{harness,podruntime}`) — the multi-call in-pod binary implementing the §5.4 contract. Adapters: **claude-code** (real — drives the bundled `claude` CLI headless in the cloned workspace and parses its stream-json events into Wren events + token usage) and **mock** (deterministic, keyless). Images: `build/Dockerfile.{runtime,claude-code}`.
+- **Harness runtime** (`cmd/wren-runtime`, `internal/{harness,podruntime}`) — the multi-call in-pod binary implementing the §5.4 contract's batch subset (RunSpec in, event stream + exit-code contract out; interactive input lands in M2, transcript-restore resume is post-launch with the checkpointer). Adapters: **claude-code** (real — drives the bundled `claude` CLI headless in the cloned workspace and parses its stream-json events into Wren events + token usage) and **mock** (deterministic, keyless). Images: `build/Dockerfile.{runtime,claude-code}`.
 - **Egress-proxy** (`internal/egress`) — the pod's controlled egress: enforces a domain allowlist and **injects the GitHub token + model key** for github.com / api.github.com / api.anthropic.com. The credentials live only on the proxy container; the runner holds no secret.
 - **GitHub PR / finalize** (`internal/{github,gitwork,finalize}`) — go-git clone/commit/push (distroless-friendly, no git binary) + open a PR with the rubric body, plus a GitHub **App installation-token minter**. Hydrate clones and finalize pushes/opens the PR *through the egress-proxy*.
 - **Verified e2e on kind AND real GKE (Journey A):** `wren run create` → CR (carrying `repo`) → operator schedules the hardened pod → egress-proxy (holds creds) → hydrate clones via proxy → **the real Claude Code agent does the task** (Bash/Write tools, autonomous) → finalize opens a **real PR** through the proxy → pod `Completed` → run **`Succeeded`** → `wren run get` reflects it. On GKE: image pulled from Artifact Registry, workspace on a Persistent Disk, runner container held **no token or model key** (both injected at the proxy).
@@ -21,7 +21,7 @@ The **core of milestone M0 — Journey A (task → PR)** — is built and valida
 - **Transport:** control-plane API is **HTTP/JSON** (net/http) for M0; the target gRPC + Connect (§5.1/§5.2) is a fast-follow.
 - **Store:** two impls behind the `Store` interface — **in-memory** (`internal/store.Memory`, the default for dev/tests) and **Postgres** (`internal/store.Postgres`, pgx/v5, embedded forward-only migrations) selectable via `--store=postgres` + `DATABASE_URL`. On boot the apiserver reconciles run rows from the AgentRun CRs, so a restart re-learns in-flight runs. Managed Cloud SQL + Helm-provisioned DSN is the remaining target (§5.2, WS-5).
 - **Auth:** caller identity via a trusted **`X-Wren-User` header** stand-in for M0; OIDC/SSO at a gateway is the target (§7).
-- **Control-plane hosting:** the operator + apiserver run **locally against the cluster** for M0; the target is **in-cluster Deployments** (§5.2) with a Service/Ingress — that plus the GitHub App is the next milestone (a real handover).
+- **Control-plane hosting:** the operator + apiserver run **in-cluster** (`config/default` overlay: Deployments + a ClusterIP Service for the apiserver; `make e2e` deploys and drives this path). Running them locally against the cluster remains the dev loop (AGENTS.md §7). Remaining for the handover: published images and an Ingress/OIDC front-door (§7) — that plus the GitHub App wiring is the next milestone.
 - **GitHub credentials:** a **PAT** (mounted into the egress-proxy) for M0; the target is per-run, repo-scoped **GitHub App installation tokens** minted by the control plane (§5.7). The App-token minter is already built.
 - **Egress enforcement:** **enforced** — an `egress-lockdown` privileged init container installs iptables OUTPUT rules (uid-match, Istio-style) so the runner is *physically* confined to the proxy (no direct egress, DNS included); a `--egress-enforcement=off` escape hatch exists for clusters that forbid privileged init containers (e.g. GKE Autopilot), which records an `EgressEnforcement=Disabled` condition on each run (§5.6).
 - **Run results → status (v0.1):** the operator scrapes the harness container's logs for the terminal `pr_ready`/`token_usage` events when the pod goes terminal (and before deleting a failed pod for resume) and writes `Status.PR`/`Usage`/`SessionID` — the pod holds no SA token by design, so the runner cannot write its own status and this adds no credentials or attack surface. v0.1 records **terminal values only**: mid-run `token_usage` increments are superseded by the last one, and no adapter emits a session id yet. The gateway event bridge (§5.4) remains the v0.2 target; the event schema is unchanged, so the swap is internal to the pod. Finalize is resume-safe (an existing run branch is reused, never "branch already exists") and transient push/PR failures (network, 429/5xx, EOF/timeout) exit `ExitRetryable` so a fresh pod retries them.
@@ -29,10 +29,10 @@ The **core of milestone M0 — Journey A (task → PR)** — is built and valida
 
 **Next milestones (not yet built):**
 
-1. **In-cluster control plane + GitHub App** — run the operator + apiserver as in-cluster Deployments (published images, apiserver Service/Ingress) and mint per-run, repo-scoped **GitHub App** installation tokens in place of the PAT. This makes the platform self-hosting and the handover real.
+1. **GitHub App + control-plane front-door** — the operator + apiserver already run **in-cluster** (`config/default`; exercised by `make e2e`). Remaining: published images, an apiserver Ingress/OIDC front-door, and minting per-run, repo-scoped **GitHub App** installation tokens in place of the PAT. This makes the platform self-hosting and the handover real.
 2. ~~**Egress bypass enforcement**~~ — **done** (iptables uid-match lockdown; NetworkPolicy examples shipped under `config/netpol/` as a belt-and-suspenders second layer). Remaining: verify on GKE Standard (privileged init container node-pool policy) before launch.
 
-Also pending: real **checkpointer** (GCS snapshot) + checkpoint-restore hydrate (stubs today), `wren project`/`mcp`/`fleet`/`usage` server-side, historical/aggregated logs (GCS) and multi-restart `--previous` for `run logs` (live-tail lands now), managed Postgres provisioning (the store impl exists — see above), gRPC/Connect transport, isolated agent node pool.
+Also pending: the object-store **checkpointer** + checkpoint-restore hydrate — **de-scoped to post-launch (WS-8)**: v0.1 resumes via PVC reattach + resume-mode only, the checkpointer sidecar is an experimental liveness stub, the `workspace.checkpoint.*` CRD fields are accepted but **no-op**, and `internal/blob.Store` is the interface the real checkpointer (S3-compatible / GCS; MinIO in e2e) will plug into. Also: `wren project`/`mcp`/`fleet`/`usage` server-side, historical/aggregated logs (GCS) and multi-restart `--previous` for `run logs` (live-tail is built), managed Postgres provisioning (the store impl exists — see above), gRPC/Connect transport, isolated agent node pool.
 
 **Repo:** the M0 codebase is on GitHub at `arpeetk/a-labs` (PR #2, branch `wren/m0-foundations`). Contributor/agent working guide: [`AGENTS.md`](../AGENTS.md) — read it before making changes.
 
@@ -122,6 +122,8 @@ Same as A, but with `--interactive`: the engineer attaches to a live stream, see
 ### 2.3 Journey C — Crash & auto-resume
 
 Pod is OOMKilled mid-run. Operator detects termination, recreates the pod, an init container restores the workspace from the latest checkpoint, and the harness resumes the session from its mirrored transcript. `run get` shows `restartCount: 1` with the reason. The engineer sees continuity, not a mystery.
+
+> **v0.1 reality (WS-8):** resume = recreate the pod, reattach the surviving workspace PVC (stable name), and start the harness in resume mode (`RunSpec.mode=resume`; hydrate skips the re-clone, so the agent continues in its surviving workspace). The checkpoint restore + mirrored transcript above are the target — object-store checkpointing is post-launch, so a node/zone loss that destroys the PVC ends the run `Failed` with diagnostics instead (§5.5 v0.1 status).
 
 ### 2.4 Journey D — Onboarding
 
@@ -335,7 +337,7 @@ wren admin ...                   # users, roles, audit
 
 A set of stateless services behind an API gateway, backed by Cloud SQL (Postgres). Deployed on the same GKE cluster (separate, trusted node pool, **not** co-located with agent pods).
 
-> **M0 status:** the Runs and Projects services are built (`internal/coreapi`) over a `Store` interface (in-memory now, Postgres later) and a `Launcher` interface that creates `AgentRun` CRs (`internal/launcher`). Exposed over **HTTP/JSON** (`internal/apiserver`, `cmd/wren-apiserver`) per the REST mapping below; gRPC/Connect, Sessions/MCP/Usage/Audit services, and the streaming gateway are later milestones. See the living status block at the top.
+> **M0 status:** the Runs and Projects services are built (`internal/coreapi`) over a `Store` interface (in-memory by default, or Postgres via `--store=postgres` + `DATABASE_URL`; reconcile-on-boot re-learns in-flight runs from their CRs) and a `Launcher` interface that creates `AgentRun` CRs (`internal/launcher`). Exposed over **HTTP/JSON** (`internal/apiserver`, `cmd/wren-apiserver`) per the REST mapping below; gRPC/Connect, Sessions/MCP/Usage/Audit services, and the streaming gateway are later milestones. See the living status block at the top.
 
 **Services**
 
@@ -394,7 +396,7 @@ spec:
     resources: { cpu: "2", memory: 4Gi, ephemeralDisk: 10Gi }
   workspace:
     pvc: { storageClass: regional-pd, size: 20Gi }
-    checkpoint: { intervalSeconds: 120, bucket: gs://wren-ckpt }
+    checkpoint: { intervalSeconds: 120, bucket: gs://wren-ckpt }  # accepted but NO-OP in v0.1 (checkpointer is post-launch; §5.5)
   mcp:
     configRef: mcp-payments-api    # rendered config secret
   egress:
@@ -404,7 +406,7 @@ status:
   phase: Running
   podName: r-8f3a2c-0
   restartCount: 1
-  lastCheckpoint: { uri: gs://wren-ckpt/r-8f3a2c/ck-000042, at: "…", commit: "wip-abc" }
+  lastCheckpoint: { uri: gs://wren-ckpt/r-8f3a2c/ck-000042, at: "…", commit: "wip-abc" }  # never populated in v0.1 (no checkpoints taken)
   sessionId: sess-…
   pr: { url: "", branch: wren/arpeet/r-8f3a2c-idempotency }
   usage: { inputTokens: …, outputTokens: …, costUsd: … }
@@ -425,7 +427,7 @@ spec:
 status: { available: 6, claimed: 2 }
 ```
 
-**Reconciliation (AgentRun):**
+**Reconciliation (AgentRun):** *(target flow; v0.1 deviations: every run takes the cold path — `AgentPool` claim/hand-off lands in M3 — and hydrate never restores from a checkpoint; see the §5.5 v0.1 status)*
 
 1. **Placement** — claim a warm pod from a matching `AgentPool` (fast path) or create a new pod (cold path).
 2. **Volumes** — bind/provision the workspace PVC; attach the MCP config secret and per-run egress config.
@@ -444,7 +446,7 @@ Containers in the pod:
 |---|---|---|
 | **harness runner** | Runs the chosen agent (Claude Code / Codex / BYO) against the workspace. Executes untrusted, model-generated code. | **Untrusted** |
 | **agent-gateway** | Bridges the harness's stream-json I/O to the control plane (attach/steer); routes tool-permission prompts. | Semi-trusted |
-| **checkpointer** | Sidecar: mirrors session transcript to GCS continuously; snapshots workspace to GCS on interval + on SIGTERM. | Trusted |
+| **checkpointer** | Sidecar: mirrors session transcript to GCS continuously; snapshots workspace to GCS on interval + on SIGTERM. **Experimental in v0.1:** a liveness stub that keeps the pod shape stable and takes no snapshots (`workspace.checkpoint.*` is a no-op; §5.5). | Trusted |
 | **egress-proxy** | Sidecar: the pod's only route to the internet. Enforces domain allowlist; injects Anthropic/GitHub/MCP credentials so secrets never touch the runner env. | Trusted |
 
 The runner has **no cloud credentials, no GitHub token, and no direct internet** — only a route to the local egress-proxy. This is the core of the security model (§9).
@@ -472,6 +474,8 @@ EXIT:     0 = task complete (PR ready) · non-zero = error (retryable/fatal via 
 - **BYO** — any container that speaks the contract (or a shim that wraps a custom agent), so orgs can bring internal harnesses.
 
 ### 5.5 Persistence & crash recovery
+
+> **v0.1 status (WS-8):** crash-resume is built as **PVC reattach + resume-mode only**. On a retryable infrastructure failure (OOMKill, eviction, node loss) the operator deletes the failed pod, bumps `restartCount`, and recreates the pod bound to the same workspace PVC (stable name) with `RunSpec.mode=resume`; hydrate skips the re-clone and the harness continues in the surviving workspace. Layers 2–3 below (object-store checkpoints + transcript mirroring) are **not built**: the checkpointer sidecar is an experimental liveness stub and the `workspace.checkpoint.*` CRD fields are accepted but **no-op in v0.1** (kept for API stability). Consequences: a crash whose PVC survives (the common case — OOM, eviction, reschedule; zone loss under Regional PD) resumes with the workspace intact; a node/zone loss that destroys the PVC ends the run **Failed** with diagnostics (subject to the retry budget) rather than silently losing work. `internal/blob.Store` is the interface the post-launch checkpointer plugs into (S3-compatible / GCS impls; MinIO in e2e). The rest of this section is the **target** design.
 
 **Requirement:** no work is ever lost; pods survive OOMKill, eviction, node failure, and any crash; the engineer always sees continuity.
 
@@ -628,8 +632,8 @@ Everything is provisioned by **Terraform modules** shipped with Wren so `wren se
 
 v1 targets multi-harness + steering; the build is sequenced but all lands within v1.
 
-- **M0 — Foundations.** Control-plane skeleton (auth, projects, runs), operator + `AgentRun` CRD, **Claude Code** harness, async task→PR, Regional PD workspace + GCS checkpointer, hardened `runc` pod on an isolated agent node pool, egress-proxy, GitHub App + repo-scoped tokens, `run create/get/logs`. *(Journey A + C end-to-end.)*
-  - **Done:** operator (`AgentRun` reconcile + crash-resume with retry classification, `AgentPool` skeleton); control-plane Runs/Projects services + HTTP API; CLI `run create/list/get`; CR-status mirroring; the `wren-runtime` image + the **real Claude Code agent**; the **egress-proxy** (credential injection + allowlist, runner holds no secret); and **GitHub PR/finalize**. **Verified e2e on kind and real GKE: Journey A to `Succeeded` with a real Claude agent opening a real PR** on `arpeetk/a-labs`. `run logs [-f]` (live pod-log tail via `pods/log`) landed. **Remaining:** in-cluster control plane + **GitHub App** tokens, proxy **bypass enforcement** (NetworkPolicy/iptables), real checkpointer (GCS) + checkpoint-restore, isolated node pool, Postgres store, gRPC transport.
+- **M0 — Foundations.** Control-plane skeleton (auth, projects, runs), operator + `AgentRun` CRD, **Claude Code** harness, async task→PR, Regional PD workspace (the GCS checkpointer moved post-launch — WS-8), hardened `runc` pod on an isolated agent node pool, egress-proxy, GitHub App + repo-scoped tokens, `run create/get/logs`. *(Journey A + C end-to-end.)*
+  - **Done:** operator (`AgentRun` reconcile + crash-resume with retry classification, `AgentPool` skeleton); control-plane Runs/Projects services + HTTP API, running **in-cluster** (`config/default` Deployments + Service); CLI `run create/list/get/logs` (`logs [-f]` live-tails via `pods/log`); CR-status mirroring; the `wren-runtime` image + the **real Claude Code agent**; the **egress-proxy** (credential injection + allowlist, runner holds no secret) with **bypass enforcement** (iptables uid-lockdown + per-run canary, WS-1); the **Postgres store** (WS-3) alongside the in-memory default; and **GitHub PR/finalize**. **Verified e2e on kind and real GKE: Journey A to `Succeeded` with a real Claude agent opening a real PR** on `arpeetk/a-labs`. **Remaining:** **GitHub App** tokens wired per-run (the minter is built), egress-enforcement verification on GKE Standard, published control-plane images + Ingress/OIDC front-door, isolated node pool, managed Postgres provisioning (WS-5), gRPC transport. The GCS checkpointer + checkpoint-restore moved **post-launch** (WS-8): v0.1 resumes via PVC reattach + resume-mode only, and `workspace.checkpoint.*` is accepted but no-op (§5.5 v0.1 status).
 - **M1 — Breadth.** **Codex** + **BYO** harness adapters, MCP config service + `wren mcp`, usage metering (tokens/CPU/mem) + `wren usage`, `fleet` views, RBAC.
 - **M2 — Interactive.** agent-gateway + steering stream, `run attach/steer`, tool-permission routing, rubric validation modes.
 - **M3 — Scale & polish.** `AgentPool` warm pools, quotas/budgets with hard-cap pause, Terraform-driven `wren setup`, read-only web dashboard.
@@ -669,7 +673,7 @@ That's the whole bar: **one admin command, one engineer command, then `run creat
 ## 12. Open questions & risks
 
 1. **Kernel isolation deferral (accepted for v1)** — v1 ships without gVisor/Kata, relying on the network/credential/identity boundary + hardened pods + an isolated agent node pool. Residual risk: a `runc` container escape could reach the node. Revisit before exposing highly-sensitive repos or if node-tenancy assumptions change. When enabled (M4), gVisor requires GKE Standard sandbox node pools and needs per-toolchain validation, else Kata for affected projects.
-2. **Checkpoint granularity vs cost** — 120s interval is a starting default; git-aware incremental snapshots should keep GCS cost low, but very large working trees (monorepos) need tuning (sparse checkout, interval backoff).
+2. **Checkpoint granularity vs cost** — applies when the checkpointer lands (post-launch; it is a no-op stub in v0.1). 120s interval is a starting default; git-aware incremental snapshots should keep GCS cost low, but very large working trees (monorepos) need tuning (sparse checkout, interval backoff).
 3. **Codex/BYO parity** — the harness contract must capture resume + streaming semantics faithfully for non-Claude harnesses; some may lack first-class transcript resume, degrading crash recovery to workspace-only. Document per-harness capability tiers.
 4. **Steering + autonomy policy** — where to draw the auto-approve line for tool calls (esp. shell) per project; needs a clear policy model.
 5. **Regional PD failover** — regional PD covers zone loss within a region but not region loss; is cross-region durability (GCS is cross-region-capable) sufficient for the SLA?

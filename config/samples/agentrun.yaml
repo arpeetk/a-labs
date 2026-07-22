@@ -29,6 +29,12 @@ spec:
     pvc:
       storageClass: standard   # kind's default local-path StorageClass
       size: 1Gi
+    # v0.1 crash-resume = reattach this PVC (stable name) + restart the harness
+    # in resume mode. The checkpoint block below is ACCEPTED BUT NO-OP in v0.1:
+    # the checkpointer sidecar is an experimental liveness stub and no snapshots
+    # are taken (object-store checkpointing is post-launch, plugging into
+    # internal/blob.Store — spec §5.5). A node/zone loss that destroys the PVC
+    # therefore ends the run Failed with diagnostics instead of restoring.
     checkpoint:
       intervalSeconds: 120
       bucket: gs://wren-ckpt

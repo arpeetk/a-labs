@@ -6,8 +6,9 @@ CLI plus the GCP/Kubernetes control plane behind it, so an engineer can spin up
 command.
 
 Submit a task; a coding agent (Claude Code today, Codex / bring-your-own next)
-clones the repo and does the work in a hardened cloud pod, survives crashes, and
-**opens a pull request** — all without the agent ever holding a credential.
+clones the repo and does the work in a hardened cloud pod, auto-resumes from
+infrastructure crashes, and **opens a pull request** — all without the agent
+ever holding a credential.
 
 > 📄 **Design & internals:** [`docs/technical-spec.md`](docs/technical-spec.md) ·
 > 🛠 **Install / handover:** [`SETUP.md`](SETUP.md) ·
@@ -34,8 +35,11 @@ A real run: the engineer submits a task → the control plane creates an `AgentR
 → the operator schedules a hardened pod → **the real Claude agent explores the
 repo and edits files** → the change is committed, pushed, and **a real PR is
 opened**. The GitHub token and model API key live only on a trusted egress-proxy
-sidecar; **the untrusted agent container holds no secrets**. Crashes (OOM,
-eviction) auto-resume; deterministic failures fail fast.
+sidecar; **the untrusted agent container holds no secrets**. Infrastructure
+crashes (OOM, eviction) auto-resume by recreating the pod and reattaching the
+surviving workspace disk; deterministic failures fail fast. A node/zone loss
+that destroys the disk ends the run cleanly (`Failed`, with diagnostics) —
+object-store checkpoints are post-launch (spec §5.5).
 
 ## How a run flows
 
@@ -59,7 +63,7 @@ threat model in the [spec](docs/technical-spec.md#25-end-to-end-workflow-journey
 ```sh
 wren login --control-plane wren.corp.internal --user you   # SSO lands in M1
 wren run create --project payments-api --task "Fix the flaky retry in checkout"
-wren run get    r-9d4c09a          # phase, PR url, token usage, restart count
+wren run get    r-9d4c09a          # phase, PR url, restart count (token usage lands with wren usage, M1)
 wren run list   --scope mine
 wren run logs   r-9d4c09a -f        # tail the agent's live logs (--container to pick a sidecar)
 ```
@@ -92,7 +96,8 @@ the runner). GKE is the same with `GKE_PROJECT`/`GKE_CLUSTER`/`REGISTRY`.
                                                                         ▼
    ┌──────────────────────── hardened agent pod (per run) ─────────────────┐
    │  egress-proxy (creds + allowlist) ◀── harness runner (Claude, no creds)│
-   │  + checkpointer + gateway sidecars   + hydrate init  + workspace PVC   │
+   │  + checkpointer (experimental stub) + gateway sidecars                 │
+   │  + hydrate init  + workspace PVC                                       │
    └───────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -100,7 +105,8 @@ the runner). GKE is the same with `GKE_PROJECT`/`GKE_CLUSTER`/`REGISTRY`.
 - **Control plane** resolves project config and translates a task into an
   `AgentRun` custom resource.
 - **Operator** (controller-runtime) reconciles each `AgentRun` into a hardened
-  pod, owns the lifecycle, and auto-resumes on infrastructure crashes.
+  pod, owns the lifecycle, and auto-resumes infrastructure crashes by
+  reattaching the surviving workspace PVC (resume-mode; no checkpoints yet).
 - **Agent pod** is the sandbox: one untrusted harness container + trusted
   sidecars (egress-proxy holds the credentials); the runner reaches the internet
   only through the proxy.
@@ -115,17 +121,18 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Area | M0 (as built) | Target |
 |---|---|---|
 | Task → PR (Journey A) | ✅ real Claude agent → PR, on kind **and** GKE | same |
-| Crash-resume | ✅ retries infra failures, fails fast on deterministic ones | same |
-| Egress-proxy | ✅ injects creds + allowlist; runner holds no secret; **bypass enforced** (iptables uid-match; `--egress-enforcement=off` escape hatch) | GKE Standard verification + FQDN NetworkPolicy |
-| Control plane | ✅ runs locally against the cluster | in-cluster Deployments |
+| Crash-resume | ✅ infra crashes (OOM/eviction) resume via PVC reattach + resume-mode; deterministic failures fail fast; a disk-destroying node/zone loss = clean `Failed` | + object-store checkpoints (`workspace.checkpoint.*` accepted, **no-op** until the checkpointer lands post-launch; `internal/blob.Store` is the socket) |
+| Egress-proxy | ✅ injects creds + allowlist; runner holds no secret; **bypass enforced** (iptables uid-lockdown + per-run canary; `--egress-enforcement=off` escape hatch with `config/netpol/` FQDN policies) | verify enforcement on GKE Standard (privileged init-container node policy) |
+| Control plane | ✅ runs in-cluster (operator + apiserver Deployments, `config/default`; `make e2e` rides them) — local-against-cluster remains the dev loop | published images + Ingress/OIDC front-door |
 | GitHub creds | ✅ PAT in the proxy secret | per-run **GitHub App** tokens |
 | API transport | HTTP/JSON | gRPC + Connect |
-| Store | ✅ in-memory (default) **or** Postgres (`--store=postgres`) | managed Cloud SQL, Helm-provisioned (WS-5) |
+| Store | ✅ in-memory (default, dev) **or** Postgres (`--store=postgres` + `DATABASE_URL`; reconcile-on-boot re-learns in-flight runs) | managed Cloud SQL, Helm-provisioned (WS-5) |
 | Auth | `X-Wren-User` header | OIDC / SSO |
 | Isolation | hardened `runc` pods | + gVisor/Kata (deferred, M4) |
 
-Next up: (1) in-cluster control plane + GitHub App. Egress bypass enforcement is
-now in place (iptables uid-match lockdown; verified on kind).
+Next up: per-run **GitHub App** tokens (the minter is built; wiring is next),
+verifying egress enforcement on GKE Standard, and the object-store checkpointer
+behind `internal/blob.Store` (post-launch).
 
 ## Repository layout
 
@@ -143,6 +150,7 @@ internal/
   controller/               AgentRun/AgentPool reconcilers + pod builder
   harness/ podruntime/      harness adapters (claude-code, mock) + in-pod roles
   egress/                   the credential-injecting allowlist proxy
+  blob/                     object-store Store interface for checkpoints (impls post-launch)
   github/ gitwork/ finalize/  GitHub PR client, go-git ops, commit→push→PR
   runspec/                  the RunSpec contract handed to each harness
 build/                Dockerfiles (runtime, claude-code)
