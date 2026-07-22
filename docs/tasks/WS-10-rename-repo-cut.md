@@ -1,8 +1,11 @@
 # WS-10: Rename + public repo cut
 
 **Branch:** n/a (executes across repos) · **Size:** M · **State:** DRAFT
-**Blocked on (all human):** final name · GitHub org created · license decision
-(Apache-2.0 recommended). **Strictly last. Human drives; agent assists.**
+**Decided (2026-07-22):** name `skein` · org `skein-sh` · domain/CRD group
+`skein.dev` (register it!) · license Apache-2.0 (+NOTICE). Rename invocation:
+`hack/rename.sh skein skein-sh skein.dev`.
+**Blocked on (human):** GitHub org `skein-sh` created · `skein.dev` registered.
+**Strictly last. Human drives; agent assists.**
 *The rename script can and should be written early (it's testable any time —
 "rename to `wrenx`" in a scratch worktree proves it); the cut itself is final.*
 

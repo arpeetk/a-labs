@@ -16,18 +16,19 @@ transition; this file is the single glance-view for the sprint.
 | 8  | Claims truthing | [WS-8](WS-8-claims-truthing.md) | ready | — | none (WS-1 outcome known: enforcement ON by default) — dispatch |
 | 6  | Quickstart + releases | [WS-6](WS-6-quickstart-releases.md) | draft | — | WS-5 merged |
 | 9  | Docs site | [WS-9](WS-9-docs-site.md) | draft | — | WS-2 + WS-8 merged |
-| 10 | Rename + public cut | [WS-10](WS-10-rename-repo-cut.md) | draft | — | org + license decisions (human); name picked: **skein** |
+| 10 | Rename + public cut | [WS-10](WS-10-rename-repo-cut.md) | draft | — | org creation (human); name=**skein**, org=**skein-sh**, license=**Apache-2.0** decided |
 | 11 | Finalize pipeline | [WS-11](WS-11-finalize-pipeline.md) | ready | — | none — dispatch (found in WS-1 review; gates the launch demo) |
 
 ## Human-gated items (start now — lead time)
 
-- [x] Name decision: **skein** (2026-07-22). Availability check: `github.com/skein`
-      taken (old personal account) — pick org name (`skein-hq`/`skein-sh`/`skeink8s`
-      free); `skein.dev` unregistered (buy now); `skein.sh`/`.io` registered 2026
-      (confirm whether that's you); PyPI/npm squatted (irrelevant — Go binary);
+- [x] Name decision: **skein** (2026-07-22). Org name **skein-sh** (bare `skein`
+      taken by a dormant personal account). `skein.sh`/`.io` are third-party —
+      docs/site live at **`skein.dev`** (unregistered — **register it now**;
+      it is also the CRD group). PyPI/npm squatting irrelevant (Go binary);
       nearest project collision is `jcrist/skein` (dormant YARN deploy tool).
-- [ ] Create GitHub org placeholder once org name chosen
-- [ ] License decision: Apache-2.0 (recommended) vs keep MIT
+- [x] License decision: **Apache-2.0** (+ NOTICE at cut; WS-10).
+- [ ] **Register `skein.dev`** (domain; ~$12 — do today, it backs the CRD group)
+- [ ] Create GitHub org **skein-sh** (+ `homebrew-tap` repo for WS-6)
 - [ ] Create a test GitHub App (blocks WS-2 live validation)
 - [ ] External reviewer lined up for the egress/credential path (WS-1 had 3
       agent review rounds + e2e proof; a human security read is still the
