@@ -16,12 +16,17 @@ transition; this file is the single glance-view for the sprint.
 | 8  | Claims truthing | [WS-8](WS-8-claims-truthing.md) | ready | — | none (WS-1 outcome known: enforcement ON by default) — dispatch |
 | 6  | Quickstart + releases | [WS-6](WS-6-quickstart-releases.md) | draft | — | WS-5 merged |
 | 9  | Docs site | [WS-9](WS-9-docs-site.md) | draft | — | WS-2 + WS-8 merged |
-| 10 | Rename + public cut | [WS-10](WS-10-rename-repo-cut.md) | draft | — | name/org/license decisions (human) |
+| 10 | Rename + public cut | [WS-10](WS-10-rename-repo-cut.md) | draft | — | org + license decisions (human); name picked: **skein** |
+| 11 | Finalize pipeline | [WS-11](WS-11-finalize-pipeline.md) | ready | — | none — dispatch (found in WS-1 review; gates the launch demo) |
 
 ## Human-gated items (start now — lead time)
 
-- [ ] Name shortlist → decision (blocks WS-10; needed ~week 3)
-- [ ] Create GitHub org placeholder once named
+- [x] Name decision: **skein** (2026-07-22). Availability check: `github.com/skein`
+      taken (old personal account) — pick org name (`skein-hq`/`skein-sh`/`skeink8s`
+      free); `skein.dev` unregistered (buy now); `skein.sh`/`.io` registered 2026
+      (confirm whether that's you); PyPI/npm squatted (irrelevant — Go binary);
+      nearest project collision is `jcrist/skein` (dormant YARN deploy tool).
+- [ ] Create GitHub org placeholder once org name chosen
 - [ ] License decision: Apache-2.0 (recommended) vs keep MIT
 - [ ] Create a test GitHub App (blocks WS-2 live validation)
 - [ ] External reviewer lined up for the egress/credential path (WS-1 had 3
@@ -46,11 +51,13 @@ Things hand-offs said were NOT verified; burn down before launch.
   5. `internal/coreapi/service_test.go:245` — `SA9003` empty branch (vestigial
      test block; found during WS-1 review). Owner: orchestrator cleanup.
 - **govulncheck red** (surfaced by CI's first run; deps drifted since WS-7):
-  bump `golang.org/x/crypto` → v0.52.0 (7 reachable ssh vulns via go-git),
+  ~~bump `golang.org/x/crypto` → v0.52.0 (7 reachable ssh vulns via go-git),
   `golang.org/x/net` → v0.55.0, `golang.org/x/text` → v0.39.0; the stdlib
   `crypto/tls` finding needs Go ≥ 1.26.5 (setup-go "1.26" picks it up
-  automatically). Owner: orchestrator cleanup — pairs with the lint fixes as
-  one "green-main" PR.
+  automatically)~~ — **fixed in #17** (chore/green-main; govulncheck green there).
+- **Lint findings 3–5 above** (SA1019, QF1002, SA9003) — **all fixed in #17**;
+  the golangci-lint job is green on that branch. Merge #17 → main fully green →
+  enable branch protection.
 - **WS-1 GKE live validation** — still not run on a real cluster. The
   round-3 fix made it runnable at defaults: `make docker-push-gke &&
   make e2e-gke` (GKE Standard cluster `wren-e2e`; Autopilot admission + PSA
