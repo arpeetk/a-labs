@@ -165,6 +165,15 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 		return fmt.Errorf("%w: egress-proxy unreachable", ErrRetryable)
 	}
 
+	// Egress canary (WS-1): when the operator signals enforcement, prove from
+	// inside the untrusted runner that the iptables lockdown holds — for EVERY
+	// harness, before the (expensive) agent runs. A bypass is a deterministic
+	// security failure: fail the run, spend no tokens.
+	if err := harness.RunCanary(ctx, em); err != nil {
+		em.Status("failed")
+		return err
+	}
+
 	res, err := h.Run(ctx, spec, em)
 	if err != nil {
 		em.Status("failed")
@@ -340,7 +349,7 @@ func splitAllowlist(s string) []string {
 }
 
 // RunSidecar runs a long-lived sidecar role: it logs liveness and blocks until
-// the context is cancelled (SIGTERM), then exits cleanly so the pod can complete.
+// the context is canceled (SIGTERM), then exits cleanly so the pod can complete.
 func RunSidecar(ctx context.Context, out io.Writer, name string) error {
 	em := harness.NewEmitter(out)
 	em.Message(name + ": started (M0 stand-in)")

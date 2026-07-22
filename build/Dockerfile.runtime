@@ -14,7 +14,9 @@ RUN CGO_ENABLED=0 go build -trimpath -o /out/wren-runtime ./cmd/wren-runtime
 # iptables stage: pull the nft userspace tools from Debian and stage the applet
 # binaries under their dispatch names (xtables-nft-multi dispatches on argv[0]
 # basename, so a copy named iptables-nft / ip6tables-nft behaves as that tool).
-FROM debian:trixie-slim AS iptables
+# MUST be bookworm (Debian 12) to match distroless/base-debian12's glibc — a
+# newer Debian's binaries can need glibc symbols the base doesn't ship.
+FROM debian:bookworm-slim AS iptables
 RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends iptables \
  && rm -rf /var/lib/apt/lists/* \

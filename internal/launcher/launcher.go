@@ -35,11 +35,12 @@ const LabelRun = "wren.dev/run"
 const DefaultLogContainer = "harness"
 
 var knownLogContainers = map[string]bool{
-	"harness":       true,
-	"agent-gateway": true,
-	"checkpointer":  true,
-	"egress-proxy":  true,
-	"hydrate":       true,
+	"harness":         true,
+	"agent-gateway":   true,
+	"checkpointer":    true,
+	"egress-proxy":    true,
+	"egress-lockdown": true,
+	"hydrate":         true,
 }
 
 // ErrNoPod signals that a run has no pod backing it right now: either it has not

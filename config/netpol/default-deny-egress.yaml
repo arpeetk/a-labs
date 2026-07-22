@@ -7,10 +7,15 @@
 # it bounds egress at the pod boundary as defense-in-depth.
 #
 # Effect: agent pods (wren.dev/component=agent) may egress ONLY to DNS. All other
-# egress is denied. The egress-proxy resolves upstream names via DNS and reaches
-# the internet from the SAME pod, so pod-level policy cannot further narrow the
-# proxy's own egress without FQDN awareness (see fqdn-allow-cilium.yaml). Apply
-# per run-namespace after review.
+# egress is denied — INCLUDING the egress-proxy's own path to GitHub/Anthropic,
+# because NetworkPolicy is pod-scoped and the proxy lives in the same pod.
+#
+# ⚠️ Applied ALONE, this policy therefore BREAKS runs (the proxy cannot reach its
+# upstreams). It is intended to be paired with an allow policy for the proxy's
+# destinations: fqdn-allow-cilium.yaml on a Cilium / GKE-Dataplane-V2 cluster
+# (precise, FQDN-scoped), or a port-443 egress allow on plain-NetworkPolicy
+# clusters (coarse — any host on :443, which weakens the point of the backstop).
+# Apply per run-namespace after review, together with its companion allow.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

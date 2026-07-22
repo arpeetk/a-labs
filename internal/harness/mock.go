@@ -30,13 +30,8 @@ func (m Mock) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (Resul
 		return Result{}, err
 	}
 
-	// Egress canary (WS-1): when the operator signals enforcement, prove the
-	// runner is physically confined to the proxy. A bypass fails the run.
-	if err := RunCanary(ctx, em); err != nil {
-		return Result{}, err
-	}
-
-	// Produce a workspace change, as a real harness would.
+	// Produce a workspace change, as a real harness would. (The egress canary
+	// runs harness-agnostically in podruntime.RunHarness, not here.)
 	em.ToolCall("write_file")
 	marker := filepath.Join(spec.WorkspacePath, "WREN_MOCK.md")
 	content := fmt.Sprintf("# Wren mock run\n\nRun: %s\nProject: %s\nTask: %s\n",
@@ -58,11 +53,4 @@ func (m Mock) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (Resul
 		branch = "wren/" + spec.RunID
 	}
 	return Result{Branch: branch, InputTokens: 1234, OutputTokens: 567}, nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
 }

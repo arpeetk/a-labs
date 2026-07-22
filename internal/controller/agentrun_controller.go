@@ -65,8 +65,8 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 
 	// Record the egress-enforcement posture on the run so an operator can see,
-	// per run, whether the runner is physically confined to the proxy. Only the
-	// weaker "off" mode needs a visible marker (iptables is the safe default).
+	// per run, whether the runner is physically confined to the proxy
+	// (EgressEnforcement=True/Iptables) or free to bypass it (False/Disabled).
 	if err := r.ensureEgressCondition(ctx, &run); err != nil {
 		return ctrl.Result{}, fmt.Errorf("record egress condition: %w", err)
 	}

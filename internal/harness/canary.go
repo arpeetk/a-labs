@@ -15,8 +15,10 @@ import (
 // Egress canary (WS-1, spec §5.6).
 //
 // When the operator runs with egress enforcement on it sets
-// WREN_EXPECT_ENFORCEMENT=1 in the harness env. In that mode the harness proves,
-// from inside the untrusted runner, that the iptables lockdown actually holds:
+// WREN_EXPECT_ENFORCEMENT=1 in the harness env. podruntime.RunHarness runs the
+// canary before invoking ANY harness adapter (mock, claude-code, byo), proving
+// from inside the untrusted runner — before tokens are spent — that the
+// iptables lockdown actually holds:
 //
 //  1. a direct TCP dial to 1.1.1.1:443 MUST fail (no raw egress),
 //  2. a direct HTTPS GET to github.com MUST fail (no bypass to an allowed host),
