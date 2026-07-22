@@ -4,19 +4,23 @@
 # pod securityContext EXCEPT egress-lockdown, the one deliberately-privileged
 # init container: it runs as root with NET_ADMIN/NET_RAW to program iptables and
 # then exits (see internal/podruntime/lockdown.go, spec §5.6).
-FROM golang:1.26 AS build
+# Build stage runs on the host platform (arm64 Mac, amd64 CI) and cross-compiles
+# for TARGETPLATFORM. CGO_ENABLED=0 means no C toolchain is needed for the target,
+# so this works without qemu emulation regardless of host/target arch mismatch.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+ARG TARGETOS=linux TARGETARCH=amd64
 WORKDIR /src
 COPY go.mod go.sum ./
-RUN go mod download
+RUN CGO_ENABLED=0 go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -o /out/wren-runtime ./cmd/wren-runtime
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/wren-runtime ./cmd/wren-runtime
 
 # iptables stage: pull the nft userspace tools from Debian and stage the applet
 # binaries under their dispatch names (xtables-nft-multi dispatches on argv[0]
 # basename, so a copy named iptables-nft / ip6tables-nft behaves as that tool).
 # MUST be bookworm (Debian 12) to match distroless/base-debian12's glibc — a
 # newer Debian's binaries can need glibc symbols the base doesn't ship.
-FROM debian:bookworm-slim AS iptables
+FROM --platform=$TARGETPLATFORM debian:bookworm-slim AS iptables
 RUN apt-get update -qq \
  && apt-get install -y -qq --no-install-recommends iptables \
  && rm -rf /var/lib/apt/lists/* \
@@ -31,7 +35,7 @@ RUN apt-get update -qq \
  # dir and point XTABLES_LIBDIR at it in the final image.
  && cp /usr/lib/*-linux-gnu/xtables/*.so /stage/xtables/
 
-FROM gcr.io/distroless/base-debian12:nonroot
+FROM --platform=$TARGETPLATFORM gcr.io/distroless/base-debian12:nonroot
 COPY --from=build /out/wren-runtime /usr/local/bin/wren-runtime
 
 # iptables-nft (IPv4 + IPv6) + its three shared libs (glibc/ld already present
