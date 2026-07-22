@@ -83,12 +83,12 @@ func TestRESTOpenPR(t *testing.T) {
 
 func TestRESTOpenPRReturnsExisting(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost:
+		switch r.Method {
+		case http.MethodPost:
 			// Create fails: a PR already exists.
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			_, _ = w.Write([]byte(`{"message":"A pull request already exists"}`))
-		case r.Method == http.MethodGet:
+		case http.MethodGet:
 			_, _ = w.Write([]byte(`[{"number":7,"html_url":"https://github.com/corp/payments/pull/7"}]`))
 		}
 	}))
