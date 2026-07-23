@@ -25,9 +25,10 @@ type Harness interface {
 }
 
 // Select chooses a harness adapter for a run. The WREN_HARNESS env var overrides
-// the RunSpec (used for tests / a keyless demo). "claude-code" returns the real
-// adapter — the model key is injected at the egress-proxy, so the runner need
-// not hold one; the adapter fails gracefully if the `claude` CLI is absent.
+// the RunSpec (used for tests / a keyless demo). The real adapters (claude-code,
+// codex, opencode) get their model key injected at the egress-proxy, so the
+// runner need not hold one; each fails gracefully if its CLI is absent from the
+// image.
 func Select(spec runspec.RunSpec) Harness {
 	kind := os.Getenv("WREN_HARNESS")
 	if kind == "" {
@@ -36,6 +37,10 @@ func Select(spec runspec.RunSpec) Harness {
 	switch kind {
 	case "claude-code":
 		return ClaudeCode{}
+	case "codex":
+		return Codex{}
+	case "opencode":
+		return OpenCode{}
 	case "mock", "byo", "":
 		return Mock{}
 	default:

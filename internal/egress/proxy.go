@@ -1,8 +1,9 @@
 // Package egress implements the agent pod's egress-proxy (spec §5.6): the pod's
 // controlled route to the internet. It (1) reverse-proxies specific upstreams
-// (github.com, api.github.com, api.anthropic.com) injecting per-run credentials
-// so the untrusted runner never holds a secret, and (2) enforces a domain
-// allowlist for any other egress (HTTP forward + CONNECT tunneling).
+// (github.com, api.github.com, api.anthropic.com, api.openai.com) injecting
+// per-run credentials so the untrusted runner never holds a secret, and (2)
+// enforces a domain allowlist for any other egress (HTTP forward + CONNECT
+// tunneling).
 //
 // Enforcement (WS-1): the runner is *physically* prevented from bypassing this
 // proxy by in-pod iptables uid-isolation — the `egress-lockdown` init container
@@ -32,6 +33,7 @@ const (
 	RouteGitHub    = "/github/"     // git smart-HTTP → github.com
 	RouteGitHubAPI = "/github-api/" // REST API → api.github.com
 	RouteAnthropic = "/anthropic/"  // model API → api.anthropic.com
+	RouteOpenAI    = "/openai/"     // model API → api.openai.com
 )
 
 // Route reverse-proxies requests under Prefix to Upstream, injecting Auth.

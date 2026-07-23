@@ -77,10 +77,12 @@ const (
 // PodConfig is the operator-level configuration applied to every agent pod.
 type PodConfig struct {
 	Images Images
-	// GitHubTokenSecret / AnthropicKeySecret are Secrets (keys "token"/"key")
-	// injected into the egress-proxy container (not the runner). Empty disables.
+	// GitHubTokenSecret / AnthropicKeySecret / OpenAIKeySecret are Secrets
+	// (keys "token"/"key"/"key") injected into the egress-proxy container (not
+	// the runner). Empty disables.
 	GitHubTokenSecret  string
 	AnthropicKeySecret string
+	OpenAIKeySecret    string
 	// EgressPort is the localhost port the egress-proxy listens on.
 	EgressPort string
 	// EgressEnforcement selects the bypass-prevention mechanism (default
@@ -243,10 +245,13 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 	images := cfg.Images
 	proxyBase := cfg.proxyBaseURL()
 	// The runner routes GitHub/model traffic through the egress-proxy; it holds
-	// no credentials of its own (spec §5.6).
+	// no credentials of its own (spec §5.6). Every harness gets both model base
+	// URLs; the adapter uses the one its provider speaks (claude-code/opencode →
+	// Anthropic route, codex → OpenAI route).
 	proxyEnv := []corev1.EnvVar{
 		{Name: "WREN_EGRESS_PROXY", Value: proxyBase},
 		{Name: "ANTHROPIC_BASE_URL", Value: proxyBase + strings.TrimSuffix(egress.RouteAnthropic, "/")},
+		{Name: "OPENAI_BASE_URL", Value: proxyBase + strings.TrimSuffix(egress.RouteOpenAI, "/")},
 	}
 
 	workspaceMount := corev1.VolumeMount{Name: VolumeWorkspace, MountPath: runspec.WorkspacePath}
@@ -268,6 +273,7 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 	// Credentials live here — on the trusted proxy, never the runner.
 	egressProxyEnv = append(egressProxyEnv, secretEnv("GITHUB_TOKEN", cfg.GitHubTokenSecret, "token")...)
 	egressProxyEnv = append(egressProxyEnv, secretEnv("ANTHROPIC_API_KEY", cfg.AnthropicKeySecret, "key")...)
+	egressProxyEnv = append(egressProxyEnv, secretEnv("OPENAI_API_KEY", cfg.OpenAIKeySecret, "key")...)
 
 	// The egress-proxy runs as a distinct uid (proxyUID) so the lockdown iptables
 	// rules can uid-match it: override the runner-uid pin from hardened().

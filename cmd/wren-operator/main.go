@@ -38,6 +38,7 @@ func main() {
 	flag.StringVar(&podCfg.Images.Runtime, "runtime-image", "wren/runtime:dev", "wren-runtime image for in-pod sidecar/init roles")
 	flag.StringVar(&podCfg.GitHubTokenSecret, "github-token-secret", "wren-github-token", "Secret (key \"token\") injected as GITHUB_TOKEN into the egress-proxy; empty to disable")
 	flag.StringVar(&podCfg.AnthropicKeySecret, "anthropic-key-secret", "wren-anthropic-key", "Secret (key \"key\") injected as ANTHROPIC_API_KEY into the egress-proxy; empty to disable")
+	flag.StringVar(&podCfg.OpenAIKeySecret, "openai-key-secret", "wren-openai-key", "Secret (key \"key\") injected as OPENAI_API_KEY into the egress-proxy; empty to disable")
 	flag.StringVar(&podCfg.EgressPort, "egress-port", "", "egress-proxy localhost port (default 8099)")
 	var egressEnforcement string
 	flag.StringVar(&egressEnforcement, "egress-enforcement", string(controller.EgressEnforcementIptables),

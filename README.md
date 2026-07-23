@@ -5,8 +5,8 @@ CLI plus the GCP/Kubernetes control plane behind it, so an engineer can spin up
 **massively parallel, durable, sandboxed coding agents in the cloud** with one
 command.
 
-Submit a task; a coding agent (Claude Code today, Codex / bring-your-own next)
-clones the repo and does the work in a hardened cloud pod, auto-resumes from
+Submit a task; a coding agent (Claude Code, Codex, or OpenCode) clones the
+repo and does the work in a hardened cloud pod, auto-resumes from
 infrastructure crashes, and **opens a pull request** — all without the agent
 ever holding a credential.
 
@@ -121,8 +121,9 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Area | M0 (as built) | Target |
 |---|---|---|
 | Task → PR (Journey A) | ✅ real Claude agent → PR, on kind **and** GKE | same |
+| Harnesses | ✅ `claude-code` (proven e2e) + `mock` (keyless gate); `codex` + `opencode` adapters, images, and the `/openai/` egress route built — **not yet run against live providers** ([docs/harnesses.md](docs/harnesses.md)) | + BYO conformance suite |
 | Crash-resume | ✅ infra crashes (OOM/eviction) resume via PVC reattach + resume-mode; deterministic failures fail fast; a disk-destroying node/zone loss = clean `Failed` | + object-store checkpoints (`workspace.checkpoint.*` accepted, **no-op** until the checkpointer lands post-launch; `internal/blob.Store` is the socket) |
-| Egress-proxy | ✅ injects creds + allowlist; runner holds no secret; **bypass enforced** (iptables uid-lockdown + per-run canary; `--egress-enforcement=off` escape hatch with `config/netpol/` FQDN policies) | verify enforcement on GKE Standard (privileged init-container node policy) |
+| Egress-proxy | ✅ injects creds (github.com, api.github.com, api.anthropic.com, api.openai.com) + allowlist; runner holds no secret; **bypass enforced** (iptables uid-lockdown + per-run canary; `--egress-enforcement=off` escape hatch with `config/netpol/` FQDN policies) | verify enforcement on GKE Standard (privileged init-container node policy) |
 | Control plane | ✅ runs in-cluster (operator + apiserver Deployments, `config/default`; `make e2e` rides them) — local-against-cluster remains the dev loop | published images + Ingress/OIDC front-door |
 | GitHub creds | ✅ PAT in the proxy secret | per-run **GitHub App** tokens |
 | API transport | HTTP/JSON | gRPC + Connect |
@@ -148,12 +149,12 @@ internal/
   apiserver/ coreapi/       control-plane HTTP handlers + Runs/Projects logic
   store/ launcher/          persistence (in-memory + Postgres) + AgentRun CR creation
   controller/               AgentRun/AgentPool reconcilers + pod builder
-  harness/ podruntime/      harness adapters (claude-code, mock) + in-pod roles
+  harness/ podruntime/      harness adapters (claude-code, codex, opencode, mock) + in-pod roles
   egress/                   the credential-injecting allowlist proxy
   blob/                     object-store Store interface for checkpoints (impls post-launch)
   github/ gitwork/ finalize/  GitHub PR client, go-git ops, commit→push→PR
   runspec/                  the RunSpec contract handed to each harness
-build/                Dockerfiles (runtime, claude-code)
+build/                Dockerfiles (runtime, claude-code, codex, opencode)
 config/               kustomize manifests (crd, rbac, manager) + samples
 hack/                 setup.sh
 docs/                 technical specification

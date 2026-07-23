@@ -48,9 +48,5 @@ func (m Mock) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (Resul
 	// The authoritative pr_ready event is emitted by the finalize step (which
 	// actually pushes the branch and opens the PR); the harness just reports the
 	// intended branch via its Result.
-	branch := spec.BranchPrefix + "/" + spec.RunID
-	if spec.BranchPrefix == "" {
-		branch = "wren/" + spec.RunID
-	}
-	return Result{Branch: branch, InputTokens: 1234, OutputTokens: 567}, nil
+	return Result{Branch: branchFor(spec), InputTokens: 1234, OutputTokens: 567}, nil
 }

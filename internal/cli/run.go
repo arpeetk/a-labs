@@ -66,7 +66,7 @@ func newRunCreateCmd() *cobra.Command {
 	f.StringVar(&taskFile, "file", "", "read the task prompt from a file")
 	// These default to empty so the project's configured defaults apply; a flag
 	// override only takes effect when explicitly set.
-	f.StringVar(&opts.Harness, "harness", "", "agent harness override: claude-code|codex|byo (default: project's)")
+	f.StringVar(&opts.Harness, "harness", "", "agent harness override: mock|claude-code|codex|opencode|byo (default: project's)")
 	f.BoolVar(&opts.Interactive, "interactive", false, "attach and allow steering after submit")
 	f.StringVar(&opts.BaseRef, "base", "", "base git ref (default: repo default branch)")
 	f.StringVar(&opts.CPU, "cpu", "", "CPU request override (e.g. 2)")

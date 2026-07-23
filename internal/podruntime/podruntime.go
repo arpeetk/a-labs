@@ -274,9 +274,10 @@ func orDefault(s, def string) string {
 
 // RunEgressProxy runs the egress-proxy sidecar: it holds the run's credentials
 // and forwards the runner's traffic, injecting auth for github.com /
-// api.github.com / api.anthropic.com and enforcing the domain allowlist for
-// everything else (spec §5.6). Secrets (GITHUB_TOKEN, ANTHROPIC_API_KEY) are
-// mounted into THIS container, never the harness.
+// api.github.com / api.anthropic.com / api.openai.com and enforcing the domain
+// allowlist for everything else (spec §5.6). Secrets (GITHUB_TOKEN,
+// ANTHROPIC_API_KEY, OPENAI_API_KEY) are mounted into THIS container, never
+// the harness.
 func RunEgressProxy(ctx context.Context, out io.Writer) error {
 	em := harness.NewEmitter(out)
 
@@ -315,6 +316,7 @@ const (
 	defaultGitHubUpstream    = "https://github.com"
 	defaultGitHubAPIUpstream = "https://api.github.com"
 	defaultAnthropicUpstream = "https://api.anthropic.com"
+	defaultOpenAIUpstream    = "https://api.openai.com"
 )
 
 // envUpstream returns the override from env if set (trimmed, non-empty),
@@ -346,6 +348,11 @@ func egressConfigFromEnv() egress.Config {
 		cfg.Routes = append(cfg.Routes, egress.Route{Prefix: egress.RouteAnthropic,
 			Upstream: envUpstream("WREN_ANTHROPIC_UPSTREAM", defaultAnthropicUpstream),
 			Auth:     egress.HeaderAuth{Key: "x-api-key", Value: key}})
+	}
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		cfg.Routes = append(cfg.Routes, egress.Route{Prefix: egress.RouteOpenAI,
+			Upstream: envUpstream("WREN_OPENAI_UPSTREAM", defaultOpenAIUpstream),
+			Auth:     egress.HeaderAuth{Key: "Authorization", Value: "Bearer " + key}})
 	}
 	return cfg
 }
