@@ -4,6 +4,13 @@ One line per workstream. States: `todo` · `ready` (brief ready to dispatch) ·
 `dispatched` · `in-review` · `merged` · `blocked(<why>)`. Update on every
 transition; this file is the single glance-view for the sprint.
 
+> **Priority call (2026-07-22, owner):** the main track is **(1) seamless
+> onboarding** — a team stands up a GKE cluster and its engineers are running
+> agents in minutes, via first-class CLI commands (not scripts) — and
+> **(2) multi-harness** (Codex + OpenCode alongside Claude Code). Rename
+> (WS-10), GitHub App (WS-2), docs site (WS-9) are **secondary** — they ride
+> after the dogfood.
+
 | WS | Title | Brief | State | Worker/branch | Blocker |
 |----|-------|-------|-------|---------------|---------|
 | 0  | e2e validation loop | [WS-0](WS-0-e2e-loop.md) | merged | #12 | done — gate live on main |
@@ -11,12 +18,15 @@ transition; this file is the single glance-view for the sprint.
 | 3  | Postgres store | [WS-3](WS-3-postgres-store.md) | merged | #15 | done — pgx/v5 + reconcile-on-boot |
 | 4  | `run logs` | [WS-4](WS-4-run-logs.md) | merged | #14 | done — live-tail streaming |
 | 7  | CI + community | [WS-7](WS-7-ci-community.md) | merged | #13 | done — CI/e2e/CodeQL live on main |
-| 2  | GitHub App tokens | [WS-2](WS-2-github-app.md) | draft | — | test GitHub App created (human); split step-0 interface PR at dispatch |
-| 5  | Helm chart | [WS-5](WS-5-helm-chart.md) | draft | — | none (WS-1 merged, manifests settled) — finalize brief + dispatch |
 | 8  | Claims truthing | [WS-8](WS-8-claims-truthing.md) | merged | #19 | done — README/spec/SECURITY truthed; `internal/blob` socket |
-| 6  | Quickstart + releases | [WS-6](WS-6-quickstart-releases.md) | draft | — | WS-5 merged |
-| 9  | Docs site | [WS-9](WS-9-docs-site.md) | draft | — | WS-2 + WS-8 merged |
-| 10 | Rename + public cut | [WS-10](WS-10-rename-repo-cut.md) | draft | — | org creation (human); name=**skein**, org=**skein-sh**, license=**Apache-2.0** decided |
+| 11 | Finalize pipeline | [WS-11](WS-11-finalize-pipeline.md) | merged | #18 | done — idempotent finalize, retry classification, prUrl live |
+| **12** | **Codex + OpenCode harnesses** | [WS-12](WS-12-multi-harness.md) | ready | — | none — MAIN TRACK |
+| **13** | **Onboarding: `wren install` + project CLI + releases** | [WS-13](WS-13-onboarding.md) | ready | — | none — MAIN TRACK |
+| 5  | Helm chart | [WS-5](WS-5-helm-chart.md) | deferred | — | GitOps install path; after WS-13's CLI-native path lands |
+| 2  | GitHub App tokens | [WS-2](WS-2-github-app.md) | deferred | — | secondary (owner call); PAT documented as the path meanwhile |
+| 6  | Quickstart + releases | [WS-6](WS-6-quickstart-releases.md) | superseded | — | folded into WS-13 (install cmd + private releases) |
+| 9  | Docs site | [WS-9](WS-9-docs-site.md) | deferred | — | secondary |
+| 10 | Rename + public cut | [WS-10](WS-10-rename-repo-cut.md) | deferred | — | secondary; decisions locked (skein/skein-sh/skein.dev/Apache-2.0) |
 | 11 | Finalize pipeline | [WS-11](WS-11-finalize-pipeline.md) | merged | #18 | done — idempotent finalize, retry classification, prUrl live |
 
 ## Human-gated items (start now — lead time)

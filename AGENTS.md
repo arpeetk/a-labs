@@ -121,6 +121,10 @@ and re-apply the CRD to any running cluster (`kubectl apply -f config/crd/bases/
 
 ## 6. Conventions & standards
 
+- **Standards (read these):** [`docs/standards/testing.md`](docs/standards/testing.md),
+  [`docs/standards/code.md`](docs/standards/code.md),
+  [`docs/standards/review.md`](docs/standards/review.md) — the repo's testing,
+  code, and review rules, each with the incident that taught it.
 - **Interface + real impl + fake.** External dependencies (Kubernetes, GitHub,
   the store) are behind a small interface, with a real implementation and an
   in-memory `Fake`/`Memory` for tests. Business logic depends on the interface,

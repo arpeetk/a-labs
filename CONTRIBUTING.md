@@ -81,6 +81,12 @@ E2E_KEEP=1 make e2e      # keep the cluster up for debugging
 
 ## Conventions (the short version — see AGENTS.md §6 for depth)
 
+**Standards, with the incidents that taught them:**
+[`docs/standards/testing.md`](docs/standards/testing.md) ·
+[`docs/standards/code.md`](docs/standards/code.md) ·
+[`docs/standards/review.md`](docs/standards/review.md). Read them before your
+first non-trivial PR.
+
 - **Interface + real impl + fake.** External dependencies (Kubernetes, GitHub,
   the store) sit behind a small interface with a real implementation and an
   in-memory fake for tests. Business logic depends on the interface.
