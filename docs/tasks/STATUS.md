@@ -13,11 +13,11 @@ transition; this file is the single glance-view for the sprint.
 | 7  | CI + community | [WS-7](WS-7-ci-community.md) | merged | #13 | done — CI/e2e/CodeQL live on main |
 | 2  | GitHub App tokens | [WS-2](WS-2-github-app.md) | draft | — | test GitHub App created (human); split step-0 interface PR at dispatch |
 | 5  | Helm chart | [WS-5](WS-5-helm-chart.md) | draft | — | none (WS-1 merged, manifests settled) — finalize brief + dispatch |
-| 8  | Claims truthing | [WS-8](WS-8-claims-truthing.md) | ready | — | none (WS-1 outcome known: enforcement ON by default) — dispatch |
+| 8  | Claims truthing | [WS-8](WS-8-claims-truthing.md) | merged | #19 | done — README/spec/SECURITY truthed; `internal/blob` socket |
 | 6  | Quickstart + releases | [WS-6](WS-6-quickstart-releases.md) | draft | — | WS-5 merged |
 | 9  | Docs site | [WS-9](WS-9-docs-site.md) | draft | — | WS-2 + WS-8 merged |
 | 10 | Rename + public cut | [WS-10](WS-10-rename-repo-cut.md) | draft | — | org creation (human); name=**skein**, org=**skein-sh**, license=**Apache-2.0** decided |
-| 11 | Finalize pipeline | [WS-11](WS-11-finalize-pipeline.md) | ready | — | none — dispatch (found in WS-1 review; gates the launch demo) |
+| 11 | Finalize pipeline | [WS-11](WS-11-finalize-pipeline.md) | merged | #18 | done — idempotent finalize, retry classification, prUrl live |
 
 ## Human-gated items (start now — lead time)
 
@@ -80,3 +80,21 @@ GKE e2e image coords single-sourced (config/gke-e2e/ deleted).
 Open follow-ups spun out of review (not blockers): `hack/lib/e2e-common.sh`
 extraction (e2e.sh/e2e-gke.sh duplication); apiserver http.Server timeouts;
 proxy resolved-IP guard for CONNECT.
+
+## Follow-ups from WS-8/WS-11 hand-offs (triage before launch)
+
+- **Behavior/doc gap (needs a decision):** docs now say a disk-destroying
+  loss ends the run `Failed`, but `ensurePVC` creates a *fresh empty* PVC —
+  the code resumes into an empty workspace instead. Enforcing the documented
+  semantic is a small controller change; ticket as its own fix (candidate
+  for the next batch) or consciously re-document. (WS-8 hand-off #1)
+- **WS-11 deferred by design:** `run list` does no per-item CR refresh (N+1
+  reads — add if list must show fresh prUrl); `Status.SessionID` stays empty
+  until an adapter emits a session id (event schema frozen in WS-11);
+  `token_usage` records terminal values only (documented in spec).
+- **Small stale spots (batch into any cleanup PR):** `internal/cli/run.go`
+  help text promises "usage" (no field yet); `internal/store` package doc
+  says Postgres "lands later" (stale since WS-3); `SETUP.md` Phase-2 framing
+  predates `config/default` (WS-9 territory).
+- **AGENTS.md** layout + checkpointer note updated by orchestrator at merge
+  (WS-8 hand-off #5/#6 — done).

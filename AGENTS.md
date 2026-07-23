@@ -61,6 +61,7 @@ internal/
   launcher/            creates AgentRun CRs (Launcher interface + K8s impl + Fake)
   controller/          AgentRun/AgentPool reconcilers + pod builder
   runspec/             the RunSpec contract handed to a harness
+  blob/                object-store contract for checkpoints (interface only — no impls yet)
   harness/             harness adapters (mock, claude-code) + event protocol
   podruntime/          in-pod role runners (harness/hydrate/sidecars) + dispatch
   github/              GitHub PR client + App installation-token minter + Fake
@@ -225,7 +226,10 @@ real PR without touching github.com.
   the escape hatch for clusters that forbid privileged init containers (e.g.
   GKE Autopilot) — `config/netpol/` has a weaker NetworkPolicy layer for that
   path. Residual: a runc escape to the node (gVisor/Kata, M4).
-  **checkpointer / gateway** sidecars are still liveness stand-ins.
+  **checkpointer** is an experimental liveness stub (no snapshots; crash-resume
+  is PVC reattach + resume-mode — spec §5.5 v0.1); **gateway** is still a
+  liveness stand-in (run results reach status via the operator's pods/log
+  scrape, WS-11; the event bridge is the v0.2 target).
 - **Transport:** control-plane API is HTTP/JSON (target: gRPC + Connect).
 - **Store:** in-memory (default) **or** Postgres (`--store=postgres` + `DATABASE_URL`, `internal/store.Postgres`; pgx/v5, embedded migrations, reconcile-on-boot). Managed Cloud SQL provisioning is the remaining target (WS-5 Helm).
 - **Auth:** `X-Wren-User` header (target: OIDC/SSO).
