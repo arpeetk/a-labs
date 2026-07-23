@@ -107,10 +107,18 @@ before treating the sandbox as escape-resistant against kernel exploits.
 
 ### 4. Other M0 stand-ins with security relevance
 
-- **Store** is in-memory (target: Postgres) — no durability or access controls
-  on persisted state yet.
+- **Store** defaults to in-memory (dev); a Postgres impl exists
+  (`--store=postgres` + `DATABASE_URL`), with managed Cloud SQL provisioning
+  still to come (WS-5). With the memory store, project config and
+  completed-run history are lost on apiserver restart (in-flight runs are
+  re-learned from their AgentRun CRs on boot); the Postgres option is a single
+  self-managed instance — treat control-plane state as not yet
+  production-grade.
 - **Checkpointer / gateway sidecars** are liveness stand-ins, not the real
-  implementations.
+  implementations. The checkpointer is experimental: v0.1 takes no snapshots,
+  so a crash that destroys the workspace PVC (node/zone loss without a
+  surviving disk) loses the in-flight workspace and the run ends `Failed`
+  with diagnostics (spec §5.5).
 
 See `AGENTS.md` §8 for the full, current list of stand-ins; when one becomes
 real, its note there and here should be removed.

@@ -3,9 +3,13 @@
 // (egress-proxy, checkpointer, agent-gateway). Roles are functions here so they
 // are unit-testable; cmd/wren-runtime is a thin dispatcher.
 //
-// The sidecars are M0 stand-ins (they keep the pod's native-sidecar shape valid
-// and log liveness) — real egress allowlisting, GCS checkpointing, and stream
-// bridging land in their respective milestones.
+// The egress-proxy is real (spec §5.6). The checkpointer and agent-gateway
+// sidecars are M0 stand-ins (they keep the pod's native-sidecar shape valid
+// and log liveness): the checkpointer is EXPERIMENTAL — v0.1 takes no
+// snapshots, so workspace.checkpoint.* is a no-op and crash-resume is PVC
+// reattach + resume-mode only (spec §5.5 v0.1 status); real checkpointing
+// plugs into internal/blob.Store post-launch. Stream bridging lands with
+// interactive steering (M2).
 package podruntime
 
 import (
@@ -358,6 +362,10 @@ func splitAllowlist(s string) []string {
 
 // RunSidecar runs a long-lived sidecar role: it logs liveness and blocks until
 // the context is canceled (SIGTERM), then exits cleanly so the pod can complete.
+// It backs the checkpointer and agent-gateway roles. The checkpointer is
+// EXPERIMENTAL (spec §5.5): a liveness stub keeping the pod shape stable — it
+// takes no snapshots in v0.1; real checkpointing plugs into internal/blob.Store
+// post-launch.
 func RunSidecar(ctx context.Context, out io.Writer, name string) error {
 	em := harness.NewEmitter(out)
 	em.Message(name + ": started (M0 stand-in)")
@@ -380,7 +388,7 @@ const (
 	RoleHydrate        = "hydrate"
 	RoleEgressProxy    = "egress-proxy"
 	RoleEgressLockdown = "egress-lockdown"
-	RoleCheckpointer   = "checkpointer"
+	RoleCheckpointer   = "checkpointer" // experimental: liveness stub, no snapshots (spec §5.5)
 	RoleGateway        = "agent-gateway"
 )
 
