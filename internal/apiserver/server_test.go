@@ -153,6 +153,40 @@ func TestGetRunNotFound(t *testing.T) {
 	}
 }
 
+// TestGetRunSurfacesPRURLFromCRStatus is the WS-11 mirror assertion: once the
+// operator writes the run's results into the AgentRun CR status, a live
+// GET /v1/runs/{id} surfaces prUrl (the CR is authoritative for status; the
+// store row is refreshed at read time — same rule as WS-3's runFromCR).
+func TestGetRunSurfacesPRURLFromCRStatus(t *testing.T) {
+	h, lc, _ := newTestServerWithLauncher(t)
+	id, ns := createRunViaAPI(t, h)
+
+	// The operator scraped a pr_ready event from the harness logs and wrote
+	// the CR status.
+	lc.SetStatus(ns, id, wrenv1.AgentRunStatus{
+		Phase: wrenv1.PhaseSucceeded,
+		PR:    wrenv1.PRStatus{URL: "https://github.com/x/y/pull/3", Branch: "wren/arpeet-x/" + id},
+	})
+
+	w := do(t, h, "GET", "/v1/runs/"+id, "arpeet@x", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("get run code = %d, body=%s", w.Code, w.Body.String())
+	}
+	var run store.Run
+	if err := json.Unmarshal(w.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+	if run.PRURL != "https://github.com/x/y/pull/3" {
+		t.Errorf("prUrl = %q, want the CR-backed URL", run.PRURL)
+	}
+	if run.Phase != string(wrenv1.PhaseSucceeded) {
+		t.Errorf("phase = %q, want Succeeded", run.Phase)
+	}
+	if !strings.Contains(w.Body.String(), `"prUrl"`) {
+		t.Errorf("response missing the prUrl field: %s", w.Body.String())
+	}
+}
+
 // createRunViaAPI registers a project and submits a run, returning the run's ID
 // and namespace so log tests can drive the fake launcher directly.
 func createRunViaAPI(t *testing.T, h http.Handler) (id, ns string) {

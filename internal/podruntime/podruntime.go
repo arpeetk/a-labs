@@ -196,6 +196,14 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 		switch {
 		case errors.Is(ferr, finalize.ErrNoChanges):
 			em.Message("finalize: harness made no changes; no PR opened")
+		case errors.Is(ferr, finalize.ErrRetryable):
+			// Transient (GitHub 5xx/429, dropped push connection, timeout):
+			// exit ExitRetryable so the operator resumes on a fresh pod — the
+			// commit survives on the workspace PVC, so the retry only has to
+			// redo the push/PR (WS-11).
+			em.Errorf("finalize (transient, will retry on a fresh pod): " + ferr.Error())
+			em.Status("failed")
+			return fmt.Errorf("%w: %w", ErrRetryable, ferr)
 		case ferr != nil:
 			em.Errorf("finalize: " + ferr.Error())
 			em.Status("failed")

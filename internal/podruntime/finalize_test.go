@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +17,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	gh "github.com/google/go-github/v66/github"
 
 	"github.com/summiteight/wren/internal/github"
 	"github.com/summiteight/wren/internal/runspec"
@@ -147,6 +151,54 @@ func TestRunHarnessOpensPR(t *testing.T) {
 	ob, _ := git.PlainOpen(origin)
 	if _, err := ob.Reference(plumbing.NewBranchReferenceName("wren/me/r-7"), true); err != nil {
 		t.Errorf("branch not pushed: %v", err)
+	}
+}
+
+// TestRunHarnessFinalizeRetryClassification drives the WS-11 contract at the
+// pod boundary: a transient finalize failure (GitHub 5xx, a dropped
+// connection) comes out of RunHarness as ErrRetryable — cmd/wren-runtime exits
+// runspec.ExitRetryable and the operator resumes on a fresh pod — while a
+// permanent failure (422 validation) stays deterministic.
+func TestRunHarnessFinalizeRetryClassification(t *testing.T) {
+	ghResp := func(code int) *http.Response {
+		return &http.Response{StatusCode: code,
+			Request: &http.Request{Method: "POST", URL: &url.URL{Scheme: "https", Host: "api.github.com"}}}
+	}
+	cases := []struct {
+		name          string
+		openPRErr     error
+		wantRetryable bool
+	}{
+		{"github 502 is retryable", &gh.ErrorResponse{Response: ghResp(http.StatusBadGateway)}, true},
+		{"dropped connection is retryable", io.ErrUnexpectedEOF, true},
+		{"github 422 is deterministic", &gh.ErrorResponse{Response: ghResp(http.StatusUnprocessableEntity)}, false},
+		{"plain error is deterministic", errors.New("commit: boom"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			origin := bareOrigin(t)
+			ws := t.TempDir()
+			if _, err := git.PlainClone(ws, false, &git.CloneOptions{URL: "file://" + origin}); err != nil {
+				t.Fatal(err)
+			}
+			fake := &github.Fake{Err: tc.openPRErr}
+			orig := newGitHubClient
+			newGitHubClient = func(string) github.Client { return fake }
+			defer func() { newGitHubClient = orig }()
+			t.Setenv("GITHUB_TOKEN", "tok")
+
+			specPath := writeRunSpec(t, t.TempDir(), runspec.RunSpec{
+				RunID: "r-9", Project: "p", Repo: "corp/payments", Harness: "mock",
+				Prompt: "x", BaseRef: "main", WorkspacePath: ws, BranchPrefix: "wren/me",
+			})
+			err := RunHarness(context.Background(), &bytes.Buffer{}, specPath)
+			if err == nil {
+				t.Fatal("expected finalize to fail")
+			}
+			if got := errors.Is(err, ErrRetryable); got != tc.wantRetryable {
+				t.Errorf("errors.Is(err, ErrRetryable) = %v, want %v (err = %v)", got, tc.wantRetryable, err)
+			}
+		})
 	}
 }
 

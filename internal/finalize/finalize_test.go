@@ -3,6 +3,7 @@ package finalize
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,8 +12,10 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	gh "github.com/google/go-github/v66/github"
 
 	"github.com/summiteight/wren/internal/github"
+	"github.com/summiteight/wren/internal/gitwork"
 	"github.com/summiteight/wren/internal/runspec"
 )
 
@@ -103,6 +106,99 @@ func TestFinalizeNoChanges(t *testing.T) {
 	spec := runspec.RunSpec{RunID: "r-1", Repo: "corp/payments", WorkspacePath: ws, BaseRef: "main"}
 	if _, err := Run(context.Background(), spec, "", &github.Fake{}); !errors.Is(err, ErrNoChanges) {
 		t.Fatalf("err = %v, want ErrNoChanges", err)
+	}
+}
+
+// TestFinalizeResumeAfterCommit simulates a crash after `git commit` but
+// before the push: the run branch (with its commit) already exists on the
+// durable workspace. The resume's finalize must not fail "branch already
+// exists" and must not mistake the committed state for a no-change run — it
+// pushes the branch and opens the PR (WS-11).
+func TestFinalizeResumeAfterCommit(t *testing.T) {
+	origin := makeOrigin(t)
+	ws := cloneInto(t, origin)
+	if err := os.WriteFile(filepath.Join(ws, "WREN.md"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := runspec.RunSpec{
+		RunID: "r-1", Repo: "corp/payments", Prompt: "x", BaseRef: "main",
+		WorkspacePath: ws, BranchPrefix: "wren/me",
+	}
+	// First pod: commits, then "crashes" before the push.
+	repo, err := git.PlainOpen(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gitwork.CommitAll(repo, BranchName(spec), "Wren: x", prAuthor); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Resume pod: finalize re-runs end to end.
+	fake := &github.Fake{}
+	pr, err := Run(context.Background(), spec, "", fake)
+	if err != nil {
+		t.Fatalf("resume finalize: %v", err)
+	}
+	if pr == nil || len(fake.PRs) != 1 {
+		t.Fatalf("expected the PR to open on resume, got pr=%+v fake PRs=%+v", pr, fake.PRs)
+	}
+	ob, _ := git.PlainOpen(origin)
+	if _, err := ob.Reference(plumbing.NewBranchReferenceName("wren/me/r-1"), true); err != nil {
+		t.Errorf("branch not pushed on resume: %v", err)
+	}
+}
+
+// TestFinalizeRunTwice covers a crash even later in finalize — after the push
+// (and possibly after the PR): the re-run must succeed, never error
+// "branch already exists". (Against the real API findExisting dedupes the PR;
+// the Fake records a second request, which this test does not assert on.)
+func TestFinalizeRunTwice(t *testing.T) {
+	origin := makeOrigin(t)
+	ws := cloneInto(t, origin)
+	if err := os.WriteFile(filepath.Join(ws, "WREN.md"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	spec := runspec.RunSpec{
+		RunID: "r-1", Repo: "corp/payments", Prompt: "x", BaseRef: "main",
+		WorkspacePath: ws, BranchPrefix: "wren/me",
+	}
+	fake := &github.Fake{}
+	if _, err := Run(context.Background(), spec, "", fake); err != nil {
+		t.Fatalf("first finalize: %v", err)
+	}
+	pr, err := Run(context.Background(), spec, "", fake)
+	if err != nil {
+		t.Fatalf("second finalize: %v", err)
+	}
+	if pr == nil || pr.URL == "" {
+		t.Fatalf("second finalize returned no PR: %+v", pr)
+	}
+}
+
+// TestFinalizeRetryableOpenPRError: a transient OpenPR failure (GitHub 502)
+// surfaces as ErrRetryable so podruntime can exit ExitRetryable; a permanent
+// one (422) does not (WS-11).
+func TestFinalizeRetryableOpenPRError(t *testing.T) {
+	newSpec := func(t *testing.T) runspec.RunSpec {
+		t.Helper()
+		ws := cloneInto(t, makeOrigin(t))
+		if err := os.WriteFile(filepath.Join(ws, "WREN.md"), []byte("work\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return runspec.RunSpec{
+			RunID: "r-1", Repo: "corp/payments", Prompt: "x", BaseRef: "main",
+			WorkspacePath: ws, BranchPrefix: "wren/me",
+		}
+	}
+
+	transient := &github.Fake{Err: &gh.ErrorResponse{Response: httpResp(http.StatusBadGateway)}}
+	if _, err := Run(context.Background(), newSpec(t), "", transient); !errors.Is(err, ErrRetryable) {
+		t.Errorf("err = %v, want ErrRetryable", err)
+	}
+
+	permanent := &github.Fake{Err: &gh.ErrorResponse{Response: httpResp(http.StatusUnprocessableEntity)}}
+	if _, err := Run(context.Background(), newSpec(t), "", permanent); err == nil || errors.Is(err, ErrRetryable) {
+		t.Errorf("err = %v, want deterministic failure (not ErrRetryable)", err)
 	}
 }
 

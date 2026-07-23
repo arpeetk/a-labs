@@ -19,6 +19,12 @@ rules:
   - update
   - watch
 - apiGroups:
+  - ""
+  resources:
+  - pods/log
+  verbs:
+  - get
+- apiGroups:
   - wren.dev
   resources:
   - agentpools

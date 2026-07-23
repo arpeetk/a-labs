@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -72,10 +73,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// The controller-runtime client cannot read pod logs (a subresource), so a
+	// typed clientset backs the terminal-event scrape into run status (WS-11).
+	cs, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "unable to build clientset for log scraping")
+		os.Exit(1)
+	}
+
 	if err := (&controller.AgentRunReconciler{
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		PodConfig: podCfg,
+		Logs:      controller.NewLogReader(cs),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up AgentRun controller")
 		os.Exit(1)

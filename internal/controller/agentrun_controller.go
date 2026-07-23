@@ -36,12 +36,17 @@ type AgentRunReconciler struct {
 	// PodConfig is the operator-level pod configuration (images, credential
 	// Secrets injected into the egress-proxy, egress port).
 	PodConfig PodConfig
+	// Logs reads pod container logs (pods/log). It backs the v0.1 run-results
+	// channel: terminal harness events are scraped into Status.PR/Usage/
+	// SessionID (WS-11). Nil disables the scrape (tests, bring-up).
+	Logs LogReader
 }
 
 // +kubebuilder:rbac:groups=wren.dev,resources=agentruns,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=wren.dev,resources=agentruns/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=wren.dev,resources=agentruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;configmaps,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives an AgentRun toward its terminal state.
@@ -239,7 +244,9 @@ func (r *AgentRunReconciler) reconcilePodState(ctx context.Context, run *wrenv1.
 		return r.setPhaseIfChanged(ctx, run, wrenv1.PhaseRunning, "PodRunning", "harness running")
 	case corev1.PodSucceeded:
 		// Harness exited 0: the PR is opened by the harness/control plane; the
-		// operator records terminal success.
+		// operator records terminal success. Scrape the harness event stream
+		// first so Status.PR/Usage/SessionID land with the terminal phase.
+		r.scrapeRunResults(ctx, run, pod)
 		return r.setPhaseIfChanged(ctx, run, wrenv1.PhaseSucceeded, "HarnessCompleted", "task complete")
 	case corev1.PodFailed:
 		return r.handlePodFailure(ctx, run, pod)
@@ -251,6 +258,10 @@ func (r *AgentRunReconciler) reconcilePodState(ctx context.Context, run *wrenv1.
 // handlePodFailure resumes the run (up to the retry budget) or fails it,
 // recording the classified reason so `wren run get` shows continuity.
 func (r *AgentRunReconciler) handlePodFailure(ctx context.Context, run *wrenv1.AgentRun, pod *corev1.Pod) (ctrl.Result, error) {
+	// Scrape the harness event stream BEFORE the pod is deleted for resume:
+	// the events survive container termination only while the pod object
+	// lives, and the results (tokens spent, any PR) must not be lost.
+	r.scrapeRunResults(ctx, run, pod)
 	info := classifyTermination(pod)
 	max := run.Spec.Retry.MaxRestarts
 	if max == 0 {
