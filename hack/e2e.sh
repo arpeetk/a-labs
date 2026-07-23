@@ -211,8 +211,11 @@ done
 log "verifying terminal state (Succeeded, no PR) via 'wren run get'"
 final="$("$WREN" run get "$RUN_ID" 2>/dev/null || true)"
 printf '%s' "$final" | grep -q '"phase"[[:space:]]*:[[:space:]]*"Succeeded"' || die "final phase not Succeeded"
-pr_url="$(printf '%s' "$final" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-[ -z "$pr_url" ] || warn "expected no PR in keyless mode, got: $pr_url"
+# The run JSON field is prUrl (store.Run); the old "url" grep matched nothing,
+# making this check vacuous. A keyless run must NOT open a PR — hard-fail if
+# one shows up (WS-11).
+pr_url="$(printf '%s' "$final" | sed -n 's/.*"prUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+[ -z "$pr_url" ] || die "expected no PR in keyless mode, got: $pr_url"
 
 STATUS="ok"
 log "E2E PASSED — keyless run $RUN_ID reached Succeeded (no credentials, no PR)"

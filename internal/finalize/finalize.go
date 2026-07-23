@@ -6,9 +6,11 @@ package finalize
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
 
 	"github.com/summiteight/wren/internal/github"
 	"github.com/summiteight/wren/internal/gitwork"
@@ -40,13 +42,20 @@ func Run(ctx context.Context, spec runspec.RunSpec, token string, client github.
 	}
 	title := "Wren: " + truncate(spec.Prompt, 72)
 
+	// Resume note: if the run branch already exists on the durable workspace,
+	// a previous pod committed before crashing mid-push. CommitAll then reports
+	// ErrNoChanges (its HEAD already captures the worktree) — that is NOT an
+	// empty run, so fall through to the idempotent push/PR instead of bailing.
+	resume := branchExists(repo, branch)
 	if _, err := gitwork.CommitAll(repo, branch, title, prAuthor); err != nil {
-		return nil, err // includes ErrNoChanges
+		if !errors.Is(err, gitwork.ErrNoChanges) || !resume {
+			return nil, err // a genuine no-change run reports ErrNoChanges
+		}
 	}
 	if err := gitwork.Push(repo, branch, token); err != nil {
-		return nil, err
+		return nil, classify(err)
 	}
-	return client.OpenPR(ctx, github.PRRequest{
+	pr, err := client.OpenPR(ctx, github.PRRequest{
 		Owner:      owner,
 		Repo:       name,
 		BaseBranch: base,
@@ -54,6 +63,17 @@ func Run(ctx context.Context, spec runspec.RunSpec, token string, client github.
 		Title:      title,
 		Body:       Rubric(spec),
 	})
+	if err != nil {
+		return nil, classify(err)
+	}
+	return pr, nil
+}
+
+// branchExists reports whether the run branch already exists in the workspace
+// clone (i.e. this finalize is a resume re-run).
+func branchExists(repo *git.Repository, branch string) bool {
+	_, err := repo.Reference(plumbing.NewBranchReferenceName(branch), true)
+	return err == nil
 }
 
 // BranchName is the run's PR branch: "<prefix>/<run-id>".
