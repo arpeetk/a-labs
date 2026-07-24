@@ -36,8 +36,8 @@ func newProjectCreateCmd() *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.StringVar(&p.Repo, "repo", "", "GitHub repo as owner/repo (empty = keyless project)")
-	f.StringVar(&p.DefaultHarness, "harness", "", "default harness: claude-code|mock (default: control plane's)")
-	f.StringVar(&p.HarnessImage, "harness-image", "", "image the harness runs in (e.g. the install's pushed runtime image)")
+	f.StringVar(&p.DefaultHarness, "harness", "", "default harness: mock|claude-code|codex|opencode|byo (default: control plane's)")
+	f.StringVar(&p.HarnessImage, "harness-image", "", "image the harness runs in (e.g. the install's pushed claude-code/codex/opencode image)")
 	f.StringVar(&p.DefaultModel, "model", "", "default model (e.g. claude-opus-4-8, mock)")
 	f.StringVar(&p.CPU, "cpu", "", "CPU request (e.g. 2)")
 	f.StringVar(&p.Memory, "memory", "", "memory request (e.g. 4Gi)")

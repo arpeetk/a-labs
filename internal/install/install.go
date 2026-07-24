@@ -61,6 +61,13 @@ type Options struct {
 	// ImageTag tags pushed registry images. Empty resolves to the source
 	// tree's short git SHA, falling back to "dev".
 	ImageTag string
+	// HarnessImages restricts which harness images (build/Dockerfile.<name>)
+	// this install builds/pushes or kind-loads, as a comma list (e.g.
+	// "claude-code,codex"). Empty means the default: all of them, so a team
+	// doesn't have to discover a separate manual step to unlock codex/opencode
+	// later. "none" skips harness images entirely (a keyless/mock-only eval
+	// install).
+	HarnessImages string
 	// SrcDir is the repo checkout the Docker builds run against.
 	SrcDir string
 	// Expose LoadBalancer switches the apiserver Service type for team setups;
@@ -181,8 +188,12 @@ func (in *Installer) Install(ctx context.Context, opts Options) error {
 	if opts.Expose != "" && opts.Expose != "LoadBalancer" {
 		return fmt.Errorf("--expose must be LoadBalancer or empty, got %q", opts.Expose)
 	}
+	harnesses, err := resolveHarnessImages(opts.HarnessImages)
+	if err != nil {
+		return err
+	}
 
-	st := &steps{in: in, opts: opts}
+	st := &steps{in: in, opts: opts, harnesses: harnesses}
 	if err := st.preflight(ctx); err != nil {
 		return err
 	}
@@ -240,9 +251,10 @@ func (in *Installer) Uninstall(ctx context.Context, opts UninstallOptions) error
 
 // steps holds per-install state so the phases share the resolved options.
 type steps struct {
-	in   *Installer
-	opts Options
-	tag  string // resolved image tag (registry path), for the hand-off hint
+	in        *Installer
+	opts      Options
+	tag       string   // resolved image tag (registry path), for the hand-off hint
+	harnesses []string // harness images this install builds (resolveHarnessImages)
 }
 
 func (s *steps) logf(format string, args ...any) {

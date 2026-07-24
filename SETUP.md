@@ -12,7 +12,7 @@ The design behind this is [`docs/technical-spec.md`](docs/technical-spec.md)
 | Thing | Why |
 |---|---|
 | A Kubernetes cluster (≥ 1.27) + `kubectl` access | runs the control plane and the agent pods |
-| `docker` (daemon running) | `wren install` builds the three images |
+| `docker` (daemon running) | `wren install` builds the control-plane images + the harness images |
 | A **GitHub token** (PAT, or just `gh` logged in) | agents push branches + open PRs |
 | An **Anthropic API key** | the Claude agent does the work |
 | For GKE: `gcloud` + an Artifact Registry repo | cluster auth + image publishing |
@@ -43,7 +43,8 @@ gcloud container clusters get-credentials wren --zone us-central1-a --project my
 gcloud auth configure-docker us-central1-docker.pkg.dev
 
 # 3. install: preflight → apply CRDs/RBAC/Deployments → build+push linux/amd64
-#    images → store credentials as proxy Secrets → wait for Ready
+#    control-plane images + harness images (claude-code, codex, opencode by
+#    default) → store credentials as proxy Secrets → wait for Ready
 GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
   wren install --registry us-central1-docker.pkg.dev/my-proj/wren
 ```
@@ -52,6 +53,12 @@ GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
 images. Without the env vars it falls back to `gh auth token` and then asks
 interactively (input is never echoed); `--skip-credentials` installs keyless
 (mock harness works; claude-code runs and PRs need the Secrets).
+
+By default `wren install` builds/pushes **all** harness images
+(`claude-code`, `codex`, `opencode`) so any of them is ready to use
+immediately — pass `--harness-images=claude-code,codex` to restrict the set,
+or `--harness-images=none` to skip harness images entirely (see
+[docs/harnesses.md](docs/harnesses.md)).
 
 > **GKE note:** grant the node service account `roles/artifactregistry.reader`
 > so pods can pull from your registry (`<projnum>-compute@developer...`), or the
@@ -89,7 +96,7 @@ wren login --control-plane localhost:8090 --user you@corp.com
 #    namespace holding the credential Secrets (install's --run-namespace)
 wren project create payments-api \
   --repo acme/payments-api --harness claude-code \
-  --harness-image us-central1-docker.pkg.dev/my-proj/wren/runtime:<tag> \
+  --harness-image us-central1-docker.pkg.dev/my-proj/wren/claude-code:<tag> \
   --cpu 1 --memory 2Gi --disk 5Gi --namespace wren-runs
 
 # 4. submit a task — the agent clones, does the work, opens a PR
@@ -105,6 +112,32 @@ flows back to `run get`.
 > A project with no `--repo` is **keyless**: runs skip the clone and the PR —
 > pair it with `--harness mock` for a zero-credential smoke test of the whole
 > pipeline (this is what `make e2e` drives).
+
+### Using codex or opencode instead of claude-code
+
+`wren install` builds all three harness images by default (see above), so
+lighting up a non-default harness for a project is just pointing it at the
+image `install` already pushed — no separate build step:
+
+```sh
+# install already pushed .../wren/{claude-code,codex,opencode}:<tag> —
+# find <tag> from the install output, or `git rev-parse --short HEAD` if you
+# didn't pass --tag.
+wren project create payments-api-codex \
+  --repo acme/payments-api --harness codex \
+  --harness-image us-central1-docker.pkg.dev/my-proj/wren/codex:<tag> \
+  --cpu 1 --memory 2Gi --disk 5Gi --namespace wren-runs
+
+wren run create --project payments-api-codex --task "Add input validation to the signup endpoint"
+```
+
+Swap `codex`/`OPENAI_API_KEY` for `opencode` the same way (opencode rides the
+Anthropic route, so it reuses the same `wren-anthropic-key` Secret `wren
+install` already wrote — no extra credential needed). Codex/opencode are
+**not yet validated against the live providers** in CI — see
+[docs/harnesses.md](docs/harnesses.md) for what's tested (command
+construction, event parsing, credential wiring) versus what still needs a
+live-key smoke run.
 
 ## Uninstall
 

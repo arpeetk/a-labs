@@ -7,13 +7,57 @@ import (
 	"strings"
 )
 
-// imageNames are the three images every install builds, in push/load order.
-// The operator's --runtime-image points at "runtime"; operator + apiserver run
-// the control plane itself.
+// imageNames are the three control-plane images every install builds, in
+// push/load order. The operator's --runtime-image points at "runtime";
+// operator + apiserver run the control plane itself.
 var imageNames = []string{"runtime", "operator", "apiserver"}
 
-// images builds and delivers the three images: pushed to --registry for a real
-// cluster (GKE), or built + `kind load`ed for local eval.
+// harnessImageNames are the harness images `wren install` can build, keyed by
+// the same names internal/harness.New switches on (claude-code/codex/opencode)
+// and the build/Dockerfile.<name> each image comes from. This is the default
+// build set — a team shouldn't have to discover a separate manual step to
+// unlock codex/opencode later.
+var harnessImageNames = []string{"claude-code", "codex", "opencode"}
+
+// resolveHarnessImages parses --harness-images into the concrete list of
+// harness image names to build: empty selects the default (all of
+// harnessImageNames), "none" skips harness images entirely (a keyless/
+// mock-only eval install), and a comma list restricts to the named subset.
+func resolveHarnessImages(spec string) ([]string, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return harnessImageNames, nil
+	}
+	if spec == "none" {
+		return nil, nil
+	}
+	valid := make(map[string]bool, len(harnessImageNames))
+	for _, n := range harnessImageNames {
+		valid[n] = true
+	}
+	var out []string
+	seen := make(map[string]bool, len(harnessImageNames))
+	for _, n := range strings.Split(spec, ",") {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
+		}
+		if !valid[n] {
+			return nil, fmt.Errorf("--harness-images: unknown harness %q (want a comma list of %s, or \"none\")",
+				n, strings.Join(harnessImageNames, ", "))
+		}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// images builds and delivers the control-plane images plus the selected
+// harness images: pushed to --registry for a real cluster (GKE), or built +
+// `kind load`ed for local eval.
 func (s *steps) images(ctx context.Context) error {
 	if s.opts.KindCluster != "" {
 		return s.kindImages(ctx)
@@ -21,12 +65,14 @@ func (s *steps) images(ctx context.Context) error {
 	return s.registryImages(ctx)
 }
 
-// kindImages builds wren/*:dev — the refs the embedded manifests already pin —
-// and loads them into the kind node, so no Deployment override is needed.
+// kindImages builds wren/*:dev — the refs the embedded manifests already pin
+// for the control-plane images — plus wren/<harness>:dev for the selected
+// harness images, and loads all of them into the kind node.
 func (s *steps) kindImages(ctx context.Context) error {
-	s.logf("building images (wren/{runtime,operator,apiserver}:dev)")
+	all := append(append([]string{}, imageNames...), s.harnesses...)
+	s.logf("building images (wren/{%s}:dev)", strings.Join(all, ","))
 	var refs []string
-	for _, name := range imageNames {
+	for _, name := range all {
 		ref := "wren/" + name + ":dev"
 		if err := s.build(ctx, name, ref, ""); err != nil {
 			return err
@@ -44,19 +90,22 @@ func (s *steps) kindImages(ctx context.Context) error {
 	return nil
 }
 
-// registryImages builds linux/amd64 images (GKE Standard nodes are x86), pushes
-// them, and overrides the Deployment refs imperatively — the hack/e2e-gke.sh
-// pattern moved into Go, so no registry or tag is baked into committed
-// manifests (code standards rule 3).
+// registryImages builds linux/amd64 control-plane + selected harness images
+// (GKE Standard nodes are x86), pushes them, and overrides the Deployment
+// refs imperatively — the hack/e2e-gke.sh pattern moved into Go, so no
+// registry or tag is baked into committed manifests (code standards rule 3).
+// Harness images have no Deployment to override — a project points at one
+// explicitly via `wren project create --harness-image`.
 func (s *steps) registryImages(ctx context.Context) error {
 	tag, err := s.resolveTag(ctx)
 	if err != nil {
 		return err
 	}
 	s.tag = tag
+	all := append(append([]string{}, imageNames...), s.harnesses...)
 	reg := strings.TrimSuffix(s.opts.Registry, "/")
 	s.logf("building + pushing linux/amd64 images to %s (tag %s)", reg, tag)
-	for _, name := range imageNames {
+	for _, name := range all {
 		if err := s.build(ctx, name, reg+"/"+name+":"+tag, "linux/amd64"); err != nil {
 			return err
 		}
@@ -71,7 +120,8 @@ func (s *steps) registryImages(ctx context.Context) error {
 }
 
 // build runs one docker build against the repo checkout. name selects the
-// Dockerfile/binary (runtime has its own; operator/apiserver share gobin).
+// Dockerfile/binary: runtime has its own, operator/apiserver share gobin
+// (BIN=wren-<name>), and each harness has its own build/Dockerfile.<name>.
 func (s *steps) build(ctx context.Context, name, ref, platform string) error {
 	// Resolve the Dockerfile against the checkout: docker resolves a relative
 	// -f against the process cwd, which need not equal SrcDir.
@@ -83,10 +133,17 @@ func (s *steps) build(ctx context.Context, name, ref, platform string) error {
 	if platform != "" {
 		args = append(args, "--platform", platform)
 	}
-	dockerfile := "build/Dockerfile.runtime"
-	if name != "runtime" {
+	var dockerfile string
+	switch name {
+	case "runtime":
+		dockerfile = "build/Dockerfile.runtime"
+	case "operator", "apiserver":
 		dockerfile = "build/Dockerfile.gobin"
 		args = append(args, "--build-arg", "BIN=wren-"+name)
+	default:
+		// Harness images (claude-code/codex/opencode): each has its own
+		// Dockerfile that builds wren-runtime itself, no BIN arg needed.
+		dockerfile = "build/Dockerfile." + name
 	}
 	args = append(args, "-f", filepath.Join(src, dockerfile), "-t", ref, src)
 	if err := s.in.Runner.Run(ctx, "docker", args...); err != nil {
@@ -186,7 +243,8 @@ Or via the LoadBalancer (team setups):
   %s -n %s get svc %s   # EXTERNAL-IP, then use <ip>:8090 below
 `, kctl, SystemNamespace, ApiserverService)
 	}
-	fmt.Fprintf(s.in.Out, `
+	if ref, ok := s.harnessImageHint(); ok {
+		fmt.Fprintf(s.in.Out, `
 Then, as an engineer:
   wren login --control-plane localhost:8090 --user you@corp.com
   wren project create demo --repo owner/repo --harness claude-code \
@@ -196,13 +254,44 @@ Then, as an engineer:
 NOTE: the control plane authenticates callers with a trusted X-Wren-User header
 only (M0 stand-in; SSO/OIDC is a later milestone). Keep it on port-forward or a
 trusted network — do NOT expose it publicly.
-`, s.harnessImageHint(), s.opts.RunNamespace)
+`, ref, s.opts.RunNamespace)
+		return
+	}
+	fmt.Fprintf(s.in.Out, `
+Then, as an engineer:
+  wren login --control-plane localhost:8090 --user you@corp.com
+  wren project create demo --harness mock \
+      --cpu 1 --memory 2Gi --disk 5Gi --namespace %s
+  wren run create --project demo --task "Add a health endpoint"
+
+NOTE: this install built no claude-code harness image (--harness-images=%s).
+mock is the only harness available until you re-run install with it included,
+e.g. `+"`wren install ... --harness-images=claude-code`"+` — or point a project at a
+harness image you built/pushed yourself.
+
+NOTE: the control plane authenticates callers with a trusted X-Wren-User header
+only (M0 stand-in; SSO/OIDC is a later milestone). Keep it on port-forward or a
+trusted network — do NOT expose it publicly.
+`, s.opts.RunNamespace, s.opts.HarnessImages)
 }
 
-// harnessImageHint suggests the harness image matching the install's image path.
-func (s *steps) harnessImageHint() string {
-	if s.opts.KindCluster != "" {
-		return "wren/runtime:dev"
+// harnessImageHint resolves the --harness-image example for the hand-off: the
+// image this install actually built for the project's default harness
+// (claude-code, per coreapi.DefaultDefaults). ok is false when this install
+// did not build a claude-code image (e.g. --harness-images=codex or
+// --harness-images=none) — the caller falls back to a mock-only example.
+func (s *steps) harnessImageHint() (ref string, ok bool) {
+	for _, h := range s.harnesses {
+		if h == "claude-code" {
+			ok = true
+			break
+		}
 	}
-	return strings.TrimSuffix(s.opts.Registry, "/") + "/runtime:" + s.tag
+	if !ok {
+		return "", false
+	}
+	if s.opts.KindCluster != "" {
+		return "wren/claude-code:dev", true
+	}
+	return strings.TrimSuffix(s.opts.Registry, "/") + "/claude-code:" + s.tag, true
 }

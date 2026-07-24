@@ -53,6 +53,7 @@ func newInstallCmd() *cobra.Command {
 	f.StringVar(&opts.KindCluster, "kind", "", "local eval: create/reuse this kind cluster and load images into it")
 	f.StringVar(&opts.Registry, "registry", "", "image prefix to build (linux/amd64), push, and point the control plane at (e.g. an Artifact Registry path)")
 	f.StringVar(&opts.ImageTag, "tag", "", "image tag for --registry pushes (default: source tree's short git SHA, else \"dev\")")
+	f.StringVar(&opts.HarnessImages, "harness-images", "", "comma list of harness images to build/deliver: claude-code,codex,opencode (default: all three; \"none\" skips harness images entirely)")
 	f.StringVar(&opts.SrcDir, "src", ".", "repo checkout to build images from")
 	f.StringVar(&opts.Expose, "expose", "", "expose the apiserver Service as this type (LoadBalancer) for team setups; default stays port-forward-only")
 	f.StringVar(&opts.RunNamespace, "run-namespace", "wren-runs", "namespace for the proxy credential Secrets; credentialed projects point their namespace here")

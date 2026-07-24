@@ -14,9 +14,18 @@ adapter passes only a **placeholder** API key so its CLI starts in API-key
 mode; the proxy scrubs inbound credentials and overwrites the auth header on
 the way out.
 
-Pick a harness per project (the registration API's `defaultHarness` +
-`harnessImage` fields — `POST /v1/projects`; a `wren project` CLI is WS-13) or
-per run: `wren run create --harness mock|claude-code|codex|opencode|byo`.
+Pick a harness per project (`wren project create --harness ... --harness-image
+...`, or the registration API's `defaultHarness` + `harnessImage` fields —
+`POST /v1/projects`) or per run: `wren run create --harness
+mock|claude-code|codex|opencode|byo`.
+
+`wren install` builds and delivers every harness image by default (in
+addition to the runtime/operator/apiserver control-plane images) — a fresh
+`wren install --kind` / `wren install --registry` gives you `claude-code`,
+`codex`, and `opencode` images ready to use, no separate manual build step
+required. Use `--harness-images=claude-code,codex` to restrict the set (faster
+iterative installs) or `--harness-images=none` to skip harness images
+entirely (a keyless/mock-only eval install).
 
 | Harness | Image (`build/`) | Model API route (proxy) | Secret → proxy env | `RunSpec.Model` → CLI flag |
 |---|---|---|---|---|

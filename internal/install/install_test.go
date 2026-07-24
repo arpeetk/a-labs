@@ -28,6 +28,18 @@ func kindOpts() Options {
 	return Options{KindCluster: "eval", SkipCredentials: true}
 }
 
+// ranContains reports whether any recorded Run contains substr (FakeRunner's
+// own Ran only matches a prefix, which the docker build args' absolute
+// -f path defeats).
+func ranContains(r *FakeRunner, substr string) bool {
+	for _, run := range r.Runs {
+		if strings.Contains(run, substr) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestInstallKindHappyPath(t *testing.T) {
 	in, k, r, out := fixture(t)
 	if err := in.Install(context.Background(), kindOpts()); err != nil {
@@ -40,10 +52,18 @@ func TestInstallKindHappyPath(t *testing.T) {
 	}
 	for _, want := range []string{
 		"docker build -f ",
-		"kind load docker-image wren/runtime:dev wren/operator:dev wren/apiserver:dev --name eval",
+		"kind load docker-image wren/runtime:dev wren/operator:dev wren/apiserver:dev " +
+			"wren/claude-code:dev wren/codex:dev wren/opencode:dev --name eval",
 	} {
 		if !r.Ran(want) {
 			t.Errorf("expected run %q, runs: %v", want, r.Runs)
+		}
+	}
+	// Default --harness-images builds all three harness Dockerfiles too — a
+	// team shouldn't need a separate manual step to unlock codex/opencode.
+	for _, df := range []string{"Dockerfile.claude-code", "Dockerfile.codex", "Dockerfile.opencode"} {
+		if !ranContains(r, df) {
+			t.Errorf("expected harness build for %s, runs: %v", df, r.Runs)
 		}
 	}
 	if !k.HasCall("ApplyManifests") {
@@ -90,8 +110,9 @@ func TestInstallRegistryPath(t *testing.T) {
 	if err := in.Install(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	// linux/amd64 cross-builds + pushes, tag resolved from git.
-	for _, name := range []string{"runtime", "operator", "apiserver"} {
+	// linux/amd64 cross-builds + pushes, tag resolved from git — the 3
+	// control-plane images plus all 3 harness images (default --harness-images).
+	for _, name := range []string{"runtime", "operator", "apiserver", "claude-code", "codex", "opencode"} {
 		ref := "us-central1-docker.pkg.dev/proj/wren/" + name + ":abc1234"
 		if !r.Ran("docker build --platform linux/amd64") {
 			t.Errorf("expected linux/amd64 build for %s, runs: %v", name, r.SortedRuns())
@@ -103,8 +124,78 @@ func TestInstallRegistryPath(t *testing.T) {
 	if !k.HasCall("OverrideImages:us-central1-docker.pkg.dev/proj/wren:abc1234") {
 		t.Errorf("expected OverrideImages with resolved tag, calls: %v", k.Calls)
 	}
-	if !strings.Contains(out.String(), "/runtime:abc1234") {
-		t.Errorf("hand-off should hint the pushed harness image, out:\n%s", out.String())
+	// OverrideImages only repoints the control-plane Deployments (runtime/
+	// operator/apiserver) — harness images aren't referenced by any
+	// Deployment, so pushing them must not add more OverrideImages calls.
+	overrides := 0
+	for _, c := range k.Calls {
+		if strings.HasPrefix(c, "OverrideImages:") {
+			overrides++
+		}
+	}
+	if overrides != 1 {
+		t.Errorf("expected exactly 1 OverrideImages call, got %d: %v", overrides, k.Calls)
+	}
+	if !strings.Contains(out.String(), "--harness-image us-central1-docker.pkg.dev/proj/wren/claude-code:abc1234") {
+		t.Errorf("hand-off should hint the pushed claude-code harness image, out:\n%s", out.String())
+	}
+}
+
+func TestInstallHarnessImagesRestrictsSet(t *testing.T) {
+	in, _, r, out := fixture(t)
+	opts := kindOpts()
+	opts.HarnessImages = "codex"
+	if err := in.Install(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if !ranContains(r, "Dockerfile.codex") {
+		t.Errorf("expected codex harness build, runs: %v", r.Runs)
+	}
+	for _, df := range []string{"Dockerfile.claude-code", "Dockerfile.opencode"} {
+		if ranContains(r, df) {
+			t.Errorf("restricted --harness-images=codex must not build %s, runs: %v", df, r.Runs)
+		}
+	}
+	if !r.Ran("kind load docker-image wren/runtime:dev wren/operator:dev wren/apiserver:dev wren/codex:dev --name eval") {
+		t.Errorf("expected kind load with just the codex harness image, runs: %v", r.Runs)
+	}
+	// claude-code wasn't built, so the hand-off must not recommend an image
+	// that doesn't exist — it should fall back to the mock-only example.
+	if strings.Contains(out.String(), "--harness-image wren/claude-code:dev") {
+		t.Errorf("hand-off must not hint an unbuilt claude-code image, out:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "no claude-code harness image") {
+		t.Errorf("hand-off should note claude-code wasn't built, out:\n%s", out.String())
+	}
+}
+
+func TestInstallHarnessImagesNoneSkipsAll(t *testing.T) {
+	in, _, r, out := fixture(t)
+	opts := kindOpts()
+	opts.HarnessImages = "none"
+	if err := in.Install(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	for _, df := range []string{"Dockerfile.claude-code", "Dockerfile.codex", "Dockerfile.opencode"} {
+		if ranContains(r, df) {
+			t.Errorf("--harness-images=none must build no harness image, runs: %v", r.Runs)
+		}
+	}
+	if !r.Ran("kind load docker-image wren/runtime:dev wren/operator:dev wren/apiserver:dev --name eval") {
+		t.Errorf("expected kind load with only the 3 control-plane images, runs: %v", r.Runs)
+	}
+	if !strings.Contains(out.String(), "mock") {
+		t.Errorf("hand-off should fall back to the mock-only example, out:\n%s", out.String())
+	}
+}
+
+func TestInstallHarnessImagesUnknownName(t *testing.T) {
+	in, _, _, _ := fixture(t)
+	opts := kindOpts()
+	opts.HarnessImages = "claude-code,bogus"
+	err := in.Install(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), `unknown harness "bogus"`) {
+		t.Fatalf("expected unknown-harness validation error, got %v", err)
 	}
 }
 
