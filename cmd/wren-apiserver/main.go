@@ -45,7 +45,14 @@ func main() {
 	}
 	defer cleanup()
 
-	svc := coreapi.New(st, lc, coreapi.DefaultDefaults())
+	// `wren install` sets WREN_DEFAULT_RUN_NAMESPACE to its --run-namespace so a
+	// project registered with no --namespace lands runs where install wrote the
+	// credential Secrets (WS-15 Part A). Empty keeps the per-user-prefix fallback.
+	defaults := coreapi.DefaultDefaults()
+	if ns := os.Getenv("WREN_DEFAULT_RUN_NAMESPACE"); ns != "" {
+		defaults.DefaultNamespace = ns
+	}
+	svc := coreapi.New(st, lc, defaults)
 
 	// Reconcile-on-boot: re-learn in-flight runs from the AgentRun CRs so a
 	// restarted apiserver (or one that just migrated stores) does not forget

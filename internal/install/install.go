@@ -142,6 +142,10 @@ type Kube interface {
 	// OverrideImages points the control-plane Deployments at pushed images and
 	// appends/replaces the operator's --runtime-image arg (last flag wins).
 	OverrideImages(ctx context.Context, registry, tag string) error
+	// SetApiserverRunNamespace sets the apiserver's WREN_DEFAULT_RUN_NAMESPACE
+	// env so a project registered with no --namespace lands runs in the namespace
+	// where install wrote the credential Secrets (WS-15 Part A).
+	SetApiserverRunNamespace(ctx context.Context, namespace string) error
 	// SetServiceType patches the apiserver Service's type (e.g. LoadBalancer).
 	SetServiceType(ctx context.Context, ns, name, svcType string) error
 	// WaitDeployments blocks until each named Deployment is Available.
@@ -211,6 +215,12 @@ func (in *Installer) Install(ctx context.Context, opts Options) error {
 	}
 	if err := st.credentials(ctx); err != nil {
 		return err
+	}
+	// Make the install's run-namespace the apiserver's actual default, so a
+	// project registered with no --namespace lands runs where the credentials
+	// just went (WS-15 Part A) — not in a per-user namespace with no Secrets.
+	if err := in.Kube.SetApiserverRunNamespace(ctx, opts.RunNamespace); err != nil {
+		return fmt.Errorf("set apiserver default run namespace: %w", err)
 	}
 	if opts.Expose != "" {
 		if err := in.Kube.SetServiceType(ctx, SystemNamespace, ApiserverService, opts.Expose); err != nil {

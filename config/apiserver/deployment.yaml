@@ -25,6 +25,13 @@ spec:
         image: wren/apiserver:dev
         args:
         - --addr=:8090
+        env:
+        # Default run namespace for projects registered without an explicit
+        # --namespace. It matches the install's default --run-namespace (where
+        # `wren install` writes the proxy credential Secrets); `wren install`
+        # patches this to a custom --run-namespace (WS-15 Part A).
+        - name: WREN_DEFAULT_RUN_NAMESPACE
+          value: wren-runs
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true

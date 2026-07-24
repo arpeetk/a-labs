@@ -3,6 +3,8 @@ package coreapi
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,6 +55,85 @@ func TestCreateProjectValidation(t *testing.T) {
 	}
 	if p.CreatedAt.IsZero() {
 		t.Error("CreatedAt not set")
+	}
+}
+
+// TestCreateRunMissingCredentialSecret is WS-15 Part A: a run resolved to a
+// namespace that lacks the harness's credential Secret is rejected up front with
+// an actionable error, instead of scheduling a doomed pod.
+func TestCreateRunMissingCredentialSecret(t *testing.T) {
+	svc, _, fl := newService(t)
+	fl.AssumeSecretsPresent = false // model an empty namespace
+	ctx := context.Background()
+	// claude-code + a repo needs both a GitHub token and an Anthropic key.
+	seedProject(t, svc, &store.Project{Name: "payments-api", Repo: "corp/payments-api", DefaultHarness: "claude-code"})
+
+	_, err := svc.CreateRun(ctx, CreateRunRequest{Project: "payments-api", User: "you@corp.com", Prompt: "hi"})
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("missing-secret run = %v, want ErrValidation", err)
+	}
+	if !strings.Contains(err.Error(), "GitHub token") || !strings.Contains(err.Error(), "user-you-corp-com") {
+		t.Errorf("error should name the missing credential and the namespace, got: %v", err)
+	}
+}
+
+// TestCreateRunMockHarnessSkipsCredentialCheck: the mock harness needs no
+// credentials, so an empty namespace must not block it (the keyless e2e path).
+func TestCreateRunMockHarnessSkipsCredentialCheck(t *testing.T) {
+	svc, _, fl := newService(t)
+	fl.AssumeSecretsPresent = false
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	if _, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"}); err != nil {
+		t.Fatalf("mock run should not require secrets: %v", err)
+	}
+}
+
+// TestCreateRunSecretPresentSucceeds: with the required Secrets seeded in the
+// resolved namespace, the credentialed run is admitted.
+func TestCreateRunSecretPresentSucceeds(t *testing.T) {
+	svc, _, fl := newService(t)
+	fl.AssumeSecretsPresent = false
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "p", Repo: "x/y", DefaultHarness: "claude-code", Namespace: "wren-runs"})
+	fl.SetSecret("wren-runs", "wren-github-token", "token", true)
+	fl.SetSecret("wren-runs", "wren-anthropic-key", "key", true)
+	if _, err := svc.CreateRun(ctx, CreateRunRequest{Project: "p", User: "u@x", Prompt: "hi"}); err != nil {
+		t.Fatalf("credentialed run should succeed: %v", err)
+	}
+}
+
+// TestResolveNamespaceUsesDefaultNamespace is WS-15 Part A: with the install's
+// DefaultNamespace set, a project with no explicit --namespace lands there
+// (where credentials live), not in a per-user namespace. An explicit project
+// namespace still overrides it.
+func TestResolveNamespaceUsesDefaultNamespace(t *testing.T) {
+	st := store.NewMemory()
+	fl := launcher.NewFake()
+	d := DefaultDefaults()
+	d.DefaultNamespace = "wren-runs"
+	svc := New(st, fl, d)
+	n := 0
+	svc.idgen = func() string { n++; return fmt.Sprintf("r-%d", n) }
+	svc.now = func() time.Time { return time.Unix(1_700_000_000, 0) }
+	ctx := context.Background()
+
+	seedProject(t, svc, &store.Project{Name: "shared", DefaultHarness: "mock"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "shared", User: "you@corp.com", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Namespace != "wren-runs" {
+		t.Errorf("namespace = %q, want the install default wren-runs", run.Namespace)
+	}
+
+	seedProject(t, svc, &store.Project{Name: "isolated", DefaultHarness: "mock", Namespace: "team-a"})
+	run2, err := svc.CreateRun(ctx, CreateRunRequest{Project: "isolated", User: "you@corp.com", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run2.Namespace != "team-a" {
+		t.Errorf("explicit --namespace override = %q, want team-a", run2.Namespace)
 	}
 }
 

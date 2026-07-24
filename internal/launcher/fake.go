@@ -23,13 +23,29 @@ type Fake struct {
 	// set, is returned by every StreamLogs call (to exercise error paths).
 	Logs    map[string]string
 	LogsErr error
+	// SecretKeys records seeded secret keys as "ns/name/key" → present. When
+	// AssumeSecretsPresent is true (the default), SecretHasKey reports any secret
+	// not explicitly tracked as present — so the many tests that create
+	// credentialed runs need no secret wiring. Tests exercising the
+	// missing-credential guard (WS-15 Part A) set AssumeSecretsPresent=false and
+	// seed the secrets that DO exist via SetSecret.
+	SecretKeys           map[string]bool
+	AssumeSecretsPresent bool
+	// SecretErr, when set, is returned by every SecretHasKey call (error path).
+	SecretErr error
 }
 
 var _ Launcher = (*Fake)(nil)
 
 // NewFake returns an empty fake launcher.
 func NewFake() *Fake {
-	return &Fake{Namespaces: map[string]bool{}, Runs: map[string]*wrenv1.AgentRun{}, Logs: map[string]string{}}
+	return &Fake{
+		Namespaces:           map[string]bool{},
+		Runs:                 map[string]*wrenv1.AgentRun{},
+		Logs:                 map[string]string{},
+		SecretKeys:           map[string]bool{},
+		AssumeSecretsPresent: true,
+	}
 }
 
 func key(ns, name string) string { return ns + "/" + name }
@@ -78,6 +94,26 @@ func (f *Fake) DeleteRun(_ context.Context, ns, name string) error {
 	defer f.mu.Unlock()
 	delete(f.Runs, key(ns, name))
 	return nil
+}
+
+func (f *Fake) SecretHasKey(_ context.Context, ns, name, key string) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.SecretErr != nil {
+		return false, f.SecretErr
+	}
+	if present, ok := f.SecretKeys[ns+"/"+name+"/"+key]; ok {
+		return present, nil
+	}
+	return f.AssumeSecretsPresent, nil
+}
+
+// SetSecret marks a Secret key present (or absent) in a namespace for the
+// missing-credential guard tests.
+func (f *Fake) SetSecret(ns, name, key string, present bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.SecretKeys[ns+"/"+name+"/"+key] = present
 }
 
 func (f *Fake) StreamLogs(_ context.Context, ns, runID, container string, _ bool) (io.ReadCloser, error) {

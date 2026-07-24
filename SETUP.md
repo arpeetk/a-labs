@@ -92,12 +92,15 @@ kubectl --context <cluster-context> -n wren-system port-forward svc/wren-apiserv
 # 2. log in (identity is a trusted header for now — see the M0 note above)
 wren login --control-plane localhost:8090 --user you@corp.com
 
-# 3. register a project: repo + harness image + resources, pointed at the
-#    namespace holding the credential Secrets (install's --run-namespace)
+# 3. register a project. Harness (claude-code), model, cpu/memory/disk and the
+#    run namespace all take control-plane defaults — install already pointed the
+#    default namespace at where it stored the credential Secrets. On a registry
+#    install the project still names the pushed harness image (the built-in
+#    default wren/claude-code:dev is only present on kind).
 wren project create payments-api \
-  --repo acme/payments-api --harness claude-code \
-  --harness-image us-central1-docker.pkg.dev/my-proj/wren/claude-code:<tag> \
-  --cpu 1 --memory 2Gi --disk 5Gi --namespace wren-runs
+  --repo acme/payments-api \
+  --harness-image us-central1-docker.pkg.dev/my-proj/wren/claude-code:<tag>
+# (on a `--kind` install, even simpler: `wren project create demo --repo owner/repo`)
 
 # 4. submit a task — the agent clones, does the work, opens a PR
 wren run create --project payments-api --task "Add input validation to the signup endpoint"
@@ -125,8 +128,7 @@ image `install` already pushed — no separate build step:
 # didn't pass --tag.
 wren project create payments-api-codex \
   --repo acme/payments-api --harness codex \
-  --harness-image us-central1-docker.pkg.dev/my-proj/wren/codex:<tag> \
-  --cpu 1 --memory 2Gi --disk 5Gi --namespace wren-runs
+  --harness-image us-central1-docker.pkg.dev/my-proj/wren/codex:<tag>
 
 wren run create --project payments-api-codex --task "Add input validation to the signup endpoint"
 ```

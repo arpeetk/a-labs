@@ -40,7 +40,21 @@ type Defaults struct {
 	Memory           string
 	Disk             string
 	CheckpointBucket string
+	// DefaultNamespace, when set, is the run namespace for any project
+	// registered without an explicit --namespace. `wren install` sets it (via
+	// the apiserver's WREN_DEFAULT_RUN_NAMESPACE env) to its --run-namespace, so
+	// the common single-shared-namespace case lands runs where install wrote the
+	// credential Secrets. Empty falls back to NamespacePrefix (WS-15 Part A).
+	DefaultNamespace string
 	NamespacePrefix  string // e.g. "user-" → namespace "user-<sanitized-user>"
+	// GitHubTokenSecret / AnthropicKeySecret / OpenAIKeySecret name the proxy
+	// credential Secrets the run's namespace must hold before a pod is worth
+	// scheduling. They mirror the operator's --github-token-secret /
+	// --anthropic-key-secret / --openai-key-secret defaults; the pre-flight
+	// credential check (WS-15 Part A) reads them.
+	GitHubTokenSecret  string
+	AnthropicKeySecret string
+	OpenAIKeySecret    string
 }
 
 // DefaultDefaults returns the built-in fallback configuration.
@@ -60,6 +74,12 @@ func DefaultDefaults() Defaults {
 		Disk:             "10Gi",
 		CheckpointBucket: "gs://wren-ckpt",
 		NamespacePrefix:  "user-",
+		// Mirror the operator's Secret-name defaults (cmd/wren-operator) and the
+		// install constants (internal/install). The credential pre-flight only
+		// checks a Secret it can name, so keep these in lockstep with those.
+		GitHubTokenSecret:  "wren-github-token",
+		AnthropicKeySecret: "wren-anthropic-key",
+		OpenAIKeySecret:    "wren-openai-key",
 	}
 }
 
@@ -143,6 +163,15 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (*store.R
 	}
 
 	eff := s.resolve(proj, req)
+
+	// Fail loud, not silent: a run resolved to a namespace missing the harness's
+	// credential Secret would otherwise start a pod that gets no credential
+	// injected (the egress-proxy mounts them Optional) and fail minutes later,
+	// far from the real cause (WS-15 Part A).
+	if err := s.checkCredentials(ctx, req, eff); err != nil {
+		return nil, err
+	}
+
 	id := s.idgen()
 	ns := eff.namespace
 
@@ -302,7 +331,10 @@ type effectiveConfig struct {
 }
 
 func (s *Service) resolve(p *store.Project, req CreateRunRequest) effectiveConfig {
-	ns := firstNonEmpty(p.Namespace, s.defaults.NamespacePrefix+sanitizeLabel(req.User))
+	// Namespace resolution: an explicit per-project --namespace wins (multi-tenant
+	// isolation), then the install-configured shared default (WS-15 Part A), then
+	// the per-user prefix fallback for installs that set neither.
+	ns := firstNonEmpty(p.Namespace, s.defaults.DefaultNamespace, s.defaults.NamespacePrefix+sanitizeLabel(req.User))
 	return effectiveConfig{
 		repo:      p.Repo,
 		harness:   firstNonEmpty(req.Harness, p.DefaultHarness, s.defaults.Harness),
@@ -316,6 +348,69 @@ func (s *Service) resolve(p *store.Project, req CreateRunRequest) effectiveConfi
 		allowlist: p.EgressAllowlist,
 		namespace: ns,
 	}
+}
+
+// secretNeed is a credential Secret the resolved run requires in its namespace.
+type secretNeed struct {
+	secret string // Secret name (mirrors the operator's --*-secret flags)
+	key    string // key within the Secret
+	human  string // human-readable label for the error message
+}
+
+// requiredSecrets returns the credential Secrets the resolved run needs present
+// in its namespace before a pod is worth scheduling. The mock harness and a
+// keyless (no-repo) project legitimately need nothing. A repo needs the GitHub
+// token (private clone + PR); a model harness needs its provider key on the
+// route the egress-proxy injects (claude-code/opencode → Anthropic, codex →
+// OpenAI). byo brings its own credentials, so only the repo token is required.
+func (s *Service) requiredSecrets(eff effectiveConfig) []secretNeed {
+	if eff.harness == "mock" {
+		return nil
+	}
+	var needs []secretNeed
+	if eff.repo != "" && s.defaults.GitHubTokenSecret != "" {
+		needs = append(needs, secretNeed{s.defaults.GitHubTokenSecret, "token", "GitHub token"})
+	}
+	switch eff.harness {
+	case "claude-code", "opencode":
+		if s.defaults.AnthropicKeySecret != "" {
+			needs = append(needs, secretNeed{s.defaults.AnthropicKeySecret, "key", "Anthropic API key"})
+		}
+	case "codex":
+		if s.defaults.OpenAIKeySecret != "" {
+			needs = append(needs, secretNeed{s.defaults.OpenAIKeySecret, "key", "OpenAI API key"})
+		}
+	}
+	return needs
+}
+
+// checkCredentials rejects a submission whose resolved namespace is missing a
+// Secret the run needs, turning a silent multi-minute downstream failure into an
+// immediate, actionable 400 (WS-15 Part A). It is best-effort: a transient API
+// error checking a Secret does not block the run (the pod path still has the
+// egress-proxy's Optional-secret behavior as a backstop).
+func (s *Service) checkCredentials(ctx context.Context, req CreateRunRequest, eff effectiveConfig) error {
+	for _, need := range s.requiredSecrets(eff) {
+		ok, err := s.launcher.SecretHasKey(ctx, eff.namespace, need.secret, need.key)
+		if err != nil {
+			continue // don't turn an API blip into a hard submit failure
+		}
+		if !ok {
+			return fmt.Errorf("%w: project %q needs a %s in namespace %q (Secret %q key %q), but it is missing%s",
+				ErrValidation, req.Project, need.human, eff.namespace, need.secret, need.key, s.credentialHint(eff.namespace))
+		}
+	}
+	return nil
+}
+
+// credentialHint points the caller at the likely fix: the install's
+// --run-namespace (where `wren install` writes the proxy Secrets) when the run
+// resolved elsewhere, else re-running install with credentials.
+func (s *Service) credentialHint(ns string) string {
+	if def := s.defaults.DefaultNamespace; def != "" && def != ns {
+		return fmt.Sprintf(" — did you mean --namespace %q (the install's --run-namespace, where `wren install` stores the proxy credentials)?", def)
+	}
+	return fmt.Sprintf(" — re-run `wren install` with credentials, or add them: kubectl -n %s create secret generic …", ns)
 }
 
 // buildAgentRun maps the effective config onto an AgentRun custom resource.

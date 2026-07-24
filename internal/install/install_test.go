@@ -75,6 +75,11 @@ func TestInstallKindHappyPath(t *testing.T) {
 	if k.HasCall("OverrideImages") {
 		t.Errorf("kind path must not override images (manifests pin wren/*:dev), calls: %v", k.Calls)
 	}
+	// WS-15 Part A: install makes its --run-namespace the apiserver's default so
+	// `wren project create` with no --namespace lands where the credentials went.
+	if !k.HasCall("SetApiserverRunNamespace:wren-runs") {
+		t.Errorf("expected SetApiserverRunNamespace:wren-runs, calls: %v", k.Calls)
+	}
 	if !strings.Contains(out.String(), "port-forward svc/"+ApiserverService) {
 		t.Errorf("hand-off missing port-forward, out:\n%s", out.String())
 	}

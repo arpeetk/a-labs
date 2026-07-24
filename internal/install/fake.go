@@ -84,6 +84,12 @@ func (f *FakeKube) OverrideImages(ctx context.Context, registry, tag string) err
 	return f.fail("OverrideImages:" + registry + ":" + tag)
 }
 
+func (f *FakeKube) SetApiserverRunNamespace(ctx context.Context, namespace string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fail("SetApiserverRunNamespace:" + namespace)
+}
+
 func (f *FakeKube) SetServiceType(ctx context.Context, ns, name, svcType string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
