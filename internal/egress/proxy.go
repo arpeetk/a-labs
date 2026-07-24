@@ -17,6 +17,7 @@
 package egress
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -146,6 +147,26 @@ func (p *Proxy) Allowed(host string) bool {
 // listener; production never changes it.
 var connectPort = "443"
 
+// resolveHost resolves a bare hostname (no port) to a single IP address to
+// dial for a CONNECT tunnel. An IP-literal host is returned as-is (no lookup
+// — matters for tests that allowlist "127.0.0.1" directly). A package var
+// (like connectPort) so the DNS-rebinding regression test can substitute a
+// resolver that would answer differently on a second call, and prove the
+// proxy never makes one; production always uses the real resolver.
+var resolveHost = func(host string) (net.IP, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip, nil
+	}
+	ips, err := net.DefaultResolver.LookupIP(context.Background(), "ip", host)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("resolve %q: no addresses found", host)
+	}
+	return ips[0], nil
+}
+
 func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if port := portOf(r.Host); port != connectPort {
 		http.Error(w, "egress: CONNECT allowed only to port "+connectPort, http.StatusForbidden)
@@ -155,7 +176,23 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "egress blocked: "+stripPort(r.Host), http.StatusForbidden)
 		return
 	}
-	dst, err := net.DialTimeout("tcp", r.Host, 15*time.Second)
+	// Resolve the allowlisted hostname exactly once and dial the resolved IP
+	// literal directly — never the hostname again. Dialing by hostname (the
+	// old behavior) lets net.Dial perform its OWN, later DNS lookup, which
+	// opens a TOCTOU window: a DNS answer that changes between the allowlist
+	// check above and the connect below (classic DNS rebinding — an
+	// allowlisted name resolving to a different, non-validated address at
+	// connect-time) would silently redirect the tunnel. Resolving once and
+	// dialing that literal address closes the window: whatever address this
+	// request's tunnel reaches is the exact one that was just validated,
+	// full stop (WS-1 review follow-up, WS-16 A.3).
+	host, port := stripPort(r.Host), portOf(r.Host)
+	ip, err := resolveHost(host)
+	if err != nil {
+		http.Error(w, "egress: DNS resolution failed for "+host, http.StatusBadGateway)
+		return
+	}
+	dst, err := net.DialTimeout("tcp", net.JoinHostPort(ip.String(), port), 15*time.Second)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
