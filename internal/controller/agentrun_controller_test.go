@@ -120,6 +120,62 @@ func TestReconcileRunningPhase(t *testing.T) {
 	}
 }
 
+// TestReconcileWorkspacePVCLostFailsDeterministically is WS-16 A.4: once a run
+// has progressed past Pending (meaning its workspace PVC was already created
+// once), a PVC that later comes back NotFound is a disk-destroying loss — not
+// this run's first-ever provisioning — and must fail the run with a clear
+// signal rather than silently resuming into a fresh, empty workspace.
+func TestReconcileWorkspacePVCLostFailsDeterministically(t *testing.T) {
+	run := testRun()
+	r, c := newReconciler(t, run)
+	reconcile(t, r, run) // Pending
+	reconcile(t, r, run) // create PVC + pod
+
+	var pvc corev1.PersistentVolumeClaim
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-workspace"}, &pvc); err != nil {
+		t.Fatalf("expected workspace PVC to exist after provisioning: %v", err)
+	}
+
+	setPodPhase(t, c, run.Namespace, "r-abc-0", corev1.PodRunning, nil)
+	reconcile(t, r, run)
+	if got := getRun(t, c, run); got.Status.Phase != wrenv1.PhaseRunning {
+		t.Fatalf("phase = %q, want Running", got.Status.Phase)
+	}
+
+	// Simulate the disk-destroying loss itself: the PVC disappears out from
+	// under the run (node/zone loss, manual deletion) — not the controller's
+	// own doing.
+	if err := c.Delete(context.Background(), &pvc); err != nil {
+		t.Fatalf("delete pvc: %v", err)
+	}
+
+	reconcile(t, r, run)
+
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseFailed {
+		t.Fatalf("phase = %q, want Failed (a lost PVC after provisioning is not retryable)", got.Status.Phase)
+	}
+	if got.Status.RestartCount != 0 {
+		t.Errorf("restartCount = %d, want 0 — this must not be misclassified as an ordinary pod-crash resume", got.Status.RestartCount)
+	}
+	cond := findCondition(got, "Ready")
+	if cond == nil || cond.Reason != "WorkspaceLost" {
+		t.Fatalf("Ready condition = %+v, want reason WorkspaceLost", cond)
+	}
+	if !strings.Contains(cond.Message, "gone") && !strings.Contains(cond.Message, "destroyed") {
+		t.Errorf("message should explain the data loss, got: %s", cond.Message)
+	}
+
+	// Terminal: a further reconcile does not flap or try to recreate the PVC.
+	reconcile(t, r, run)
+	if got := getRun(t, c, run); got.Status.Phase != wrenv1.PhaseFailed {
+		t.Errorf("phase flapped after terminal failure: %q", got.Status.Phase)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-workspace"}, &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected no PVC recreated after WorkspaceLost, got err=%v", err)
+	}
+}
+
 // TestReconcileCancelStopsRun is WS-15 Part C: the cancel annotation deletes the
 // current pod and drives the run to Canceled (terminal — not auto-resumed).
 func TestReconcileCancelStopsRun(t *testing.T) {
