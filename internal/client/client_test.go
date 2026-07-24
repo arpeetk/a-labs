@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -75,6 +76,75 @@ func TestListAndGetRun(t *testing.T) {
 	run, err := c.GetRun(context.Background(), "r-9")
 	if err != nil || run.Phase != "Running" {
 		t.Fatalf("GetRun = %+v, %v", run, err)
+	}
+}
+
+func TestCreateAndListProject(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/projects":
+			_ = json.NewDecoder(r.Body).Decode(&gotBody)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(Project{Name: "demo", Repo: "acme/api"})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
+			_ = json.NewEncoder(w).Encode([]Project{{Name: "demo"}, {Name: "keyless"}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := New(&config.Context{Server: srv.URL, User: "me@x"})
+	p, err := c.CreateProject(context.Background(), Project{Name: "demo", Repo: "acme/api", DefaultHarness: "mock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Name != "demo" || p.Repo != "acme/api" {
+		t.Fatalf("created project = %+v", p)
+	}
+	if gotBody["name"] != "demo" || gotBody["defaultHarness"] != "mock" {
+		t.Errorf("create body = %+v", gotBody)
+	}
+	projects, err := c.ListProjects(context.Background())
+	if err != nil || len(projects) != 2 || projects[1].Name != "keyless" {
+		t.Fatalf("ListProjects = %+v, %v", projects, err)
+	}
+}
+
+func TestStreamLogs(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/runs/r-fail/logs" {
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "no pod yet"})
+			return
+		}
+		gotQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte("line1\nline2\n"))
+	}))
+	defer srv.Close()
+
+	c := New(&config.Context{Server: srv.URL, User: "me@x"})
+	var buf bytes.Buffer
+	if err := c.StreamLogs(context.Background(), "r-1", LogsOptions{Container: "harness", Follow: true}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != "line1\nline2\n" {
+		t.Errorf("streamed = %q", buf.String())
+	}
+	if !strings.Contains(gotQuery, "follow=true") || !strings.Contains(gotQuery, "container=harness") {
+		t.Errorf("query = %q", gotQuery)
+	}
+
+	// A control-plane error surfaces and the body is not streamed to w.
+	buf.Reset()
+	err := c.StreamLogs(context.Background(), "r-fail", LogsOptions{}, &buf)
+	if err == nil || !strings.Contains(err.Error(), "no pod yet") {
+		t.Fatalf("err = %v, want parsed conflict", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("error body must not be written to the log sink, got %q", buf.String())
 	}
 }
 

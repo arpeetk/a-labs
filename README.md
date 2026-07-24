@@ -74,18 +74,23 @@ land in M1–M2.)
 
 ## Installing Wren (admin / handover)
 
-Full runbook in [`SETUP.md`](SETUP.md). Phase-1 (existing cluster, PAT-first) is a
-single command:
+Full runbook in [`SETUP.md`](SETUP.md). Install is a first-class CLI command —
+preflight, CRDs/RBAC/Deployments, image build+deliver, credential Secrets, and
+a Ready wait in one idempotent step:
 
 ```sh
-KIND_CLUSTER=wren-test WREN_NS=user-me \
+# GKE: build + push linux/amd64 images to your registry, install in-cluster
 GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
-  hack/setup.sh          # cluster access → images → CRDs/RBAC → secrets
+  wren install --registry us-central1-docker.pkg.dev/<proj>/wren
+
+# kind (local eval): build + kind load, zero credentials
+wren install --kind wren-eval --skip-credentials
 ```
 
-It configures cluster access, builds/publishes the images, installs the CRDs +
-RBAC, and creates the credential secrets (mounted into the egress-proxy, never
-the runner). GKE is the same with `GKE_PROJECT`/`GKE_CLUSTER`/`REGISTRY`.
+The credential Secrets are read only by the egress-proxy (never the runner).
+`wren uninstall --confirm` removes the install. Engineers then port-forward,
+`wren login`, `wren project create`, `wren run create` — see
+[`SETUP.md`](SETUP.md#engineer-onboarding).
 
 ## Architecture at a glance
 
@@ -146,6 +151,7 @@ cmd/
   wren-runtime/       multi-call in-pod binary (harness + sidecars)
 internal/
   cli/ client/ config/     CLI command tree, HTTP client, local config
+  install/                  wren install/uninstall (embedded config/default render)
   apiserver/ coreapi/       control-plane HTTP handlers + Runs/Projects logic
   store/ launcher/          persistence (in-memory + Postgres) + AgentRun CR creation
   controller/               AgentRun/AgentPool reconcilers + pod builder
@@ -154,9 +160,9 @@ internal/
   blob/                     object-store Store interface for checkpoints (impls post-launch)
   github/ gitwork/ finalize/  GitHub PR client, go-git ops, commit→push→PR
   runspec/                  the RunSpec contract handed to each harness
-build/                Dockerfiles (runtime, claude-code, codex, opencode)
+build/                Dockerfiles (runtime, claude-code, codex, opencode, generic gobin)
 config/               kustomize manifests (crd, rbac, manager) + samples
-hack/                 setup.sh
+hack/                 dev/test tooling only (e2e gates) — onboarding lives in the CLI
 docs/                 technical specification
 ```
 

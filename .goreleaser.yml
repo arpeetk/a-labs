@@ -1,0 +1,43 @@
+# Private releases for the team (WS-13), pre-org: tag a release and goreleaser
+# publishes the `wren` CLI binaries (darwin/linux × amd64/arm64) + checksums to
+# THIS repo's GitHub releases — engineers fetch them with `gh release download`
+# (the repo is private, so gh auth is required) or `GOPRIVATE` `go install`.
+# The container images (ghcr.io/arpeetk/wren/*) are built and pushed by the same
+# workflow (.github/workflows/release.yml) from build/Dockerfile.* — those
+# Dockerfiles stay the single source of truth for how images are built.
+version: 2
+
+project_name: wren
+
+env:
+  - CGO_ENABLED=0
+
+builds:
+  - id: wren
+    main: ./cmd/wren
+    binary: wren
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    # Same version coordinates as the Makefile's LDFLAGS.
+    ldflags:
+      - -s -w
+      - -X github.com/summiteight/wren/internal/cli.Version={{ .Tag }}
+      - -X github.com/summiteight/wren/internal/cli.Commit={{ .ShortCommit }}
+      - -X github.com/summiteight/wren/internal/cli.Date={{ .Date }}
+
+archives:
+  - id: wren
+    ids: [wren]
+    name_template: "{{ .ProjectName }}_{{ .Tag }}_{{ .Os }}_{{ .Arch }}"
+    formats: [tar.gz]
+    files: [README.md, SETUP.md]
+
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Tag }}_checksums.txt"
+
+release:
+  # Drafts let the owner review the notes before the team sees the release.
+  draft: true
+
+changelog:
+  use: github-native

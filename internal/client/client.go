@@ -101,6 +101,41 @@ func (c *Client) GetRun(ctx context.Context, id string) (*Run, error) {
 	return &run, nil
 }
 
+// Project is a registered repository and its run defaults (mirror of
+// store.Project's JSON; the apiserver rejects unknown fields).
+type Project struct {
+	Name           string    `json:"name"`
+	Repo           string    `json:"repo,omitempty"`
+	DefaultHarness string    `json:"defaultHarness,omitempty"`
+	HarnessImage   string    `json:"harnessImage,omitempty"`
+	DefaultModel   string    `json:"defaultModel,omitempty"`
+	RuntimeClass   string    `json:"runtimeClass,omitempty"`
+	CPU            string    `json:"cpu,omitempty"`
+	Memory         string    `json:"memory,omitempty"`
+	Disk           string    `json:"disk,omitempty"`
+	Namespace      string    `json:"namespace,omitempty"`
+	CreatedAt      time.Time `json:"createdAt,omitempty"`
+}
+
+// CreateProject registers a project (POST /v1/projects). A project with no
+// repo is the keyless design (mock harness, no clone/PR — what `make e2e` runs).
+func (c *Client) CreateProject(ctx context.Context, p Project) (*Project, error) {
+	var out Project
+	if err := c.do(ctx, http.MethodPost, "/v1/projects", p, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ListProjects returns all registered projects (GET /v1/projects).
+func (c *Client) ListProjects(ctx context.Context) ([]Project, error) {
+	var out []Project
+	if err := c.do(ctx, http.MethodGet, "/v1/projects", nil, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // LogsOptions selects which container to tail and whether to follow the stream.
 type LogsOptions struct {
 	Container string

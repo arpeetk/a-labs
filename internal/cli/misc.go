@@ -6,8 +6,8 @@ import "github.com/spf13/cobra"
 func newProjectCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "project", Short: "Register and configure projects (repos)"}
 	cmd.AddCommand(
-		placeholder("project", "add", "Register a GitHub repo as a project", "M0"),
-		placeholder("project", "list", "List registered projects", "M0"),
+		newProjectCreateCmd(),
+		newProjectListCmd(),
 		placeholder("project", "get", "Show a project's config", "M0"),
 		placeholder("project", "config", "Edit project defaults, rubric, and egress", "M1"),
 	)
