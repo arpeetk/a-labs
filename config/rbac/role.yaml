@@ -27,7 +27,6 @@ rules:
 - apiGroups:
   - wren.dev
   resources:
-  - agentpools
   - agentruns
   verbs:
   - create
@@ -40,15 +39,14 @@ rules:
 - apiGroups:
   - wren.dev
   resources:
-  - agentpools/status
-  - agentruns/status
+  - agentruns/finalizers
   verbs:
-  - get
-  - patch
   - update
 - apiGroups:
   - wren.dev
   resources:
-  - agentruns/finalizers
+  - agentruns/status
   verbs:
+  - get
+  - patch
   - update

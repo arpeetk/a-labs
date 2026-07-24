@@ -1,8 +1,8 @@
 // Package store is the control plane's persistence layer: Projects and Runs.
 //
-// It defines the Store interface plus an in-memory implementation used for
-// tests and local development. A Cloud SQL (Postgres) implementation lands
-// later (spec §5.2); callers depend only on the interface.
+// It defines the Store interface plus two implementations: in-memory (the
+// default; tests and local development) and Postgres (postgres.go, pgx/v5 —
+// spec §5.2). Callers depend only on the interface.
 package store
 
 import (

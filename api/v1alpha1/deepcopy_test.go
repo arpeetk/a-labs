@@ -87,33 +87,9 @@ func TestLeafDeepCopy(t *testing.T) {
 	_ = (&UsageStatus{InputTokens: 1}).DeepCopy()
 	_ = (&AgentRunSpec{Egress: EgressSpec{Allowlist: []string{"a"}}}).DeepCopy()
 	_ = (&AgentRunStatus{LastCheckpoint: &CheckpointRef{}, Conditions: []metav1.Condition{{}}}).DeepCopy()
-	_ = (&AgentPoolSpec{Resources: ResourceSpec{CPU: q, Memory: q}}).DeepCopy()
-	_ = (&AgentPoolStatus{Available: 1}).DeepCopy()
 	// Nil-receiver DeepCopy must return nil, not panic.
 	var nilRun *AgentRun
 	if nilRun.DeepCopy() != nil {
 		t.Error("nil DeepCopy should be nil")
-	}
-}
-
-func TestAgentPoolDeepCopy(t *testing.T) {
-	orig := &AgentPool{
-		ObjectMeta: metav1.ObjectMeta{Name: "pool"},
-		Spec:       AgentPoolSpec{HarnessImage: "img", Replicas: 4},
-		Status:     AgentPoolStatus{Available: 2, Claimed: 1},
-	}
-	clone := orig.DeepCopy()
-	if clone == orig || clone.Spec.Replicas != 4 {
-		t.Fatal("AgentPool DeepCopy failed")
-	}
-	if _, ok := orig.DeepCopyObject().(*AgentPool); !ok {
-		t.Fatal("AgentPool DeepCopyObject wrong type")
-	}
-	list := &AgentPoolList{Items: []AgentPool{*orig}}
-	if _, ok := list.DeepCopyObject().(*AgentPoolList); !ok {
-		t.Fatal("AgentPoolList DeepCopyObject wrong type")
-	}
-	if got := list.DeepCopy(); len(got.Items) != 1 {
-		t.Fatal("AgentPoolList DeepCopy lost items")
 	}
 }

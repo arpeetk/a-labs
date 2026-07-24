@@ -258,16 +258,6 @@ func TestReconcileTerminalIsNoop(t *testing.T) {
 	}
 }
 
-// findCond returns the condition of a given type from a run's status, or nil.
-func findCond(run *wrenv1.AgentRun, condType string) *metav1.Condition {
-	for i := range run.Status.Conditions {
-		if run.Status.Conditions[i].Type == condType {
-			return &run.Status.Conditions[i]
-		}
-	}
-	return nil
-}
-
 func TestReconcile_EgressEnforcementOff_WritesDisabledCondition(t *testing.T) {
 	run := testRun()
 	r, c := newReconciler(t, run)
@@ -276,7 +266,7 @@ func TestReconcile_EgressEnforcementOff_WritesDisabledCondition(t *testing.T) {
 	reconcile(t, r, run) // admit
 	reconcile(t, r, run) // provision (sets condition + creates children)
 
-	cond := findCond(getRun(t, c, run), egressEnforcementConditionType)
+	cond := findCondition(getRun(t, c, run), egressEnforcementConditionType)
 	if cond == nil {
 		t.Fatal("expected EgressEnforcement condition")
 	}
@@ -292,7 +282,7 @@ func TestReconcile_EgressEnforcementIptables_WritesEnforcedCondition(t *testing.
 	reconcile(t, r, run) // admit
 	reconcile(t, r, run) // provision
 
-	cond := findCond(getRun(t, c, run), egressEnforcementConditionType)
+	cond := findCondition(getRun(t, c, run), egressEnforcementConditionType)
 	if cond == nil {
 		t.Fatal("expected EgressEnforcement condition")
 	}
@@ -330,7 +320,7 @@ func TestReconcile_PodCreateForbidden_FailsDeterministically(t *testing.T) {
 	if got.Status.Phase != wrenv1.PhaseFailed {
 		t.Fatalf("phase = %q, want Failed (Forbidden is permanent; requeueing cannot fix it)", got.Status.Phase)
 	}
-	cond := findCond(got, "Ready")
+	cond := findCondition(got, "Ready")
 	if cond == nil || cond.Reason != "PodAdmissionForbidden" {
 		t.Fatalf("Ready condition = %+v, want reason PodAdmissionForbidden", cond)
 	}

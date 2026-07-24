@@ -45,7 +45,7 @@ prefix.
 ## 2. Repository layout
 
 ```
-api/v1alpha1/          CRDs: AgentRun, AgentPool (types + generated deepcopy)
+api/v1alpha1/          CRD: AgentRun (types + generated deepcopy)
 cmd/
   wren/                CLI entrypoint
   wren-apiserver/      control-plane HTTP API server
@@ -59,7 +59,7 @@ internal/
   coreapi/             control-plane business logic (Runs + Projects services)
   store/               persistence: Store interface + in-memory impl
   launcher/            creates AgentRun CRs (Launcher interface + K8s impl + Fake)
-  controller/          AgentRun/AgentPool reconcilers + pod builder
+  controller/          AgentRun reconciler + pod builder
   runspec/             the RunSpec contract handed to a harness
   blob/                object-store contract for checkpoints (interface only — no impls yet)
   harness/             harness adapters (mock, claude-code, codex, opencode) + event protocol

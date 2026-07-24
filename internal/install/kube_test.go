@@ -213,9 +213,10 @@ func TestDeleteClusterScoped(t *testing.T) {
 	mapper.Add(crGVK, meta.RESTScopeRoot)
 	mapper.Add(schema.GroupVersionKind{Group: "rbac.authorization.k8s.io", Version: "v1", Kind: "Role"}, meta.RESTScopeNamespace)
 
-	// Mirrors the asset's mix: CRDs (one absent → tolerated), a ClusterRole, a
-	// namespaced Role (skipped — dies with the namespace), a Namespace (skipped
-	// — awaited separately).
+	// The stream mixes cluster-scoped and namespaced objects: CRDs (one absent
+	// from the fake client → tolerated), a ClusterRole, a namespaced Role
+	// (skipped — dies with the namespace), a Namespace (skipped — awaited
+	// separately).
 	stream := `
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
