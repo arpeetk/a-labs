@@ -4,12 +4,13 @@
 #
 # Model calls go to ANTHROPIC_BASE_URL (the in-pod egress-proxy), which injects
 # the real key — so this image ships no credentials.
-FROM golang:1.26 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+ARG TARGETOS=linux TARGETARCH=amd64
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -o /out/wren-runtime ./cmd/wren-runtime
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -o /out/wren-runtime ./cmd/wren-runtime
 
 FROM node:22-bookworm-slim
 RUN apt-get update \
