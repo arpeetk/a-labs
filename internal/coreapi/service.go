@@ -46,8 +46,13 @@ type Defaults struct {
 // DefaultDefaults returns the built-in fallback configuration.
 func DefaultDefaults() Defaults {
 	return Defaults{
-		Harness:          "claude-code",
-		HarnessImage:     "wren/claude-code-runner:latest",
+		Harness: "claude-code",
+		// Matches the kind zero-config path's naming scheme (wren install
+		// --kind builds/loads wren/claude-code:dev) — a project registered
+		// with no --harness-image still resolves to an image that exists on a
+		// freshly-installed kind cluster, instead of a dead placeholder that
+		// never matched anything this repo builds.
+		HarnessImage:     "wren/claude-code:dev",
 		Model:            "claude-opus-4-8",
 		RuntimeClass:     "runc",
 		CPU:              "2",

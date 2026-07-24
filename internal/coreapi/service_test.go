@@ -145,6 +145,32 @@ func TestCreateRunResolvesConfigAndCreatesCR(t *testing.T) {
 	}
 }
 
+// TestCreateRunFallsBackToDefaultHarnessImage guards against a repeat of the
+// WS-14 gap: a project registered with no --harness-image must resolve to a
+// real, buildable image (`wren install`'s kind zero-config default), never
+// the old dead "wren/claude-code-runner:latest" placeholder.
+func TestCreateRunFallsBackToDefaultHarnessImage(t *testing.T) {
+	svc, _, fl := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "demo", Repo: "corp/demo"})
+
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@corp.com", Prompt: "do it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr, err := fl.GetRun(ctx, run.Namespace, run.ID)
+	if err != nil {
+		t.Fatalf("CR not created: %v", err)
+	}
+	want := DefaultDefaults().HarnessImage
+	if cr.Spec.Harness.Image != want {
+		t.Errorf("harness image = %q, want the service default %q", cr.Spec.Harness.Image, want)
+	}
+	if cr.Spec.Harness.Image == "wren/claude-code-runner:latest" {
+		t.Error("fell back to the dead placeholder image — this repo builds no such image")
+	}
+}
+
 func TestCreateRunInvalidResourceOverride(t *testing.T) {
 	svc, _, _ := newService(t)
 	seedProject(t, svc, &store.Project{Name: "p", Repo: "x/y"})

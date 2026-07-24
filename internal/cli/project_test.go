@@ -110,6 +110,23 @@ func TestRootHasInstallCommands(t *testing.T) {
 	}
 }
 
+// TestInstallHasHarnessImagesFlag guards the CLI wiring for WS-14: `wren
+// install` must expose a way to restrict/skip the harness images it builds
+// (install.Options.HarnessImages), not just the 3 control-plane images.
+func TestInstallHasHarnessImagesFlag(t *testing.T) {
+	root := NewRootCommand()
+	for _, c := range root.Commands() {
+		if c.Name() != "install" {
+			continue
+		}
+		if c.Flags().Lookup("harness-images") == nil {
+			t.Error("install command missing --harness-images flag")
+		}
+		return
+	}
+	t.Fatal("install subcommand not found")
+}
+
 func TestUninstallRequiresConfirm(t *testing.T) {
 	_, err := run(t, "uninstall")
 	if err == nil || !strings.Contains(err.Error(), "--confirm") {
