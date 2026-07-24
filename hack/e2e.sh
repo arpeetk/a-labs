@@ -24,6 +24,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# shellcheck source=lib/e2e-common.sh
+source "$REPO_ROOT/hack/lib/e2e-common.sh"
+
 KIND_CLUSTER="${KIND_CLUSTER:-wren-e2e}"
 KCTX="kind-${KIND_CLUSTER}"
 NS_SYSTEM="wren-system"
@@ -36,59 +39,14 @@ APISERVER_LOCAL_PORT="${APISERVER_LOCAL_PORT:-18090}"
 WREN_CONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wren-e2e-cfg.XXXXXX")"
 export WREN_CONFIG_DIR
 
-log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
-need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
-
-k() { kubectl --context "$KCTX" "$@"; }
-
 PF_PID=""
 RUN_ID=""
 RUN_NS=""
 
-# dump_diagnostics prints everything an operator needs to debug a failed run:
-# control-plane logs, the AgentRun resource, and the agent pod's container logs.
-dump_diagnostics() {
-  warn "dumping diagnostics (control plane + run)"
-  echo "----- operator logs -----"
-  k -n "$NS_SYSTEM" logs deploy/wren-operator --tail=200 2>&1 || true
-  echo "----- apiserver logs -----"
-  k -n "$NS_SYSTEM" logs deploy/wren-apiserver --tail=200 2>&1 || true
-  if [ -n "$RUN_ID" ] && [ -n "$RUN_NS" ]; then
-    echo "----- AgentRun/$RUN_ID (yaml) -----"
-    k -n "$RUN_NS" get agentrun "$RUN_ID" -o yaml 2>&1 || true
-    echo "----- pods in $RUN_NS -----"
-    k -n "$RUN_NS" get pods -o wide 2>&1 || true
-    # The agent pod is labelled wren.dev/run=<run-id>. Dump every container.
-    local pod
-    pod="$(k -n "$RUN_NS" get pods -l "wren.dev/run=$RUN_ID" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-    if [ -n "$pod" ]; then
-      echo "----- pod/$pod describe -----"
-      k -n "$RUN_NS" describe pod "$pod" 2>&1 || true
-      for c in $(k -n "$RUN_NS" get pod "$pod" -o jsonpath='{range .spec.initContainers[*]}{.name}{"\n"}{end}{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null); do
-        echo "----- pod/$pod container=$c logs -----"
-        k -n "$RUN_NS" logs "$pod" -c "$c" --tail=200 2>&1 || true
-      done
-    else
-      warn "no agent pod found for run $RUN_ID (it may not have been scheduled)"
-    fi
-  fi
-  echo "-------------------------"
-}
-
 STATUS="init"
 cleanup() {
   local code=$?
-  # Stop the port-forward first so a failed run never leaks it.
-  if [ -n "$PF_PID" ] && kill -0 "$PF_PID" 2>/dev/null; then
-    kill "$PF_PID" 2>/dev/null || true
-    wait "$PF_PID" 2>/dev/null || true
-  fi
-  if [ "$STATUS" != "ok" ]; then
-    dump_diagnostics
-  fi
-  [ -n "${WREN_CONFIG_DIR:-}" ] && rm -rf "$WREN_CONFIG_DIR" 2>/dev/null || true
+  cleanup_common
   if [ "${E2E_KEEP:-0}" = "1" ]; then
     log "E2E_KEEP=1 — leaving cluster '$KIND_CLUSTER' up (kind delete cluster --name $KIND_CLUSTER to remove)"
   else
@@ -160,12 +118,7 @@ k -n "$NS_SYSTEM" port-forward svc/wren-apiserver "${APISERVER_LOCAL_PORT}:8090"
 PF_PID=$!
 API="http://127.0.0.1:${APISERVER_LOCAL_PORT}"
 # Wait for the forward to accept and the apiserver to answer /healthz.
-for i in $(seq 1 30); do
-  if curl -fsS "${API}/healthz" >/dev/null 2>&1; then break; fi
-  kill -0 "$PF_PID" 2>/dev/null || die "port-forward died before apiserver was reachable"
-  sleep 1
-  [ "$i" = 30 ] && die "apiserver /healthz never became reachable via port-forward"
-done
+wait_for_apiserver_healthz 1 30
 log "apiserver reachable"
 
 # --- 5. register a keyless project (mock harness, NO repo) ---
@@ -195,21 +148,7 @@ RUN_NS="$(printf '%s' "$run_out" | sed -n 's/.*"namespace"[[:space:]]*:[[:space:
 [ -n "$RUN_ID" ] || die "could not parse run id from: $run_out"
 log "run id=$RUN_ID namespace=${RUN_NS:-<unknown>} — polling 'wren run get' for Succeeded (timeout ${RUN_TIMEOUT}s)"
 
-deadline=$(( $(date +%s) + RUN_TIMEOUT ))
-phase=""
-last=""
-while [ "$(date +%s)" -lt "$deadline" ]; do
-  get_out="$("$WREN" run get "$RUN_ID" 2>/dev/null || true)"
-  phase="$(printf '%s' "$get_out" | sed -n 's/.*"phase"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-  case "$phase" in
-    Succeeded) log "run reached Succeeded"; break ;;
-    Failed)    die "run entered Failed phase" ;;
-    "")        : ;;
-    *) if [ "$phase" != "$last" ]; then printf '    phase=%s\n' "$phase"; last="$phase"; fi ;;
-  esac
-  sleep 3
-done
-[ "$phase" = "Succeeded" ] || die "run did not reach Succeeded within ${RUN_TIMEOUT}s (last phase='${phase:-<none>}')"
+poll_run_until_succeeded 3
 
 # --- 7. assert terminal state + that no PR was opened (keyless) ---
 log "verifying terminal state (Succeeded, no PR) via 'wren run get'"

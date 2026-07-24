@@ -30,6 +30,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# shellcheck source=lib/e2e-common.sh
+source "$REPO_ROOT/hack/lib/e2e-common.sh"
+
 GKE_PROJECT="${GKE_PROJECT:-wren-gke-fdea81}"
 GKE_ZONE="${GKE_ZONE:-us-central1-a}"
 GKE_CLUSTER="${GKE_CLUSTER:-wren-e2e}"
@@ -47,54 +50,16 @@ APISERVER_LOCAL_PORT="${APISERVER_LOCAL_PORT:-18091}"
 WREN_CONFIG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/wren-gke-e2e-cfg.XXXXXX")"
 export WREN_CONFIG_DIR
 
-log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
-warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
-need() { command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"; }
-
 KCTX="gke_${GKE_PROJECT}_${GKE_ZONE}_${GKE_CLUSTER}"
-k() { kubectl --context "$KCTX" "$@"; }
 
 PF_PID=""
 RUN_ID=""
 RUN_NS=""
 
-dump_diagnostics() {
-  warn "dumping diagnostics"
-  echo "----- operator logs -----"
-  k -n "$NS_SYSTEM" logs deploy/wren-operator --tail=200 2>&1 || true
-  echo "----- apiserver logs -----"
-  k -n "$NS_SYSTEM" logs deploy/wren-apiserver --tail=200 2>&1 || true
-  if [ -n "$RUN_ID" ] && [ -n "$RUN_NS" ]; then
-    echo "----- AgentRun/$RUN_ID (yaml) -----"
-    k -n "$RUN_NS" get agentrun "$RUN_ID" -o yaml 2>&1 || true
-    echo "----- pods in $RUN_NS -----"
-    k -n "$RUN_NS" get pods -o wide 2>&1 || true
-    local pod
-    pod="$(k -n "$RUN_NS" get pods -l "wren.dev/run=$RUN_ID" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-    if [ -n "$pod" ]; then
-      echo "----- pod/$pod describe -----"
-      k -n "$RUN_NS" describe pod "$pod" 2>&1 || true
-      for c in $(k -n "$RUN_NS" get pod "$pod" -o jsonpath='{range .spec.initContainers[*]}{.name}{"\n"}{end}{range .spec.containers[*]}{.name}{"\n"}{end}' 2>/dev/null); do
-        echo "----- pod/$pod container=$c logs -----"
-        k -n "$RUN_NS" logs "$pod" -c "$c" --tail=200 2>&1 || true
-      done
-    fi
-  fi
-  echo "-------------------------"
-}
-
 STATUS="init"
 cleanup() {
   local code=$?
-  if [ -n "$PF_PID" ] && kill -0 "$PF_PID" 2>/dev/null; then
-    kill "$PF_PID" 2>/dev/null || true
-    wait "$PF_PID" 2>/dev/null || true
-  fi
-  if [ "$STATUS" != "ok" ]; then
-    dump_diagnostics
-  fi
-  rm -rf "${WREN_CONFIG_DIR:-}" 2>/dev/null || true
+  cleanup_common
   if [ "${E2E_KEEP:-0}" = "1" ]; then
     warn "E2E_KEEP=1 — leaving wren-system and run namespaces in place"
   else
@@ -158,12 +123,7 @@ log "port-forwarding svc/wren-apiserver -> localhost:${APISERVER_LOCAL_PORT}"
 k -n "$NS_SYSTEM" port-forward svc/wren-apiserver "${APISERVER_LOCAL_PORT}:8090" >/dev/null 2>&1 &
 PF_PID=$!
 API="http://127.0.0.1:${APISERVER_LOCAL_PORT}"
-for i in $(seq 1 30); do
-  if curl -fsS "${API}/healthz" >/dev/null 2>&1; then break; fi
-  kill -0 "$PF_PID" 2>/dev/null || die "port-forward died before apiserver was reachable"
-  sleep 2
-  [ "$i" = 30 ] && die "apiserver /healthz never became reachable"
-done
+wait_for_apiserver_healthz 2 30
 log "apiserver reachable at ${API}"
 
 # --- 5. register a keyless project ---
@@ -188,21 +148,7 @@ RUN_NS="$(printf '%s' "$run_out" | sed -n 's/.*"namespace"[[:space:]]*:[[:space:
 log "run id=$RUN_ID namespace=${RUN_NS:-<unknown>} — polling for Succeeded (${RUN_TIMEOUT}s)"
 
 # --- 7. poll until terminal ---
-deadline=$(( $(date +%s) + RUN_TIMEOUT ))
-phase=""
-last=""
-while [ "$(date +%s)" -lt "$deadline" ]; do
-  get_out="$("$WREN" run get "$RUN_ID" 2>/dev/null || true)"
-  phase="$(printf '%s' "$get_out" | sed -n 's/.*"phase"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-  case "$phase" in
-    Succeeded) log "run reached Succeeded"; break ;;
-    Failed)    die "run entered Failed phase" ;;
-    "")        : ;;
-    *) if [ "$phase" != "$last" ]; then printf '    phase=%s\n' "$phase"; last="$phase"; fi ;;
-  esac
-  sleep 5
-done
-[ "$phase" = "Succeeded" ] || die "run did not reach Succeeded within ${RUN_TIMEOUT}s (last='${phase:-<none>}')"
+poll_run_until_succeeded 5
 
 # --- 8. base assertions ---
 log "verifying terminal state (Succeeded, no PR)"
