@@ -67,6 +67,16 @@ func main() {
 		Addr:              *addr,
 		Handler:           apiserver.New(svc, lc).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Slowloris-style hardening (Go's http.Server doc recommends setting
+		// these explicitly — the zero value is "no timeout"). ReadTimeout/
+		// WriteTimeout are sized for the quick JSON request/response calls
+		// that make up the rest of this API; they'd truncate the long-lived
+		// `GET /v1/runs/{id}/logs?follow=true` stream (WS-4) if applied to
+		// it too, so that handler explicitly disables its own write deadline
+		// via http.ResponseController — see runLogs in internal/apiserver.
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	go func() {
