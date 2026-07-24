@@ -11,6 +11,12 @@ transition; this file is the single glance-view for the sprint.
 > (WS-10), GitHub App (WS-2), docs site (WS-9) are **secondary** — they ride
 > after the dogfood.
 
+> **Priority call (2026-07-24, owner):** onboarding (WS-14/15) + multi-harness
+> (WS-12) are done and combined-verified live on kind + real GKE. Next: **a
+> whole-repo robustness/cleanup pass** (WS-16) — burn down the accumulated
+> review-follow-up ledger below plus a real-implementation test-coverage gap
+> in `internal/launcher`, rather than net-new features.
+
 | WS | Title | Brief | State | Worker/branch | Blocker |
 |----|-------|-------|-------|---------------|---------|
 | 0  | e2e validation loop | [WS-0](WS-0-e2e-loop.md) | merged | #12 | done — gate live on main |
@@ -32,6 +38,8 @@ transition; this file is the single glance-view for the sprint.
 | **14** | **Harness images in onboarding** | [WS-14](WS-14-harness-image-onboarding.md) | merged | #24 | done — `--harness-images` build/push/kind-load, correct hand-off image ref, dead placeholder default fixed; live kind validation in hand-off; `--registry` GKE path code-reviewed only |
 | —  | Combined kind+GKE e2e verification (WS-14+WS-15) | (chore, no brief) | done | `d9ede69` | full engineer flow (install→login→project create→run create→Succeeded, credential pre-flight both paths, project get/run stop/run rm) live-verified on kind AND real GKE (`wren-e2e`, reused cluster). **Found + fixed 2 bugs GKE-only, invisible on kind:** (1) `install/kube.go` Deployment updates raced the Deployment controller — 409 conflict, reproduced twice — now `retry.RetryOnConflict`; (2) mock harness inherited coreapi's `HarnessImage` default (`wren/claude-code:dev`), which only resolves on kind (that tag happens to be loaded there) — ImagePullBackOff on `--registry` installs. Mock now always uses the operator's own runtime image. Regression test added (`TestBuildAgentPodMockHarnessUsesRuntimeImage`). Cluster torn down after, billing stopped. |
 | **15** | **Onboarding friction pass + CLI surface cleanup** | [WS-15](WS-15-onboarding-cli-cleanup.md) | merged | #25 | done — install-configured default run-namespace closes the footgun (live-validated), pre-flight credential check (400 not silent failure), `project get`/`run rm`/`run stop` real, `run resume`/`mcp`/`fleet`/`usage`/`attach`/`steer`/`project config` removed from CLI (zero "not implemented yet" left), `--runtime gvisor|kata` rejected client-side with an M4 pointer |
+| **16a** | **Robustness cleanup: infra/docs** | [WS-16](WS-16-robustness-cleanup.md) | ready | — | `hack/e2e*.sh` dedup, apiserver http.Server timeouts, egress CONNECT resolved-IP guard, `ensurePVC` disk-loss behavior vs docs, 3 stale doc spots — burns down the WS-1/WS-7/WS-8/WS-11 review-follow-up ledger below |
+| **16b** | **Robustness cleanup: launcher/install test coverage** | [WS-16](WS-16-robustness-cleanup.md) | ready | — | `internal/launcher`'s real `K8s` type is 0% covered on `RequestCancel`/`SecretHasKey`/`ListRuns`/`NewK8s` (only the Fake is exercised, via coreapi tests) — the exact gap-shape that produced 2 live-only GKE bugs this session; also covers the new `retry.RetryOnConflict` path in `internal/install/kube.go`. No file overlap with 16a — parallel-safe |
 
 ## Human-gated items (start now — lead time)
 
