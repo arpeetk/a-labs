@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Wren GKE end-to-end test — validates egress enforcement (WS-1) on a real cluster.
 #
+# hack/ is dev/test tooling ONLY (code standards rule 8): installing Wren on a
+# real cluster is product surface — use `wren install --registry <prefix>`.
+#
 # Assumes a GKE Standard cluster already exists (hack/e2e-gke.sh does NOT create
 # or delete it). The cluster must be Standard (not Autopilot) because the
 # egress-lockdown init container requires NET_ADMIN + NET_RAW capabilities.

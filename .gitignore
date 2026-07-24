@@ -15,6 +15,7 @@ mobile/.env
 
 # Go
 /bin/
+/dist/
 *.test
 *.out
 coverage.*

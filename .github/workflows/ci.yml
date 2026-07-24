@@ -46,6 +46,11 @@ jobs:
       - name: build
         run: go build ./...
 
+      - name: install assets fresh (config/ → embedded render)
+        # `wren install` embeds `kubectl kustomize config/default`; fail if
+        # config/ drifted without a re-render (`make assets`).
+        run: make check-assets
+
       - name: vet
         run: make vet
 

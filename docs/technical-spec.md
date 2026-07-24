@@ -15,6 +15,7 @@ The **core of milestone M0 — Journey A (task → PR)** — is built and valida
 - **Egress-proxy** (`internal/egress`) — the pod's controlled egress: enforces a domain allowlist and **injects the GitHub token + model key** for github.com / api.github.com / api.anthropic.com / api.openai.com (the `/openai/` route, WS-12, is wired but not yet exercised against a live key). The credentials live only on the proxy container; the runner holds no secret.
 - **GitHub PR / finalize** (`internal/{github,gitwork,finalize}`) — go-git clone/commit/push (distroless-friendly, no git binary) + open a PR with the rubric body, plus a GitHub **App installation-token minter**. Hydrate clones and finalize pushes/opens the PR *through the egress-proxy*.
 - **Verified e2e on kind AND real GKE (Journey A):** `wren run create` → CR (carrying `repo`) → operator schedules the hardened pod → egress-proxy (holds creds) → hydrate clones via proxy → **the real Claude Code agent does the task** (Bash/Write tools, autonomous) → finalize opens a **real PR** through the proxy → pod `Completed` → run **`Succeeded`** → `wren run get` reflects it. On GKE: image pulled from Artifact Registry, workspace on a Persistent Disk, runner container held **no token or model key** (both injected at the proxy).
+- **Onboarding (WS-13):** `wren install`/`wren uninstall` (`internal/install`) — preflight with remediation, the `config/default` render embedded via go:embed (`make assets` re-renders; `make check-assets` guards drift in CI), images built + pushed for `--registry` (GKE) or built + `kind load`ed (`--kind`), credentials collected env → `gh auth token` → hidden prompt (never echoed) into the proxy Secrets, Ready wait, engineer hand-off (with the header-auth warning). `wren project create`/`list` are real against `POST/GET /v1/projects`. Private tag releases: goreleaser CLI archives (darwin/linux × amd64/arm64) + checksums on this repo's releases, and the three images on GHCR (`ghcr.io/arpeetk/wren/*`).
 
 **M0 implementation decisions (deviations from the target design, to revisit):**
 
@@ -29,10 +30,10 @@ The **core of milestone M0 — Journey A (task → PR)** — is built and valida
 
 **Next milestones (not yet built):**
 
-1. **GitHub App + control-plane front-door** — the operator + apiserver already run **in-cluster** (`config/default`; exercised by `make e2e`). Remaining: published images, an apiserver Ingress/OIDC front-door, and minting per-run, repo-scoped **GitHub App** installation tokens in place of the PAT. This makes the platform self-hosting and the handover real.
+1. **GitHub App + control-plane front-door** — the operator + apiserver already run **in-cluster** (`config/default`; exercised by `make e2e`), installs land via `wren install`, and images publish to GHCR on tag. Remaining: an apiserver Ingress/OIDC front-door and minting per-run, repo-scoped **GitHub App** installation tokens in place of the PAT. This makes the platform self-hosting and the handover real.
 2. ~~**Egress bypass enforcement**~~ — **done** (iptables uid-match lockdown; NetworkPolicy examples shipped under `config/netpol/` as a belt-and-suspenders second layer). Remaining: verify on GKE Standard (privileged init container node-pool policy) before launch.
 
-Also pending: the object-store **checkpointer** + checkpoint-restore hydrate — **de-scoped to post-launch (WS-8)**: v0.1 resumes via PVC reattach + resume-mode only, the checkpointer sidecar is an experimental liveness stub, the `workspace.checkpoint.*` CRD fields are accepted but **no-op**, and `internal/blob.Store` is the interface the real checkpointer (S3-compatible / GCS; MinIO in e2e) will plug into. Also: `wren project`/`mcp`/`fleet`/`usage` server-side, historical/aggregated logs (GCS) and multi-restart `--previous` for `run logs` (live-tail is built), managed Postgres provisioning (the store impl exists — see above), gRPC/Connect transport, isolated agent node pool.
+Also pending: the object-store **checkpointer** + checkpoint-restore hydrate — **de-scoped to post-launch (WS-8)**: v0.1 resumes via PVC reattach + resume-mode only, the checkpointer sidecar is an experimental liveness stub, the `workspace.checkpoint.*` CRD fields are accepted but **no-op**, and `internal/blob.Store` is the interface the real checkpointer (S3-compatible / GCS; MinIO in e2e) will plug into. Also: `wren project get`/`config`, `mcp`, `fleet`, `usage` (`project create`/`list` are real — WS-13), historical/aggregated logs (GCS) and multi-restart `--previous` for `run logs` (live-tail is built), managed Postgres provisioning (the store impl exists — see above), gRPC/Connect transport, isolated agent node pool.
 
 **Repo:** the M0 codebase is on GitHub at `arpeetk/a-labs` (PR #2, branch `wren/m0-foundations`). Contributor/agent working guide: [`AGENTS.md`](../AGENTS.md) — read it before making changes.
 
@@ -243,7 +244,8 @@ Where each architectural piece lives in the code (M0):
 | Egress-proxy | `internal/egress` | allowlist + credential injection |
 | GitHub / PR | `internal/{github,gitwork,finalize}` | App-token minter, go-git ops, finalize→PR |
 | Harness contract | `internal/runspec` | RunSpec + exit-code contract |
-| Deploy | `config/`, `build/`, `hack/` | kustomize manifests, Dockerfiles, `setup.sh` |
+| Deploy | `config/`, `build/`, `internal/install` | kustomize manifests, Dockerfiles, `wren install` (embedded render) |
+| Dev/test gates | `hack/` | e2e scripts only — never product surface |
 
 Every logic package ships unit tests (controller-runtime fake client, `httptest`,
 local bare git repos). Build/test conventions: [`AGENTS.md`](../AGENTS.md).

@@ -1,22 +1,22 @@
-# Setting up Wren (handover guide)
+# Setting up Wren
 
-How a new engineer stands up Wren against an **existing** Kubernetes cluster
-(GKE or kind) and runs their first agent task. This is the **Phase 1, PAT-first**
-flow — the fastest path to a working handover. See the "Phase 2" notes for the
-production hardening (GitHub App, in-cluster control plane, SSO).
+How a team stands up Wren on an **existing** Kubernetes cluster and how its
+engineers get from zero to a running agent in minutes. Install is product
+surface: it lives in the CLI as `wren install` — not in scripts.
 
-The design behind this is in [`docs/technical-spec.md`](docs/technical-spec.md)
-§5, §11; contributor conventions are in [`AGENTS.md`](AGENTS.md).
+The design behind this is [`docs/technical-spec.md`](docs/technical-spec.md)
+§5, §7, §11; contributor conventions are in [`AGENTS.md`](AGENTS.md).
 
 ## What you need
 
 | Thing | Why |
 |---|---|
-| A Kubernetes cluster + `kubectl` access | runs the agent pods (GKE or local kind) |
-| `docker` | build the runtime + harness images |
-| A **GitHub token** (PAT or `gh auth token`) | so agents can push branches + open PRs |
-| An **Anthropic API key** | so the Claude agent can do the work |
-| `go` (1.26), and for GKE: `gcloud` + a registry | build/publish; cluster auth |
+| A Kubernetes cluster (≥ 1.27) + `kubectl` access | runs the control plane and the agent pods |
+| `docker` (daemon running) | `wren install` builds the three images |
+| A **GitHub token** (PAT, or just `gh` logged in) | agents push branches + open PRs |
+| An **Anthropic API key** | the Claude agent does the work |
+| For GKE: `gcloud` + an Artifact Registry repo | cluster auth + image publishing |
+| The `wren` CLI | see [Getting the CLI](#getting-the-cli) |
 
 ## The three identities (mental model)
 
@@ -24,72 +24,116 @@ Wren juggles three separate credentials — knowing which is which removes all t
 confusion:
 
 1. **You → the cluster.** Your `kubectl` context (for GKE: `gcloud container
-   clusters get-credentials`). Used once, to install Wren.
-2. **Agents → GitHub + the model.** A **GitHub token** and an **Anthropic key**,
-   stored as Kubernetes Secrets and mounted **into the egress-proxy sidecar** —
-   never the agent container. The runner routes through the proxy, which injects
-   them. So a compromised agent never sees a raw credential.
-3. **The control plane → the cluster.** In Phase 1 you run the operator +
-   apiserver locally against your kube context; in Phase 2 they run in-cluster
-   with their own ServiceAccount (RBAC shipped in `config/`).
+   clusters get-credentials`). Used once, by `wren install`.
+2. **Agents → GitHub + the model.** The GitHub token and Anthropic key, stored
+   as Kubernetes Secrets and read **only by the egress-proxy sidecar** — never
+   the agent container. The agent routes through the proxy, which injects them,
+   so a compromised agent never sees a raw credential.
+3. **The control plane → the cluster.** The operator + apiserver run in-cluster
+   (Deployments in `wren-system`) with their own ServiceAccounts (RBAC shipped
+   in `config/`).
 
-## One-command setup
+## GKE (headline path)
 
 ```sh
-# kind (local):
-KIND_CLUSTER=wren-test WREN_NS=user-me \
-GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
-  hack/setup.sh
+# 1. cluster access (your identity → the cluster)
+gcloud container clusters get-credentials wren --zone us-central1-a --project my-proj
 
-# GKE (existing cluster + a registry):
-GKE_PROJECT=my-proj GKE_CLUSTER=wren GKE_ZONE=us-central1-a \
-REGISTRY=us-central1-docker.pkg.dev/my-proj/wren WREN_NS=user-me \
+# 2. docker can push to Artifact Registry (once per machine)
+gcloud auth configure-docker us-central1-docker.pkg.dev
+
+# 3. install: preflight → apply CRDs/RBAC/Deployments → build+push linux/amd64
+#    images → store credentials as proxy Secrets → wait for Ready
 GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
-  hack/setup.sh
+  wren install --registry us-central1-docker.pkg.dev/my-proj/wren
 ```
 
-`hack/setup.sh` (idempotent) does:
-1. **Cluster access** — for GKE, `get-credentials`; otherwise uses your current context.
-2. **Images** — builds `runtime` + `claude-code-runner` and either `kind load`s them or pushes to your `REGISTRY`.
-3. **Install** — applies the CRDs (`config/crd`) and RBAC (`config/rbac`).
-4. **Secrets** — creates `wren-github-token` and `wren-anthropic-key` in `WREN_NS`.
-5. Prints how to start the control plane and submit a task.
+`wren install` is idempotent — re-run it to rotate credentials or re-push
+images. Without the env vars it falls back to `gh auth token` and then asks
+interactively (input is never echoed); `--skip-credentials` installs keyless
+(mock harness works; claude-code runs and PRs need the Secrets).
 
 > **GKE note:** grant the node service account `roles/artifactregistry.reader`
 > so pods can pull from your registry (`<projnum>-compute@developer...`), or the
 > images will `ImagePullBackOff`.
 
-## Submit a task
+For a **team setup** add `--expose=LoadBalancer` to give the apiserver a stable
+address; without it the control plane is reached by port-forward (below). The
+apiserver's only auth today is a trusted `X-Wren-User` header (M0 stand-in;
+SSO/OIDC is a later milestone) — keep it on a trusted network either way.
+
+## kind (local eval path)
+
+Same flow against a throwaway local cluster — images are built and `kind
+load`ed, nothing is pushed:
 
 ```sh
-# 1. run the control plane (Phase 1: locally against the cluster)
-go run ./cmd/wren-operator  --leader-elect=false --runtime-image=<runtime image from setup>
-go run ./cmd/wren-apiserver --addr :8090
+wren install --kind wren-eval --skip-credentials
+```
 
-# 2. register a project (repo + the claude-code harness image)
-curl -s -X POST localhost:8090/v1/projects -H 'X-Wren-User: admin' \
-  -d '{"name":"myrepo","repo":"owner/repo","harnessImage":"<claude-code image>",
-       "cpu":"500m","memory":"1Gi","disk":"2Gi",
-       "egressAllowlist":["github.com","api.github.com"]}'
+(Use any cluster name; omit `--skip-credentials` to also store real
+credentials in the local cluster.)
 
-# 3. submit — the Claude agent clones the repo, does the task, and opens a PR
-wren login --control-plane localhost:8090 --user you
-wren run create --project myrepo --task "Add input validation to the signup endpoint"
-wren run get <run-id>     # → Succeeded, with the PR URL
+## Engineer onboarding
+
+Once install prints "Wren control plane is Ready", each engineer:
+
+```sh
+# 1. reach the control plane (skip with --expose=LoadBalancer — use <ip>:8090)
+kubectl --context <cluster-context> -n wren-system port-forward svc/wren-apiserver 8090:8090 &
+
+# 2. log in (identity is a trusted header for now — see the M0 note above)
+wren login --control-plane localhost:8090 --user you@corp.com
+
+# 3. register a project: repo + harness image + resources, pointed at the
+#    namespace holding the credential Secrets (install's --run-namespace)
+wren project create payments-api \
+  --repo acme/payments-api --harness claude-code \
+  --harness-image us-central1-docker.pkg.dev/my-proj/wren/runtime:<tag> \
+  --cpu 1 --memory 2Gi --disk 5Gi --namespace wren-runs
+
+# 4. submit a task — the agent clones, does the work, opens a PR
+wren run create --project payments-api --task "Add input validation to the signup endpoint"
+wren run get <run-id>        # → Succeeded, with the PR URL
 ```
 
 Under the hood: apiserver → `AgentRun` CR → operator schedules a hardened pod →
-egress-proxy (holds the creds) → hydrate clones the repo → **Claude Code runs the
-task and edits files** → finalize commits + pushes + opens the PR → status flows
-back to `run get`.
+egress-proxy (holds the creds) → hydrate clones the repo → **Claude Code runs
+the task and edits files** → finalize commits + pushes + opens the PR → status
+flows back to `run get`.
 
-## Phase 2 (production hardening — not yet built)
+> A project with no `--repo` is **keyless**: runs skip the clone and the PR —
+> pair it with `--harness mock` for a zero-credential smoke test of the whole
+> pipeline (this is what `make e2e` drives).
 
-- **GitHub App** instead of a PAT: per-run, repo-scoped installation tokens minted
-  by the control plane and injected at the proxy (the minter exists in
-  `internal/github`; wiring is pending).
-- **In-cluster control plane**: operator + apiserver as Deployments (needs their
-  images published + an apiserver Service/Ingress).
-- **Workload Identity** for the operator/pods → GCP; **SSO/OIDC** for `wren login`.
-- **Egress bypass enforcement**: NetworkPolicy / iptables so the runner *cannot*
-  skip the proxy (today it cooperatively routes through it).
+## Uninstall
+
+```sh
+wren uninstall --kube-context <cluster-context> --confirm
+```
+
+Removes the `wren-system` + run namespaces and the Wren CRDs (every AgentRun
+goes with them — hence the confirmation gate).
+
+## Getting the CLI
+
+Releases are cut from tags on this repo (private — `gh` auth required):
+
+```sh
+gh release download --repo arpeetk/a-labs <tag>   # wren_<tag>_<os>_<arch>.tar.gz + checksums
+```
+
+or build from source: `make build` → `./bin/wren` (Go 1.26+; see the PATH note
+in [`AGENTS.md`](AGENTS.md)). Release tags also publish the control-plane
+images to `ghcr.io/arpeetk/wren/{runtime,operator,apiserver}` — pass
+`--registry ghcr.io/arpeetk/wren --tag <tag>` to `wren install` to use them
+instead of building locally.
+
+## Later milestones (not yet built)
+
+- **GitHub App** instead of a PAT: per-run, repo-scoped installation tokens
+  minted by the control plane and injected at the proxy (the minter exists in
+  `internal/github`; wiring is WS-2).
+- **SSO/OIDC** for the apiserver front-door (replacing the `X-Wren-User`
+  header) and managed **Postgres** provisioning + a **Helm chart** (WS-5).
+- **Workload Identity** for the operator/pods → GCP.

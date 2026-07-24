@@ -1,0 +1,93 @@
+name: Release
+
+# Tag-triggered private release (WS-13): goreleaser publishes the `wren` CLI
+# archives + checksums to this repo's GitHub releases, and the three control
+# plane images are pushed multi-arch to GHCR (ghcr.io/arpeetk/wren/* — valid
+# pre-rename; the public tap/org move is WS-10). Both use the workflow's
+# GITHUB_TOKEN; no extra secrets are needed.
+#
+# Cut a release:  git tag v0.1.0 && git push origin v0.1.0
+# Engineers then: gh release download v0.1.0   (repo is private → gh auth)
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # GitHub release
+  packages: write # GHCR push
+
+env:
+  GO_VERSION: "1.26"
+  GHCR_PREFIX: ghcr.io/arpeetk/wren
+
+jobs:
+  release:
+    name: goreleaser + GHCR images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # goreleaser needs full history for the changelog
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: buildx (multi-arch image push)
+        uses: docker/setup-buildx-action@v3
+
+      - name: GHCR login
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: goreleaser (CLI archives + checksums → GitHub release)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Images are built from the same Dockerfiles as every other path (make
+      # docker-images, wren install) — Dockerfile.gobin cross-compiles via
+      # TARGETARCH, so no QEMU is needed for arm64.
+      - name: runtime image → GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/Dockerfile.runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.GHCR_PREFIX }}/runtime:${{ github.ref_name }}
+            ${{ env.GHCR_PREFIX }}/runtime:latest
+
+      - name: operator image → GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/Dockerfile.gobin
+          build-args: BIN=wren-operator
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.GHCR_PREFIX }}/operator:${{ github.ref_name }}
+            ${{ env.GHCR_PREFIX }}/operator:latest
+
+      - name: apiserver image → GHCR
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/Dockerfile.gobin
+          build-args: BIN=wren-apiserver
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.GHCR_PREFIX }}/apiserver:${{ github.ref_name }}
+            ${{ env.GHCR_PREFIX }}/apiserver:latest

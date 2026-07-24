@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Wren keyless end-to-end test (the WS-0 merge gate).
 #
+# hack/ is dev/test tooling ONLY (code standards rule 8): onboarding/install is
+# product surface and lives in the CLI — use `wren install --kind` to stand up
+# a cluster for real use; this script exists to gate merges.
+#
 # Stands up a local kind cluster, builds+loads the images, deploys the in-cluster
 # control plane (operator + apiserver in wren-system), then drives a single run
 # through the MOCK harness with NO credentials and NO repo — so hydrate's clone

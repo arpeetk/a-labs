@@ -9,7 +9,7 @@ LDFLAGS := -X $(PKG)/internal/cli.Version=$(VERSION) \
 
 CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@latest
 
-.PHONY: build build-operator generate manifests deploy deploy-manifests e2e e2e-gke docker-push-gke test vet fmt tidy clean
+.PHONY: build build-operator generate manifests deploy deploy-manifests assets check-assets e2e e2e-gke docker-push-gke test vet fmt tidy clean
 
 build: ## Build the wren CLI into ./bin
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/wren
@@ -81,6 +81,17 @@ manifests: ## Regenerate CRD and RBAC YAML
 
 deploy-manifests: ## Render the full deployment (CRDs + RBAC + manager)
 	kubectl kustomize config/default
+
+# `wren install` applies the deployment from an embedded asset (go:embed) so it
+# works without a repo checkout or a kustomize binary. config/ stays the source
+# of truth: regenerate after changing config/, and let check-assets guard drift
+# (wired into CI).
+assets: ## Render config/default into the embedded install asset
+	kubectl kustomize config/default > internal/install/assets/manifests.yaml
+
+check-assets: ## Fail if the embedded install asset is stale vs config/ (run 'make assets')
+	@kubectl kustomize config/default | diff - internal/install/assets/manifests.yaml >/dev/null \
+	  || { echo "internal/install/assets/manifests.yaml is stale — run 'make assets'"; exit 1; }
 
 test: ## Run tests
 	go test ./...

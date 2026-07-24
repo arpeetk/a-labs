@@ -67,8 +67,11 @@ internal/
   github/              GitHub PR client + App installation-token minter + Fake
   gitwork/             go-git clone/commit/push (no git binary needed)
   finalize/            commit → push branch → open PR (+ rubric)
+  install/             wren install/uninstall (embedded config/default render + assets)
 config/                kustomize manifests (crd, rbac, manager) + samples
-build/                 Dockerfile.runtime + per-harness images (claude-code, codex, opencode)
+build/                 Dockerfile.runtime + per-harness images (claude-code, codex, opencode) + generic gobin
+hack/                  dev/test tooling ONLY (e2e gates) — onboarding/install is
+                       product surface and lives in the CLI (code standards rule 8)
 docs/technical-spec.md the living design spec (Draft v0.2)
 ```
 
@@ -88,6 +91,8 @@ make build-operator   # ./bin/wren-operator
 make build-apiserver  # ./bin/wren-apiserver
 make build-runtime    # ./bin/wren-runtime
 make docker-runtime   # wren/runtime:dev image
+make assets           # re-render internal/install/assets/manifests.yaml after
+                      # changing config/ (make check-assets guards drift in CI)
 ```
 
 ## 4. Test & coverage
@@ -149,6 +154,11 @@ and re-apply the CRD to any running cluster (`kubectl apply -f config/crd/bases/
 ---
 
 ## 7. Local end-to-end on kind
+
+> **Product path:** `wren install --kind <name>` automates steps 1–4 below
+> (cluster, CRDs, images, in-cluster control plane) — that is what users run.
+> The manual recipe remains the dev loop (operator/apiserver locally against
+> the cluster, fast rebuilds).
 
 ```sh
 export PATH="/opt/homebrew/bin:$PATH"
