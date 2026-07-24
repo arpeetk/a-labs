@@ -143,7 +143,7 @@ behind `internal/blob.Store` (post-launch).
 ## Repository layout
 
 ```
-api/v1alpha1/         CRDs: AgentRun, AgentPool (+ generated deepcopy + YAML)
+api/v1alpha1/         CRD: AgentRun (+ generated deepcopy + YAML)
 cmd/
   wren/               CLI entrypoint
   wren-apiserver/     control-plane HTTP API
@@ -154,7 +154,7 @@ internal/
   install/                  wren install/uninstall (embedded config/default render)
   apiserver/ coreapi/       control-plane HTTP handlers + Runs/Projects logic
   store/ launcher/          persistence (in-memory + Postgres) + AgentRun CR creation
-  controller/               AgentRun/AgentPool reconcilers + pod builder
+  controller/               AgentRun reconciler + pod builder
   harness/ podruntime/      harness adapters (claude-code, codex, opencode, mock) + in-pod roles
   egress/                   the credential-injecting allowlist proxy
   blob/                     object-store Store interface for checkpoints (impls post-launch)

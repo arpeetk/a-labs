@@ -345,8 +345,9 @@ func TestAssetMatchesConstants(t *testing.T) {
 		}
 	}
 	// Uninstall derives the CRDs (and cluster RBAC) from the asset, so the
-	// render must carry both CRDs — else AgentRuns would survive an uninstall.
-	for _, name := range []string{"agentruns.wren.dev", "agentpools.wren.dev"} {
+	// render must carry the AgentRun CRD — else AgentRuns would survive an
+	// uninstall.
+	for _, name := range []string{"agentruns.wren.dev"} {
 		if !crds[name] {
 			t.Errorf("embedded asset missing CRD %s", name)
 		}

@@ -1,5 +1,5 @@
 // Command wren-operator is the Kubernetes controller that reconciles Wren
-// AgentRun and AgentPool resources into hardened agent pods.
+// AgentRun resources into hardened agent pods.
 package main
 
 import (
@@ -89,13 +89,6 @@ func main() {
 		Logs:      controller.NewLogReader(cs),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up AgentRun controller")
-		os.Exit(1)
-	}
-	if err := (&controller.AgentPoolReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to set up AgentPool controller")
 		os.Exit(1)
 	}
 

@@ -218,7 +218,7 @@ func (in *Installer) Install(ctx context.Context, opts Options) error {
 
 // Uninstall removes the install: the system + run namespaces and every
 // cluster-scoped object the install created (CRDs — deleting them deletes
-// every AgentRun/AgentPool cluster-wide — and cluster RBAC). The CLI gates
+// every AgentRun cluster-wide — and cluster RBAC). The CLI gates
 // this behind --confirm.
 func (in *Installer) Uninstall(ctx context.Context, opts UninstallOptions) error {
 	opts.defaults()

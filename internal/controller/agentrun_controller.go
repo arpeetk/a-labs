@@ -1,6 +1,5 @@
-// Package controller holds the Wren operator's reconcilers: AgentRun (one agent
-// run → a hardened pod with a durable workspace and crash-resume) and AgentPool
-// (pre-warmed pods).
+// Package controller holds the Wren operator's reconciler: AgentRun (one agent
+// run → a hardened pod with a durable workspace and crash-resume).
 package controller
 
 import (
