@@ -26,6 +26,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/util/retry"
 )
 
 // realKube is the client-go implementation of Kube. It is deliberately thin —
@@ -292,35 +293,48 @@ func (k *realKube) UpsertSecret(ctx context.Context, ns, name string, data map[s
 // place if present, appended otherwise — Go flags: last occurrence wins), and
 // imagePullPolicy=Always so a re-pushed tag is never served stale. This is the
 // hack/e2e-gke.sh pattern (kubectl set image + arg patch) with a typed client.
+// Each Deployment's get-modify-update runs under RetryOnConflict: the
+// Deployment controller writes to the same object (status, revision
+// annotation) the moment a prior step's edit lands, so a bare Update racing
+// it is a routine 409, not an edge case — observed live against a real GKE
+// cluster, not hypothetical.
 func (k *realKube) OverrideImages(ctx context.Context, registry, tag string) error {
 	deploys := k.cs.AppsV1().Deployments(SystemNamespace)
 
-	op, err := deploys.Get(ctx, OperatorDeployment, metav1.GetOptions{})
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		op, err := deploys.Get(ctx, OperatorDeployment, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get %s: %w", OperatorDeployment, err)
+		}
+		oc := containerByName(op, "operator")
+		if oc == nil {
+			return fmt.Errorf("%s has no container %q", OperatorDeployment, "operator")
+		}
+		oc.Image = registry + "/operator:" + tag
+		oc.ImagePullPolicy = corev1.PullAlways
+		oc.Args = setArg(oc.Args, "--runtime-image=", registry+"/runtime:"+tag)
+		_, err = deploys.Update(ctx, op, metav1.UpdateOptions{})
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("get %s: %w", OperatorDeployment, err)
-	}
-	oc := containerByName(op, "operator")
-	if oc == nil {
-		return fmt.Errorf("%s has no container %q", OperatorDeployment, "operator")
-	}
-	oc.Image = registry + "/operator:" + tag
-	oc.ImagePullPolicy = corev1.PullAlways
-	oc.Args = setArg(oc.Args, "--runtime-image=", registry+"/runtime:"+tag)
-	if _, err := deploys.Update(ctx, op, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("update %s: %w", OperatorDeployment, err)
 	}
 
-	api, err := deploys.Get(ctx, ApiserverDeployment, metav1.GetOptions{})
+	err = retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		api, err := deploys.Get(ctx, ApiserverDeployment, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get %s: %w", ApiserverDeployment, err)
+		}
+		ac := containerByName(api, "apiserver")
+		if ac == nil {
+			return fmt.Errorf("%s has no container %q", ApiserverDeployment, "apiserver")
+		}
+		ac.Image = registry + "/apiserver:" + tag
+		ac.ImagePullPolicy = corev1.PullAlways
+		_, err = deploys.Update(ctx, api, metav1.UpdateOptions{})
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("get %s: %w", ApiserverDeployment, err)
-	}
-	ac := containerByName(api, "apiserver")
-	if ac == nil {
-		return fmt.Errorf("%s has no container %q", ApiserverDeployment, "apiserver")
-	}
-	ac.Image = registry + "/apiserver:" + tag
-	ac.ImagePullPolicy = corev1.PullAlways
-	if _, err := deploys.Update(ctx, api, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("update %s: %w", ApiserverDeployment, err)
 	}
 	return nil
@@ -330,19 +344,26 @@ func (k *realKube) OverrideImages(ctx context.Context, registry, tag string) err
 // container so `wren project create` with no --namespace lands runs in the
 // install's --run-namespace — the namespace where the proxy credential Secrets
 // live (WS-15 Part A). Replaces the env in place if present (the manifest ships
-// a default), appends it otherwise. Idempotent across re-installs.
+// a default), appends it otherwise. Idempotent across re-installs. Runs under
+// RetryOnConflict for the same reason as OverrideImages: it lands right after
+// that call touches the same Deployment, while the Deployment controller is
+// still actively reconciling it.
 func (k *realKube) SetApiserverRunNamespace(ctx context.Context, namespace string) error {
 	deploys := k.cs.AppsV1().Deployments(SystemNamespace)
-	api, err := deploys.Get(ctx, ApiserverDeployment, metav1.GetOptions{})
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		api, err := deploys.Get(ctx, ApiserverDeployment, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("get %s: %w", ApiserverDeployment, err)
+		}
+		ac := containerByName(api, "apiserver")
+		if ac == nil {
+			return fmt.Errorf("%s has no container %q", ApiserverDeployment, "apiserver")
+		}
+		ac.Env = setEnv(ac.Env, "WREN_DEFAULT_RUN_NAMESPACE", namespace)
+		_, err = deploys.Update(ctx, api, metav1.UpdateOptions{})
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("get %s: %w", ApiserverDeployment, err)
-	}
-	ac := containerByName(api, "apiserver")
-	if ac == nil {
-		return fmt.Errorf("%s has no container %q", ApiserverDeployment, "apiserver")
-	}
-	ac.Env = setEnv(ac.Env, "WREN_DEFAULT_RUN_NAMESPACE", namespace)
-	if _, err := deploys.Update(ctx, api, metav1.UpdateOptions{}); err != nil {
 		return fmt.Errorf("update %s: %w", ApiserverDeployment, err)
 	}
 	return nil

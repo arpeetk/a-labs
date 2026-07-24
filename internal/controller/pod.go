@@ -223,6 +223,28 @@ func buildWorkspacePVC(run *wrenv1.AgentRun) *corev1.PersistentVolumeClaim {
 	return pvc
 }
 
+// harnessImage picks the harness container's image. The mock harness runs
+// entirely inside wren-runtime (no CLI to install) — it never needed a
+// distinct image, so it always uses the operator's own runtime image, the one
+// already proven pullable in this pod (every sidecar just used it). Any other
+// kind uses the image the control plane resolved onto the spec.
+//
+// This matters beyond mock: coreapi's HarnessImage default (a hardcoded
+// "wren/claude-code:dev") only resolves to something real on a kind install,
+// where that literal tag happens to be what got built and loaded locally. On
+// a --registry (GKE) install nothing pushes that tag, so a project created
+// with an explicit --harness mock but no --harness-image previously inherited
+// that broken default and hit ImagePullBackOff — caught live on a real GKE
+// cluster, not by unit tests (mock never has a reason to need an image at
+// all, so route it around the default entirely rather than trying to make
+// the default itself registry-aware).
+func harnessImage(run *wrenv1.AgentRun, cfg PodConfig) string {
+	if run.Spec.Harness.Kind == "mock" {
+		return cfg.Images.Runtime
+	}
+	return run.Spec.Harness.Image
+}
+
 // runtimeClassName maps the spec runtime to a pod RuntimeClassName. The default
 // runtime (runc / empty) leaves it nil so the node's default RuntimeClass runs;
 // gvisor/kata set an explicit class (deferred, but wired through — spec §5.6).
@@ -344,7 +366,7 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 
 	harness := corev1.Container{
 		Name:            ContainerHarness,
-		Image:           run.Spec.Harness.Image,
+		Image:           harnessImage(run, cfg),
 		SecurityContext: hardened(true),
 		Resources:       resources(run.Spec.Sandbox.Resources),
 		Env:             harnessEnv,

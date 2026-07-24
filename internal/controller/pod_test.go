@@ -122,6 +122,25 @@ func TestBuildAgentPod(t *testing.T) {
 	}
 }
 
+// TestBuildAgentPodMockHarnessUsesRuntimeImage pins the fix for a bug found
+// live on real GKE: coreapi's HarnessImage default only resolves to something
+// pullable on a kind install (where that literal tag happens to be loaded
+// locally); on a --registry install a mock-harness run with no explicit
+// --harness-image inherited that default and hit ImagePullBackOff. mock needs
+// no CLI at all — it must always run the operator's own runtime image (the one
+// every sidecar in this same pod already pulled successfully), regardless of
+// whatever (possibly bogus, for this run) image landed in spec.Harness.Image.
+func TestBuildAgentPodMockHarnessUsesRuntimeImage(t *testing.T) {
+	run := testRun()
+	run.Spec.Harness = wrenv1.HarnessSpec{Kind: "mock", Image: "wren/claude-code:dev"}
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
+	harness := containerByName(pod.Spec.Containers, ContainerHarness)
+	if harness.Image != testImages.Runtime {
+		t.Errorf("mock harness image = %q, want the runtime image %q (ignoring spec.Harness.Image=%q)",
+			harness.Image, testImages.Runtime, run.Spec.Harness.Image)
+	}
+}
+
 func TestBuildAgentPodRuntimeClass(t *testing.T) {
 	run := testRun()
 	run.Spec.Sandbox.RuntimeClass = wrenv1.RuntimeGVisor
