@@ -69,4 +69,8 @@ type Store interface {
 	GetRun(ctx context.Context, id string) (*Run, error)
 	ListRuns(ctx context.Context, f RunFilter) ([]*Run, error)
 	UpdateRun(ctx context.Context, r *Run) error
+	// DeleteRun removes a run's store record (ErrNotFound if unknown). The
+	// AgentRun CR and its owned pod/PVC are deleted separately by the launcher
+	// (`wren run rm`, WS-15 Part C).
+	DeleteRun(ctx context.Context, id string) error
 }

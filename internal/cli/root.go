@@ -29,9 +29,6 @@ func NewRootCommand() *cobra.Command {
 		newUninstallCmd(),
 		newRunCmd(),
 		newProjectCmd(),
-		newMCPCmd(),
-		newFleetCmd(),
-		newUsageCmd(),
 	)
 	return root
 }
@@ -55,15 +52,4 @@ func emit(cmd *cobra.Command, v any) error {
 	enc := json.NewEncoder(cmd.OutOrStdout())
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
-}
-
-// placeholder builds a subcommand that reports which milestone will implement it.
-func placeholder(group, use, short, milestone string) *cobra.Command {
-	return &cobra.Command{
-		Use:   use,
-		Short: short + " (not implemented yet)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return notImplemented(group, use, milestone)
-		},
-	}
 }

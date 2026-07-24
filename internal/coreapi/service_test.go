@@ -137,6 +137,55 @@ func TestResolveNamespaceUsesDefaultNamespace(t *testing.T) {
 	}
 }
 
+// TestDeleteRun removes both the store record and the AgentRun CR (WS-15 Part C).
+func TestDeleteRun(t *testing.T) {
+	svc, st, fl := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.DeleteRun(ctx, run.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := st.GetRun(ctx, run.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("store record after delete = %v, want ErrNotFound", err)
+	}
+	if _, ok := fl.Runs[run.Namespace+"/"+run.ID]; ok {
+		t.Errorf("AgentRun CR not deleted")
+	}
+	// Deleting an unknown run is ErrNotFound.
+	if err := svc.DeleteRun(ctx, "ghost"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("delete missing = %v, want ErrNotFound", err)
+	}
+}
+
+// TestStopRun sets the cancel annotation on the CR without deleting the record.
+func TestStopRun(t *testing.T) {
+	svc, st, fl := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.StopRun(ctx, run.ID); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	cr := fl.Runs[run.Namespace+"/"+run.ID]
+	if cr == nil || cr.Annotations[wrenv1.CancelAnnotation] != "true" {
+		t.Errorf("cancel annotation not set: %+v", cr)
+	}
+	// The store record is kept (the run stays visible).
+	if _, err := st.GetRun(ctx, run.ID); err != nil {
+		t.Errorf("store record should survive stop: %v", err)
+	}
+	if err := svc.StopRun(ctx, "ghost"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("stop missing = %v, want ErrNotFound", err)
+	}
+}
+
 func TestCreateRunValidation(t *testing.T) {
 	svc, _, _ := newService(t)
 	ctx := context.Background()

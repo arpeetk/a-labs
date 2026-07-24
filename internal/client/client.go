@@ -101,6 +101,17 @@ func (c *Client) GetRun(ctx context.Context, id string) (*Run, error) {
 	return &run, nil
 }
 
+// DeleteRun removes a run and its cluster resources (DELETE /v1/runs/{id}).
+func (c *Client) DeleteRun(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodDelete, "/v1/runs/"+id, nil, nil)
+}
+
+// StopRun cancels a run without deleting it (POST /v1/runs/{id}/stop): the
+// control plane halts the pod and drives the run to Canceled (no auto-resume).
+func (c *Client) StopRun(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/runs/"+id+"/stop", nil, nil)
+}
+
 // Project is a registered repository and its run defaults (mirror of
 // store.Project's JSON; the apiserver rejects unknown fields).
 type Project struct {
@@ -122,6 +133,15 @@ type Project struct {
 func (c *Client) CreateProject(ctx context.Context, p Project) (*Project, error) {
 	var out Project
 	if err := c.do(ctx, http.MethodPost, "/v1/projects", p, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// GetProject returns a single project by name (GET /v1/projects/{name}).
+func (c *Client) GetProject(ctx context.Context, name string) (*Project, error) {
+	var out Project
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+name, nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

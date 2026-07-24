@@ -114,6 +114,16 @@ func (m *Memory) UpdateRun(_ context.Context, r *Run) error {
 	return nil
 }
 
+func (m *Memory) DeleteRun(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.runs[id]; !ok {
+		return ErrNotFound
+	}
+	delete(m.runs, id)
+	return nil
+}
+
 var _ upserter = (*Memory)(nil)
 
 // UpsertRun inserts a run or overwrites an existing one by ID. It backs

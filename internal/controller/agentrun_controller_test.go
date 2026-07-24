@@ -120,6 +120,40 @@ func TestReconcileRunningPhase(t *testing.T) {
 	}
 }
 
+// TestReconcileCancelStopsRun is WS-15 Part C: the cancel annotation deletes the
+// current pod and drives the run to Canceled (terminal — not auto-resumed).
+func TestReconcileCancelStopsRun(t *testing.T) {
+	run := testRun()
+	r, c := newReconciler(t, run)
+	reconcile(t, r, run) // Pending
+	reconcile(t, r, run) // create pod r-abc-0
+	setPodPhase(t, c, run.Namespace, "r-abc-0", corev1.PodRunning, nil)
+	reconcile(t, r, run) // Running
+
+	// User runs `wren run stop` → cancel annotation set on the CR.
+	cur := getRun(t, c, run)
+	cur.Annotations = map[string]string{wrenv1.CancelAnnotation: "true"}
+	if err := c.Update(context.Background(), cur); err != nil {
+		t.Fatalf("annotate: %v", err)
+	}
+	reconcile(t, r, run)
+
+	if got := getRun(t, c, run); got.Status.Phase != wrenv1.PhaseCanceled {
+		t.Fatalf("phase = %q, want Canceled", got.Status.Phase)
+	}
+	// The pod is deleted so the agent actually halts.
+	var pod corev1.Pod
+	err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-0"}, &pod)
+	if !apierrors.IsNotFound(err) {
+		t.Errorf("pod after cancel = %v, want NotFound", err)
+	}
+	// A further reconcile is a no-op (terminal): no new pod is recreated.
+	reconcile(t, r, run)
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-0"}, &pod); !apierrors.IsNotFound(err) {
+		t.Errorf("canceled run must not recreate a pod, got %v", err)
+	}
+}
+
 func TestReconcileResumesOnFailure(t *testing.T) {
 	run := testRun()
 	r, c := newReconciler(t, run)

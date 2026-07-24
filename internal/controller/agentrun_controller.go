@@ -63,6 +63,13 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, nil
 	}
 
+	// User asked to stop the run (wren run stop): halt the pod and mark it
+	// Canceled (terminal — no auto-resume). Checked before the retry path so a
+	// deliberate stop is never mistaken for a crash to retry.
+	if run.Annotations[wrenv1.CancelAnnotation] == "true" {
+		return r.cancel(ctx, &run)
+	}
+
 	// First sight of the run: admit it.
 	if run.Status.Phase == "" {
 		return r.setPhase(ctx, &run, wrenv1.PhasePending, "Admitted", "run accepted")
@@ -297,6 +304,25 @@ func (r *AgentRunReconciler) handlePodFailure(ctx context.Context, run *wrenv1.A
 		return ctrl.Result{}, err
 	}
 	return ctrl.Result{Requeue: true}, nil
+}
+
+// cancel stops a run at the user's request (wren run stop): it deletes the
+// current pod so the agent halts, then marks the run Canceled. Canceled is
+// terminal, so — unlike a crash — the operator does not recreate the pod. Pod
+// deletion is best-effort: a run canceled before any pod exists just
+// transitions to Canceled.
+func (r *AgentRunReconciler) cancel(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, error) {
+	var pod corev1.Pod
+	err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: podName(run)}, &pod)
+	switch {
+	case err == nil:
+		if delErr := r.Delete(ctx, &pod, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
+			return ctrl.Result{}, fmt.Errorf("delete pod on cancel: %w", delErr)
+		}
+	case !apierrors.IsNotFound(err):
+		return ctrl.Result{}, err
+	}
+	return r.setPhase(ctx, run, wrenv1.PhaseCanceled, "Canceled", "run canceled by user (wren run stop)")
 }
 
 // setPhase unconditionally sets the phase + a condition and persists status.

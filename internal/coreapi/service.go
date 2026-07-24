@@ -236,6 +236,33 @@ func (s *Service) GetRun(ctx context.Context, id string) (*store.Run, error) {
 	return rec, nil
 }
 
+// DeleteRun removes a run entirely: its AgentRun CR (whose owner references
+// cascade the pod/PVC/ConfigMap cleanup) and its store record. The store record
+// must exist (ErrNotFound otherwise); a CR already gone is tolerated by the
+// launcher (`wren run rm`, WS-15 Part C).
+func (s *Service) DeleteRun(ctx context.Context, id string) error {
+	rec, err := s.store.GetRun(ctx, id)
+	if err != nil {
+		return err
+	}
+	if err := s.launcher.DeleteRun(ctx, rec.Namespace, id); err != nil {
+		return fmt.Errorf("delete AgentRun: %w", err)
+	}
+	return s.store.DeleteRun(ctx, id)
+}
+
+// StopRun cancels a run without deleting it: it asks the operator (via the
+// cancel annotation) to delete the pod and drive the run to Canceled — a
+// terminal state the reconciler does NOT auto-resume, unlike a crash. The store
+// record is kept (the run stays visible in `wren run list/get`). WS-15 Part C.
+func (s *Service) StopRun(ctx context.Context, id string) error {
+	rec, err := s.store.GetRun(ctx, id)
+	if err != nil {
+		return err
+	}
+	return s.launcher.RequestCancel(ctx, rec.Namespace, id)
+}
+
 // ListRuns returns runs for a scope. scope "mine" filters to user; "all"/"team"
 // return everything (team RBAC narrowing lands in M1).
 func (s *Service) ListRuns(ctx context.Context, scope, user string) ([]*store.Run, error) {

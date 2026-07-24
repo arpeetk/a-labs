@@ -58,6 +58,11 @@ type Launcher interface {
 	// so a restarted apiserver does not forget runs.
 	ListRuns(ctx context.Context) ([]wrenv1.AgentRun, error)
 	DeleteRun(ctx context.Context, ns, name string) error
+	// RequestCancel marks a run for cancellation by setting the cancel annotation
+	// on its AgentRun; the operator observes it, deletes the current pod, and
+	// drives the run to Canceled (terminal — no auto-resume). Distinct from
+	// DeleteRun, which removes the run entirely (`wren run stop`, WS-15 Part C).
+	RequestCancel(ctx context.Context, ns, name string) error
 	// SecretHasKey reports whether Secret `name` in namespace `ns` exists and
 	// carries a non-empty value for `key`. It backs the control plane's
 	// pre-flight credential check (coreapi, WS-15 Part A): a run whose namespace
@@ -143,6 +148,21 @@ func (k *K8s) DeleteRun(ctx context.Context, ns, name string) error {
 	run := &wrenv1.AgentRun{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
 	err := k.c.Delete(ctx, run)
 	return client.IgnoreNotFound(err)
+}
+
+func (k *K8s) RequestCancel(ctx context.Context, ns, name string) error {
+	var run wrenv1.AgentRun
+	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &run); err != nil {
+		return err
+	}
+	if run.Annotations[wrenv1.CancelAnnotation] == "true" {
+		return nil // already requested
+	}
+	if run.Annotations == nil {
+		run.Annotations = map[string]string{}
+	}
+	run.Annotations[wrenv1.CancelAnnotation] = "true"
+	return k.c.Update(ctx, &run)
 }
 
 func (k *K8s) SecretHasKey(ctx context.Context, ns, name, key string) (bool, error) {

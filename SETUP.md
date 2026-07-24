@@ -172,3 +172,16 @@ instead of building locally.
 - **SSO/OIDC** for the apiserver front-door (replacing the `X-Wren-User`
   header) and managed **Postgres** provisioning + a **Helm chart** (WS-5).
 - **Workload Identity** for the operator/pods → GCP.
+- **Roadmap CLI surface** (deliberately not shipped yet — the CLI lists only
+  commands that work, so these are absent rather than stubbed): `wren run
+  attach` / `wren run steer` (interactive steering), `wren run resume` (manual
+  re-run of a terminally-Failed run — the operator already auto-resumes
+  *infrastructure* crashes; a manual trigger that resets the retry budget and
+  clears the leftover Failed pod is a real feature, deferred), `wren fleet`
+  (cross-run dashboard), `wren usage` (token/cost/compute reporting), `wren mcp
+  add|list|test` (per-project MCP servers), `wren project config` (editing
+  defaults/rubric/egress in place). Each is trivial to re-add once its server
+  side lands.
+- **Sandbox runtimes** `gvisor` / `kata` for `wren run create --runtime`: wired
+  end-to-end in the operator but not provisioned by any v1 cluster, so the CLI
+  rejects them today (only `runc` works) until M4.

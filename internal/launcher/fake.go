@@ -96,6 +96,20 @@ func (f *Fake) DeleteRun(_ context.Context, ns, name string) error {
 	return nil
 }
 
+func (f *Fake) RequestCancel(_ context.Context, ns, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	run, ok := f.Runs[key(ns, name)]
+	if !ok {
+		return apierrors.NewNotFound(schema.GroupResource{Group: "wren.dev", Resource: "agentruns"}, name)
+	}
+	if run.Annotations == nil {
+		run.Annotations = map[string]string{}
+	}
+	run.Annotations[wrenv1.CancelAnnotation] = "true"
+	return nil
+}
+
 func (f *Fake) SecretHasKey(_ context.Context, ns, name, key string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
