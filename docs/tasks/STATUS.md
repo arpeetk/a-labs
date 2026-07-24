@@ -69,17 +69,18 @@ Things hand-offs said were NOT verified; burn down before launch.
 - **Lint findings 3–5 above** (SA1019, QF1002, SA9003) — **all fixed in #17**;
   the golangci-lint job is green on that branch. Merge #17 → main fully green →
   enable branch protection.
-- **WS-1 GKE live validation** — still not run on a real cluster. The
-  round-3 fix made it runnable at defaults: `make docker-push-gke &&
-  make e2e-gke` (GKE Standard cluster `wren-e2e`; Autopilot admission + PSA
-  remain unverifiable locally). Owner: human with GCP access.
-- **WS-13 `--registry` live run** — the GKE onboarding headline, unit-tested
-  + line-reviewed but never executed. Live command (from the hand-off):
-  `gcloud container clusters get-credentials <c> --zone <z> --project <p>
-  && gcloud auth configure-docker us-central1-docker.pkg.dev &&
-  GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-... wren install
-  --registry us-central1-docker.pkg.dev/<proj>/wren` (+ `--expose=LoadBalancer`
-  for team setups). Owner: human with GCP access.
+- ~~**WS-1 GKE live validation**~~ — **DONE (2026-07-24)**: `wren-e2e` GKE
+  Standard (1.35.6), installed via `wren install --registry`. Lockdown exited
+  0 on a real node (IPv4 + IPv6 rules applied); canary **PASSED** ("direct
+  dial to 1.1.1.1:443 blocked", "direct HTTPS to https://github.com/ blocked",
+  "via egress-proxy succeeded"); run `r-6df35890` Succeeded with
+  `EgressEnforcement=True/Iptables`. Autopilot/PSA admission remains
+  untestable here (covered by design: deterministic `PodAdmissionForbidden`).
+- ~~**WS-13 `--registry` live run**~~ — **DONE (2026-07-24)**: same session —
+  install built + pushed `799451d` images to AR, stored the GitHub token via
+  the env path (no prompt echo), control plane Ready, engineer flow
+  (login → project create → run create → Succeeded) exercised over
+  port-forward. `--expose=LoadBalancer` still untried.
 - **WS-12 live-key harness validation** — codex + opencode are unit-tested
   and flag-verified against the real CLIs, but never run live (no keys in
   CI). Per-harness recipe in the #20 hand-off (secret, project config, smoke
