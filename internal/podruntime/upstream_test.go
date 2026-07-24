@@ -52,9 +52,11 @@ func TestEnvUpstreamOverrideAndTrim(t *testing.T) {
 func TestEgressConfigDefaultUpstreams(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "gh_tok")
 	t.Setenv("ANTHROPIC_API_KEY", "an_key")
+	t.Setenv("OPENAI_API_KEY", "oa_key")
 	t.Setenv("WREN_GITHUB_UPSTREAM", "")
 	t.Setenv("WREN_GITHUB_API_UPSTREAM", "")
 	t.Setenv("WREN_ANTHROPIC_UPSTREAM", "")
+	t.Setenv("WREN_OPENAI_UPSTREAM", "")
 
 	v := routesView()
 	if got := findUpstream(v, "/github/"); got != defaultGitHubUpstream {
@@ -66,14 +68,19 @@ func TestEgressConfigDefaultUpstreams(t *testing.T) {
 	if got := findUpstream(v, "/anthropic/"); got != defaultAnthropicUpstream {
 		t.Errorf("anthropic upstream = %q, want %q", got, defaultAnthropicUpstream)
 	}
+	if got := findUpstream(v, "/openai/"); got != defaultOpenAIUpstream {
+		t.Errorf("openai upstream = %q, want %q", got, defaultOpenAIUpstream)
+	}
 }
 
 func TestEgressConfigOverriddenUpstreams(t *testing.T) {
 	t.Setenv("GITHUB_TOKEN", "gh_tok")
 	t.Setenv("ANTHROPIC_API_KEY", "an_key")
+	t.Setenv("OPENAI_API_KEY", "oa_key")
 	t.Setenv("WREN_GITHUB_UPSTREAM", "http://gitea.local:3000")
 	t.Setenv("WREN_GITHUB_API_UPSTREAM", "http://gitea.local:3000/api")
 	t.Setenv("WREN_ANTHROPIC_UPSTREAM", "http://anthropic-stub.local")
+	t.Setenv("WREN_OPENAI_UPSTREAM", "http://openai-stub.local")
 
 	v := routesView()
 	if got := findUpstream(v, "/github/"); got != "http://gitea.local:3000" {
@@ -84,5 +91,8 @@ func TestEgressConfigOverriddenUpstreams(t *testing.T) {
 	}
 	if got := findUpstream(v, "/anthropic/"); got != "http://anthropic-stub.local" {
 		t.Errorf("anthropic upstream = %q, want override", got)
+	}
+	if got := findUpstream(v, "/openai/"); got != "http://openai-stub.local" {
+		t.Errorf("openai upstream = %q, want override", got)
 	}
 }

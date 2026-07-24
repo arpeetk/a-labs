@@ -1,13 +1,9 @@
 package harness
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
-	"io"
 	"os"
-	"os/exec"
 
 	"github.com/summiteight/wren/internal/runspec"
 )
@@ -24,12 +20,6 @@ func (ClaudeCode) Name() string { return "claude-code" }
 
 // Run implements Harness.
 func (ClaudeCode) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (Result, error) {
-	bin, err := exec.LookPath("claude")
-	if err != nil {
-		em.Errorf("claude CLI not found on PATH (use a claude-code harness image)")
-		return Result{}, errors.New("claude-code harness: `claude` CLI not installed in the image")
-	}
-
 	args := []string{
 		"--print", spec.Prompt,
 		"--output-format", "stream-json",
@@ -39,48 +29,22 @@ func (ClaudeCode) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (R
 	if spec.Model != "" {
 		args = append(args, "--model", spec.Model)
 	}
-
-	cmd := exec.CommandContext(ctx, bin, args...)
-	cmd.Dir = spec.WorkspacePath
-	cmd.Env = claudeEnv()
-
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return Result{}, err
-	}
-	cmd.Stderr = os.Stderr
-	if err := cmd.Start(); err != nil {
-		return Result{}, err
-	}
-
-	in, out, isErr := streamClaude(stdout, em)
-	waitErr := cmd.Wait()
-
-	branch := spec.BranchPrefix + "/" + spec.RunID
-	if spec.BranchPrefix == "" {
-		branch = "wren/" + spec.RunID
-	}
-	if waitErr != nil {
-		em.Errorf("claude exited with error: " + waitErr.Error())
-		return Result{Branch: branch, InputTokens: in, OutputTokens: out}, waitErr
-	}
-	if isErr {
-		return Result{Branch: branch, InputTokens: in, OutputTokens: out}, errors.New("claude reported an error result")
-	}
-	return Result{Branch: branch, InputTokens: in, OutputTokens: out}, nil
+	return runAgentCLI(ctx, spec, em, agentCLI{
+		adapter:   "claude-code",
+		bin:       "claude",
+		args:      args,
+		env:       claudeEnv(),
+		parseLine: parseClaudeLine,
+	})
 }
 
 // claudeEnv provides the subprocess environment. It ensures ANTHROPIC_API_KEY is
 // set to a placeholder so the CLI starts even though the real key is injected by
 // the egress-proxy (which overwrites the x-api-key header on the way out).
 func claudeEnv() []string {
-	env := os.Environ()
-	if os.Getenv("ANTHROPIC_API_KEY") == "" {
-		env = append(env, "ANTHROPIC_API_KEY=injected-by-egress-proxy")
-	}
+	env := ensureEnv(os.Environ(), "ANTHROPIC_API_KEY", "injected-by-egress-proxy")
 	// Keep the agent's own config/telemetry from leaking across runs.
-	env = append(env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
-	return env
+	return append(env, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1")
 }
 
 // claudeStreamEvent is the subset of the claude stream-json schema we consume.
@@ -101,46 +65,41 @@ type claudeStreamEvent struct {
 	} `json:"usage"`
 }
 
-// streamClaude parses newline-delimited claude events, re-emitting them as Wren
-// events and returning the final token usage and whether the run errored.
-func streamClaude(r io.Reader, em *Emitter) (inTokens, outTokens int64, isErr bool) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // agent messages can be large
-	for sc.Scan() {
-		line := sc.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var ev claudeStreamEvent
-		if err := json.Unmarshal(line, &ev); err != nil {
-			continue // tolerate non-JSON / partial lines
-		}
-		switch ev.Type {
-		case "assistant":
-			if ev.Message != nil {
-				for _, c := range ev.Message.Content {
-					switch c.Type {
-					case "text":
-						if c.Text != "" {
-							em.Message(c.Text)
-						}
-					case "tool_use":
-						em.ToolCall(c.Name)
+// parseClaudeLine maps one claude stream-json line to its normalized events.
+// Non-JSON / partial lines are tolerated (skipped).
+func parseClaudeLine(line []byte) []cliEvent {
+	var ev claudeStreamEvent
+	if err := json.Unmarshal(line, &ev); err != nil {
+		return nil
+	}
+	var out []cliEvent
+	switch ev.Type {
+	case "assistant":
+		if ev.Message != nil {
+			for _, c := range ev.Message.Content {
+				switch c.Type {
+				case "text":
+					if c.Text != "" {
+						out = append(out, cliEvent{text: c.Text})
 					}
+				case "tool_use":
+					out = append(out, cliEvent{tool: c.Name})
 				}
 			}
-			if ev.Usage != nil {
-				inTokens, outTokens = ev.Usage.InputTokens, ev.Usage.OutputTokens
-			}
-		case "result":
-			if ev.Usage != nil {
-				inTokens, outTokens = ev.Usage.InputTokens, ev.Usage.OutputTokens
-			}
-			if ev.Result != "" {
-				em.Message(ev.Result)
-			}
-			isErr = ev.IsError
 		}
+		if ev.Usage != nil {
+			out = append(out, usageEvent(ev.Usage.InputTokens, ev.Usage.OutputTokens))
+		}
+	case "result":
+		e := cliEvent{text: ev.Result, isErr: ev.IsError}
+		if ev.Usage != nil {
+			e.hasUsage, e.inTokens, e.outTokens = true, ev.Usage.InputTokens, ev.Usage.OutputTokens
+		}
+		out = append(out, e)
 	}
-	return inTokens, outTokens, isErr
+	return out
+}
+
+func usageEvent(in, out int64) cliEvent {
+	return cliEvent{hasUsage: true, inTokens: in, outTokens: out}
 }

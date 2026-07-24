@@ -62,13 +62,13 @@ internal/
   controller/          AgentRun/AgentPool reconcilers + pod builder
   runspec/             the RunSpec contract handed to a harness
   blob/                object-store contract for checkpoints (interface only — no impls yet)
-  harness/             harness adapters (mock, claude-code) + event protocol
+  harness/             harness adapters (mock, claude-code, codex, opencode) + event protocol
   podruntime/          in-pod role runners (harness/hydrate/sidecars) + dispatch
   github/              GitHub PR client + App installation-token minter + Fake
   gitwork/             go-git clone/commit/push (no git binary needed)
   finalize/            commit → push branch → open PR (+ rubric)
 config/                kustomize manifests (crd, rbac, manager) + samples
-build/                 Dockerfile.runtime
+build/                 Dockerfile.runtime + per-harness images (claude-code, codex, opencode)
 docs/technical-spec.md the living design spec (Draft v0.2)
 ```
 
@@ -221,7 +221,11 @@ real PR without touching github.com.
 ## 8. Status & M0 stand-ins (things deliberately not "real" yet)
 
 - **Harness:** the **mock** adapter (deterministic, no key) is the default; the
-  real Claude Code adapter needs `ANTHROPIC_API_KEY` + the egress path.
+  real Claude Code adapter needs `ANTHROPIC_API_KEY` + the egress path. The
+  **codex** and **opencode** adapters (WS-12) are built — adapters, images,
+  the `/openai/` egress route, `--openai-key-secret` — but **not yet validated
+  against the live providers** (no keys in CI; see docs/harnesses.md for the
+  live-smoke recipe).
 - **Egress-proxy:** real — enforces the allowlist and injects github/anthropic
   credentials (`internal/egress`); the runner holds no token. Bypass is
   **enforced** (WS-1): an `egress-lockdown` init container iptables-rejects all

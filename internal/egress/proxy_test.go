@@ -197,6 +197,86 @@ func TestReverseRouteScrubsInboundCreds(t *testing.T) {
 	}
 }
 
+// The /openai/ route (WS-12, Codex) must behave like every credentialed
+// reverse route: the proxy injects the Bearer key AND scrubs any credential
+// the untrusted runner tried to smuggle upstream.
+func TestOpenAIRouteInjectsBearerAndScrubs(t *testing.T) {
+	var gotAuth, gotProxyAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotProxyAuth = r.Header.Get("Proxy-Authorization")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	p, err := New(Config{Routes: []Route{{
+		Prefix:   RouteOpenAI,
+		Upstream: upstream.URL,
+		Auth:     HeaderAuth{Key: "Authorization", Value: "Bearer sk-openai"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(p)
+	defer front.Close()
+
+	req, err := http.NewRequest(http.MethodPost, front.URL+"/openai/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer runner-smuggled")
+	req.Header.Set("Proxy-Authorization", "Basic abc")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "Bearer sk-openai" {
+		t.Errorf("Authorization = %q, want the proxy-injected Bearer (runner's scrubbed)", gotAuth)
+	}
+	if gotProxyAuth != "" {
+		t.Errorf("inbound Proxy-Authorization leaked upstream on /openai/ route: %q", gotProxyAuth)
+	}
+}
+
+// Even with no key configured (Auth injects nothing), the Director's scrub —
+// not the overwrite — is what keeps a runner-smuggled credential off the
+// upstream. This is the assertion that pins the scrub itself.
+func TestOpenAIRouteNoAuthStillScrubs(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+	}))
+	defer upstream.Close()
+
+	p, err := New(Config{Routes: []Route{{
+		Prefix:   RouteOpenAI,
+		Upstream: upstream.URL,
+		Auth:     NoAuth{},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(p)
+	defer front.Close()
+
+	req, err := http.NewRequest(http.MethodPost, front.URL+"/openai/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer runner-smuggled")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if gotAuth != "" {
+		t.Errorf("inbound Authorization leaked upstream with NoAuth route: %q", gotAuth)
+	}
+}
+
 func TestForwardProxyAllowlist(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, "upstream-ok")

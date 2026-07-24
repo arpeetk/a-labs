@@ -128,6 +128,7 @@ func TestCredentialsGoToEgressProxyNotRunner(t *testing.T) {
 		Images:             testImages,
 		GitHubTokenSecret:  "wren-github-token",
 		AnthropicKeySecret: "wren-anthropic-key",
+		OpenAIKeySecret:    "wren-openai-key",
 	})
 
 	harness := &pod.Spec.Containers[0]
@@ -142,6 +143,9 @@ func TestCredentialsGoToEgressProxyNotRunner(t *testing.T) {
 		if _, ok := envValue(c, "ANTHROPIC_API_KEY"); ok {
 			t.Errorf("%s must not receive ANTHROPIC_API_KEY", c.Name)
 		}
+		if _, ok := envValue(c, "OPENAI_API_KEY"); ok {
+			t.Errorf("%s must not receive OPENAI_API_KEY", c.Name)
+		}
 		// ...but they are pointed at the proxy.
 		if e, ok := envValue(c, "WREN_EGRESS_PROXY"); !ok || e.Value != "http://127.0.0.1:8099" {
 			t.Errorf("%s WREN_EGRESS_PROXY = %q (ok=%v)", c.Name, e.Value, ok)
@@ -149,6 +153,10 @@ func TestCredentialsGoToEgressProxyNotRunner(t *testing.T) {
 	}
 	if e, ok := envValue(harness, "ANTHROPIC_BASE_URL"); !ok || e.Value != "http://127.0.0.1:8099/anthropic" {
 		t.Errorf("harness ANTHROPIC_BASE_URL = %q (ok=%v)", e.Value, ok)
+	}
+	// The codex adapter's provider route is wired the same way (WS-12).
+	if e, ok := envValue(harness, "OPENAI_BASE_URL"); !ok || e.Value != "http://127.0.0.1:8099/openai" {
+		t.Errorf("harness OPENAI_BASE_URL = %q (ok=%v)", e.Value, ok)
 	}
 
 	// The proxy carries the credentials via Secret refs.
@@ -162,12 +170,20 @@ func TestCredentialsGoToEgressProxyNotRunner(t *testing.T) {
 		ak.ValueFrom.SecretKeyRef.Name != "wren-anthropic-key" || ak.ValueFrom.SecretKeyRef.Key != "key" {
 		t.Errorf("egress-proxy ANTHROPIC_API_KEY secret ref wrong: %+v", ak)
 	}
+	oa, ok := envValue(proxy, "OPENAI_API_KEY")
+	if !ok || oa.ValueFrom == nil || oa.ValueFrom.SecretKeyRef == nil ||
+		oa.ValueFrom.SecretKeyRef.Name != "wren-openai-key" || oa.ValueFrom.SecretKeyRef.Key != "key" {
+		t.Errorf("egress-proxy OPENAI_API_KEY secret ref wrong: %+v", oa)
+	}
 
 	// No secrets configured → proxy has no credential envs.
 	plain := buildAgentPod(run, PodConfig{Images: testImages})
 	plainProxy := containerByName(plain.Spec.InitContainers, ContainerEgressProxy)
 	if _, ok := envValue(plainProxy, "GITHUB_TOKEN"); ok {
 		t.Error("GITHUB_TOKEN injected despite empty secret name")
+	}
+	if _, ok := envValue(plainProxy, "OPENAI_API_KEY"); ok {
+		t.Error("OPENAI_API_KEY injected despite empty secret name")
 	}
 }
 

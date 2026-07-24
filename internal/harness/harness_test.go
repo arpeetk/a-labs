@@ -131,6 +131,13 @@ func TestSelect(t *testing.T) {
 	if h := Select(runspec.RunSpec{Harness: "claude-code"}); h.Name() != "claude-code" {
 		t.Errorf("claude-code → %s", h.Name())
 	}
+	// codex / opencode select their real adapters (keys come via the proxy).
+	if h := Select(runspec.RunSpec{Harness: "codex"}); h.Name() != "codex" {
+		t.Errorf("codex → %s", h.Name())
+	}
+	if h := Select(runspec.RunSpec{Harness: "opencode"}); h.Name() != "opencode" {
+		t.Errorf("opencode → %s", h.Name())
+	}
 	if h := Select(runspec.RunSpec{Harness: "weird"}); h.Name() != "mock" {
 		t.Errorf("unknown → %s", h.Name())
 	}

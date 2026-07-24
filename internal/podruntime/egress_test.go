@@ -25,6 +25,7 @@ func TestRunEgressProxyServes(t *testing.T) {
 	t.Setenv("WREN_EGRESS_ALLOWLIST", upURL.Hostname())
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -144,6 +145,7 @@ func TestEgressConfigFromEnv(t *testing.T) {
 	t.Setenv("WREN_EGRESS_ALLOWLIST", "github.com, *.pkg.corp.com ,")
 	t.Setenv("GITHUB_TOKEN", "ghs_tok")
 	t.Setenv("ANTHROPIC_API_KEY", "sk-key")
+	t.Setenv("OPENAI_API_KEY", "")
 
 	cfg := egressConfigFromEnv()
 	if len(cfg.Allowlist) != 2 { // empty entry trimmed out
@@ -164,10 +166,33 @@ func TestEgressConfigFromEnv(t *testing.T) {
 	}
 }
 
+// An OPENAI_API_KEY on the proxy adds the /openai/ credentialed route (WS-12).
+func TestEgressConfigOpenAIRoute(t *testing.T) {
+	t.Setenv("WREN_EGRESS_ALLOWLIST", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "sk-openai")
+
+	cfg := egressConfigFromEnv()
+	if len(cfg.Routes) != 1 || cfg.Routes[0].Prefix != "/openai/" {
+		t.Fatalf("routes = %+v, want only /openai/", cfg.Routes)
+	}
+	// The route must inject the key as a Bearer Authorization header.
+	req, err := http.NewRequest(http.MethodPost, "http://proxy/openai/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Routes[0].Auth.Apply(req)
+	if got := req.Header.Get("Authorization"); got != "Bearer sk-openai" {
+		t.Errorf("Authorization = %q, want Bearer injection", got)
+	}
+}
+
 func TestEgressConfigNoSecrets(t *testing.T) {
 	t.Setenv("WREN_EGRESS_ALLOWLIST", "")
 	t.Setenv("GITHUB_TOKEN", "")
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
 	cfg := egressConfigFromEnv()
 	if len(cfg.Routes) != 0 || len(cfg.Allowlist) != 0 {
 		t.Errorf("expected empty config, got routes=%d allow=%d", len(cfg.Routes), len(cfg.Allowlist))
