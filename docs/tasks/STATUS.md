@@ -30,7 +30,7 @@ transition; this file is the single glance-view for the sprint.
 | 11 | Finalize pipeline | [WS-11](WS-11-finalize-pipeline.md) | merged | #18 | done — idempotent finalize, retry classification, prUrl live |
 | —  | Harness image cross-build fix | (chore, no brief) | merged | #23 | done — buildx `--platform=$BUILDPLATFORM` applied to all 3 harness Dockerfiles |
 | **14** | **Harness images in onboarding** | [WS-14](WS-14-harness-image-onboarding.md) | merged | #24 | done — `--harness-images` build/push/kind-load, correct hand-off image ref, dead placeholder default fixed; live kind validation in hand-off; `--registry` GKE path code-reviewed only |
-| **15** | **Onboarding friction pass + CLI surface cleanup** | [WS-15](WS-15-onboarding-cli-cleanup.md) | dispatched | `../wren-ws15` | fix the silent namespace-credential footgun, cut required flags to the true minimum, remove/implement the 10 CLI commands that currently just print "not implemented yet" |
+| **15** | **Onboarding friction pass + CLI surface cleanup** | [WS-15](WS-15-onboarding-cli-cleanup.md) | merged | #25 | done — install-configured default run-namespace closes the footgun (live-validated), pre-flight credential check (400 not silent failure), `project get`/`run rm`/`run stop` real, `run resume`/`mcp`/`fleet`/`usage`/`attach`/`steer`/`project config` removed from CLI (zero "not implemented yet" left), `--runtime gvisor|kata` rejected client-side with an M4 pointer |
 
 ## Human-gated items (start now — lead time)
 
