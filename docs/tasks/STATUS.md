@@ -20,8 +20,8 @@ transition; this file is the single glance-view for the sprint.
 | 7  | CI + community | [WS-7](WS-7-ci-community.md) | merged | #13 | done — CI/e2e/CodeQL live on main |
 | 8  | Claims truthing | [WS-8](WS-8-claims-truthing.md) | merged | #19 | done — README/spec/SECURITY truthed; `internal/blob` socket |
 | 11 | Finalize pipeline | [WS-11](WS-11-finalize-pipeline.md) | merged | #18 | done — idempotent finalize, retry classification, prUrl live |
-| **12** | **Codex + OpenCode harnesses** | [WS-12](WS-12-multi-harness.md) | ready | — | none — MAIN TRACK |
-| **13** | **Onboarding: `wren install` + project CLI + releases** | [WS-13](WS-13-onboarding.md) | ready | — | none — MAIN TRACK |
+| **12** | **Codex + OpenCode harnesses** | [WS-12](WS-12-multi-harness.md) | merged | #20 | done — adapters+images+/openai/ route; live-key runs unverified (recipe in ledger) |
+| **13** | **Onboarding: `wren install` + project CLI + releases** | [WS-13](WS-13-onboarding.md) | merged | #21 | done — kind DoD transcript in hand-off; `--registry` GKE path unverified (command in ledger) |
 | 5  | Helm chart | [WS-5](WS-5-helm-chart.md) | deferred | — | GitOps install path; after WS-13's CLI-native path lands |
 | 2  | GitHub App tokens | [WS-2](WS-2-github-app.md) | deferred | — | secondary (owner call); PAT documented as the path meanwhile |
 | 6  | Quickstart + releases | [WS-6](WS-6-quickstart-releases.md) | superseded | — | folded into WS-13 (install cmd + private releases) |
@@ -73,6 +73,20 @@ Things hand-offs said were NOT verified; burn down before launch.
   round-3 fix made it runnable at defaults: `make docker-push-gke &&
   make e2e-gke` (GKE Standard cluster `wren-e2e`; Autopilot admission + PSA
   remain unverifiable locally). Owner: human with GCP access.
+- **WS-13 `--registry` live run** — the GKE onboarding headline, unit-tested
+  + line-reviewed but never executed. Live command (from the hand-off):
+  `gcloud container clusters get-credentials <c> --zone <z> --project <p>
+  && gcloud auth configure-docker us-central1-docker.pkg.dev &&
+  GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-... wren install
+  --registry us-central1-docker.pkg.dev/<proj>/wren` (+ `--expose=LoadBalancer`
+  for team setups). Owner: human with GCP access.
+- **WS-12 live-key harness validation** — codex + opencode are unit-tested
+  and flag-verified against the real CLIs, but never run live (no keys in
+  CI). Per-harness recipe in the #20 hand-off (secret, project config, smoke
+  task, expected events). Candidate follow-up: keyless stub-upstream e2e via
+  the `WREN_OPENAI_UPSTREAM`/`WREN_ANTHROPIC_UPSTREAM` seams.
+- **WS-13 release.yml** — untriggered until the first `v*` tag (goreleaser
+  half proven via --snapshot; GHCR buildx half reuses e2e-built Dockerfiles).
 - **WS-7 repo-settings checklist** (human, GitHub UI): branch protection on
   `main` (require CI + e2e checks), DCO app, merge queue, enable Discussions,
   CodeQL in Security tab. See WS-7 hand-off for specifics. Note: PR #16
