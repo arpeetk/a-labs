@@ -28,6 +28,8 @@ transition; this file is the single glance-view for the sprint.
 | 9  | Docs site | [WS-9](WS-9-docs-site.md) | deferred | — | secondary |
 | 10 | Rename + public cut | [WS-10](WS-10-rename-repo-cut.md) | deferred | — | secondary; decisions locked (skein/skein-sh/skein.dev/Apache-2.0) |
 | 11 | Finalize pipeline | [WS-11](WS-11-finalize-pipeline.md) | merged | #18 | done — idempotent finalize, retry classification, prUrl live |
+| —  | Harness image cross-build fix | (chore, no brief) | in-review | #23 | buildx `--platform=$BUILDPLATFORM` fix applied to all 3 harness Dockerfiles; CI running |
+| **14** | **Harness images in onboarding** | [WS-14](WS-14-harness-image-onboarding.md) | ready | — | blocked on #23 merge; closes the WS-12↔WS-13 seam (install never builds/pushes harness images; hand-off hint points at the wrong image) |
 
 ## Human-gated items (start now — lead time)
 
