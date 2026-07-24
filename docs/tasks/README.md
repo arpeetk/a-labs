@@ -31,9 +31,10 @@ This directory holds one dispatch-ready brief per workstream (see
 ## Model guidance
 
 - **Fine on a cheaper model (well-bounded, mechanical):** WS-0, WS-3, WS-4,
-  WS-5, WS-7, WS-8, WS-9.
+  WS-5, WS-7, WS-8, WS-9, WS-11.
 - **Use a stronger model or add a careful human/strong-model review pass:**
-  WS-1 and WS-2 (security boundary), WS-6 (user-facing UX judgment),
+  WS-1 and WS-2 (security boundary), WS-12 (credentialed egress routes),
+  WS-13 (user-facing UX judgment), WS-6 (UX judgment),
   WS-10 (destructive/mechanical but irreversible — human-gated anyway).
 - The **orchestrator/review role** should not be downgraded: the workflow's
   quality control is concentrated there by design.

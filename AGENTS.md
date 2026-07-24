@@ -236,8 +236,8 @@ real PR without touching github.com.
   the `/openai/` egress route, `--openai-key-secret` — but **not yet validated
   against the live providers** (no keys in CI; see docs/harnesses.md for the
   live-smoke recipe).
-- **Egress-proxy:** real — enforces the allowlist and injects github/anthropic
-  credentials (`internal/egress`); the runner holds no token. Bypass is
+- **Egress-proxy:** real — enforces the allowlist and injects github/anthropic/
+  openai credentials (`internal/egress`); the runner holds no token. Bypass is
   **enforced** (WS-1): an `egress-lockdown` init container iptables-rejects all
   runner egress except via the proxy's uid (runner/proxy uids are pinned in the
   pod spec; a startup canary proves it per run). `--egress-enforcement=off` is

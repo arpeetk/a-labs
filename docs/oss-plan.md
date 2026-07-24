@@ -1,5 +1,11 @@
 # Wren — OSS Launch Plan
 
+> **Update (2026-07-23):** the owner reprioritized — the main track is now
+> **seamless onboarding** (WS-13: `wren install`, private releases) and
+> **multi-harness** (WS-12: codex + opencode); rename/App/docs-site
+> (Phases 0–1, parts of 4–5) are secondary. Live state: [`tasks/STATUS.md`](tasks/STATUS.md).
+> The phasing below remains the shape of the *public* launch when it resumes.
+
 > **Status:** v1 · **Date:** 2026-07-14 · **Companions:** the evaluation and
 > verdict live in [`oss-review.md`](oss-review.md); the engineering-level
 > decomposition (workstreams, file-level scope, dependency graph) is in

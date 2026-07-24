@@ -1,5 +1,13 @@
 # Wren — OSS v0.1 Implementation Plan
 
+> **Update (2026-07-23):** this plan covers WS-0…WS-10 as designed. Since it
+> was written: WS-11 (finalize pipeline) was added from review findings, and
+> the owner reprioritized the main track to **onboarding + multi-harness**
+> (WS-13 supersedes WS-6; WS-2/5/9/10 deferred). The live board is
+> [`tasks/STATUS.md`](tasks/STATUS.md); later workstreams have their own
+> briefs in [`tasks/`](tasks/). Treat the designs below as history/reference,
+> not current priority.
+
 > **Status:** v1 · **Date:** 2026-07-14 · **Companions:**
 > [`oss-review.md`](oss-review.md) (evaluation & verdict) ·
 > [`oss-plan.md`](oss-plan.md) (launch phases & positioning) ·
