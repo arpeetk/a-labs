@@ -30,6 +30,7 @@ transition; this file is the single glance-view for the sprint.
 | 11 | Finalize pipeline | [WS-11](WS-11-finalize-pipeline.md) | merged | #18 | done — idempotent finalize, retry classification, prUrl live |
 | —  | Harness image cross-build fix | (chore, no brief) | merged | #23 | done — buildx `--platform=$BUILDPLATFORM` applied to all 3 harness Dockerfiles |
 | **14** | **Harness images in onboarding** | [WS-14](WS-14-harness-image-onboarding.md) | merged | #24 | done — `--harness-images` build/push/kind-load, correct hand-off image ref, dead placeholder default fixed; live kind validation in hand-off; `--registry` GKE path code-reviewed only |
+| —  | Combined kind+GKE e2e verification (WS-14+WS-15) | (chore, no brief) | done | `d9ede69` | full engineer flow (install→login→project create→run create→Succeeded, credential pre-flight both paths, project get/run stop/run rm) live-verified on kind AND real GKE (`wren-e2e`, reused cluster). **Found + fixed 2 bugs GKE-only, invisible on kind:** (1) `install/kube.go` Deployment updates raced the Deployment controller — 409 conflict, reproduced twice — now `retry.RetryOnConflict`; (2) mock harness inherited coreapi's `HarnessImage` default (`wren/claude-code:dev`), which only resolves on kind (that tag happens to be loaded there) — ImagePullBackOff on `--registry` installs. Mock now always uses the operator's own runtime image. Regression test added (`TestBuildAgentPodMockHarnessUsesRuntimeImage`). Cluster torn down after, billing stopped. |
 | **15** | **Onboarding friction pass + CLI surface cleanup** | [WS-15](WS-15-onboarding-cli-cleanup.md) | merged | #25 | done — install-configured default run-namespace closes the footgun (live-validated), pre-flight credential check (400 not silent failure), `project get`/`run rm`/`run stop` real, `run resume`/`mcp`/`fleet`/`usage`/`attach`/`steer`/`project config` removed from CLI (zero "not implemented yet" left), `--runtime gvisor|kata` rejected client-side with an M4 pointer |
 
 ## Human-gated items (start now — lead time)
@@ -84,6 +85,16 @@ Things hand-offs said were NOT verified; burn down before launch.
   the env path (no prompt echo), control plane Ready, engineer flow
   (login → project create → run create → Succeeded) exercised over
   port-forward. `--expose=LoadBalancer` still untried.
+- ~~**WS-14/WS-15 `--registry` live GKE run**~~ — **DONE (2026-07-24)**: same
+  `wren-e2e` cluster, combined at commit `d9ede69`. All 6 images (3
+  control-plane + 3 harness) built/pushed; install idempotent across 3
+  consecutive runs (2 of which hit and then confirmed-fixed the conflict bug
+  above); minimal `project create` (no `--namespace`) landed in `wren-runs`;
+  credential pre-flight check verified both ways (missing → 400 with the
+  right hint, present → run proceeds); `project get`/`run stop`/`run rm` all
+  exercised; run-reconciliation-from-CR-on-boot (WS-3) incidentally
+  reconfirmed when a reinstall recreated the apiserver pod. `--expose=LoadBalancer`
+  still untried (unchanged from WS-13's ledger entry).
 - **WS-12 live-key harness validation** — codex + opencode are unit-tested
   and flag-verified against the real CLIs, but never run live (no keys in
   CI). Per-harness recipe in the #20 hand-off (secret, project config, smoke
