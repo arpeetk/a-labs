@@ -128,6 +128,45 @@ func TestCreateRunFlow(t *testing.T) {
 	}
 }
 
+// TestDeleteAndStopRun covers the WS-15 Part C endpoints.
+func TestDeleteAndStopRun(t *testing.T) {
+	h, lc, _ := newTestServerWithLauncher(t)
+	do(t, h, "POST", "/v1/projects", "u@x", `{"name":"p","repo":"x/y"}`)
+	w := do(t, h, "POST", "/v1/runs", "u@x", `{"project":"p","task":"do it"}`)
+	var run store.Run
+	if err := json.Unmarshal(w.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stop → 202 and the cancel annotation is set on the CR (record survives).
+	w = do(t, h, "POST", "/v1/runs/"+run.ID+"/stop", "u@x", "")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("stop code = %d, body=%s", w.Code, w.Body.String())
+	}
+	if cr := lc.Runs[run.Namespace+"/"+run.ID]; cr == nil || cr.Annotations["wren.dev/cancel"] != "true" {
+		t.Errorf("stop did not set cancel annotation: %+v", cr)
+	}
+	if w = do(t, h, "GET", "/v1/runs/"+run.ID, "u@x", ""); w.Code != http.StatusOK {
+		t.Errorf("run should survive stop, get code = %d", w.Code)
+	}
+
+	// Delete → 204, then the run is gone (404).
+	w = do(t, h, "DELETE", "/v1/runs/"+run.ID, "u@x", "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete code = %d, body=%s", w.Code, w.Body.String())
+	}
+	if w = do(t, h, "GET", "/v1/runs/"+run.ID, "u@x", ""); w.Code != http.StatusNotFound {
+		t.Errorf("get after delete code = %d, want 404", w.Code)
+	}
+	// Delete/stop of an unknown run → 404.
+	if w = do(t, h, "DELETE", "/v1/runs/ghost", "u@x", ""); w.Code != http.StatusNotFound {
+		t.Errorf("delete missing code = %d, want 404", w.Code)
+	}
+	if w = do(t, h, "POST", "/v1/runs/ghost/stop", "u@x", ""); w.Code != http.StatusNotFound {
+		t.Errorf("stop missing code = %d, want 404", w.Code)
+	}
+}
+
 func TestCreateRunValidation(t *testing.T) {
 	h, _ := newTestServer(t)
 	// Missing task → 400 from service validation.

@@ -141,6 +141,14 @@ func (l *lazyKube) OverrideImages(ctx context.Context, registry, tag string) err
 	return k.OverrideImages(ctx, registry, tag)
 }
 
+func (l *lazyKube) SetApiserverRunNamespace(ctx context.Context, namespace string) error {
+	k, err := l.get()
+	if err != nil {
+		return err
+	}
+	return k.SetApiserverRunNamespace(ctx, namespace)
+}
+
 func (l *lazyKube) SetServiceType(ctx context.Context, ns, name, svcType string) error {
 	k, err := l.get()
 	if err != nil {
@@ -316,6 +324,40 @@ func (k *realKube) OverrideImages(ctx context.Context, registry, tag string) err
 		return fmt.Errorf("update %s: %w", ApiserverDeployment, err)
 	}
 	return nil
+}
+
+// SetApiserverRunNamespace sets WREN_DEFAULT_RUN_NAMESPACE on the apiserver
+// container so `wren project create` with no --namespace lands runs in the
+// install's --run-namespace — the namespace where the proxy credential Secrets
+// live (WS-15 Part A). Replaces the env in place if present (the manifest ships
+// a default), appends it otherwise. Idempotent across re-installs.
+func (k *realKube) SetApiserverRunNamespace(ctx context.Context, namespace string) error {
+	deploys := k.cs.AppsV1().Deployments(SystemNamespace)
+	api, err := deploys.Get(ctx, ApiserverDeployment, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("get %s: %w", ApiserverDeployment, err)
+	}
+	ac := containerByName(api, "apiserver")
+	if ac == nil {
+		return fmt.Errorf("%s has no container %q", ApiserverDeployment, "apiserver")
+	}
+	ac.Env = setEnv(ac.Env, "WREN_DEFAULT_RUN_NAMESPACE", namespace)
+	if _, err := deploys.Update(ctx, api, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update %s: %w", ApiserverDeployment, err)
+	}
+	return nil
+}
+
+// setEnv replaces the value of a named env var if present, else appends it.
+func setEnv(env []corev1.EnvVar, name, value string) []corev1.EnvVar {
+	for i := range env {
+		if env[i].Name == name {
+			env[i].Value = value
+			env[i].ValueFrom = nil
+			return env
+		}
+	}
+	return append(env, corev1.EnvVar{Name: name, Value: value})
 }
 
 // containerByName finds a container in a Deployment's pod template.

@@ -5,6 +5,11 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// CancelAnnotation, set on an AgentRun, asks the operator to stop the run: it
+// deletes the current pod and drives the run to Canceled (terminal — NOT
+// auto-resumed, unlike a crash). `wren run stop` sets it (WS-15 Part C).
+const CancelAnnotation = "wren.dev/cancel"
+
 // HarnessKind identifies which agent harness runs the task.
 type HarnessKind string
 

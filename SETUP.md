@@ -92,12 +92,15 @@ kubectl --context <cluster-context> -n wren-system port-forward svc/wren-apiserv
 # 2. log in (identity is a trusted header for now — see the M0 note above)
 wren login --control-plane localhost:8090 --user you@corp.com
 
-# 3. register a project: repo + harness image + resources, pointed at the
-#    namespace holding the credential Secrets (install's --run-namespace)
+# 3. register a project. Harness (claude-code), model, cpu/memory/disk and the
+#    run namespace all take control-plane defaults — install already pointed the
+#    default namespace at where it stored the credential Secrets. On a registry
+#    install the project still names the pushed harness image (the built-in
+#    default wren/claude-code:dev is only present on kind).
 wren project create payments-api \
-  --repo acme/payments-api --harness claude-code \
-  --harness-image us-central1-docker.pkg.dev/my-proj/wren/claude-code:<tag> \
-  --cpu 1 --memory 2Gi --disk 5Gi --namespace wren-runs
+  --repo acme/payments-api \
+  --harness-image us-central1-docker.pkg.dev/my-proj/wren/claude-code:<tag>
+# (on a `--kind` install, even simpler: `wren project create demo --repo owner/repo`)
 
 # 4. submit a task — the agent clones, does the work, opens a PR
 wren run create --project payments-api --task "Add input validation to the signup endpoint"
@@ -125,8 +128,7 @@ image `install` already pushed — no separate build step:
 # didn't pass --tag.
 wren project create payments-api-codex \
   --repo acme/payments-api --harness codex \
-  --harness-image us-central1-docker.pkg.dev/my-proj/wren/codex:<tag> \
-  --cpu 1 --memory 2Gi --disk 5Gi --namespace wren-runs
+  --harness-image us-central1-docker.pkg.dev/my-proj/wren/codex:<tag>
 
 wren run create --project payments-api-codex --task "Add input validation to the signup endpoint"
 ```
@@ -170,3 +172,16 @@ instead of building locally.
 - **SSO/OIDC** for the apiserver front-door (replacing the `X-Wren-User`
   header) and managed **Postgres** provisioning + a **Helm chart** (WS-5).
 - **Workload Identity** for the operator/pods → GCP.
+- **Roadmap CLI surface** (deliberately not shipped yet — the CLI lists only
+  commands that work, so these are absent rather than stubbed): `wren run
+  attach` / `wren run steer` (interactive steering), `wren run resume` (manual
+  re-run of a terminally-Failed run — the operator already auto-resumes
+  *infrastructure* crashes; a manual trigger that resets the retry budget and
+  clears the leftover Failed pod is a real feature, deferred), `wren fleet`
+  (cross-run dashboard), `wren usage` (token/cost/compute reporting), `wren mcp
+  add|list|test` (per-project MCP servers), `wren project config` (editing
+  defaults/rubric/egress in place). Each is trivial to re-add once its server
+  side lands.
+- **Sandbox runtimes** `gvisor` / `kata` for `wren run create --runtime`: wired
+  end-to-end in the operator but not provisioned by any v1 cluster, so the CLI
+  rejects them today (only `runc` works) until M4.

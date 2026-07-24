@@ -58,6 +58,17 @@ type Launcher interface {
 	// so a restarted apiserver does not forget runs.
 	ListRuns(ctx context.Context) ([]wrenv1.AgentRun, error)
 	DeleteRun(ctx context.Context, ns, name string) error
+	// RequestCancel marks a run for cancellation by setting the cancel annotation
+	// on its AgentRun; the operator observes it, deletes the current pod, and
+	// drives the run to Canceled (terminal — no auto-resume). Distinct from
+	// DeleteRun, which removes the run entirely (`wren run stop`, WS-15 Part C).
+	RequestCancel(ctx context.Context, ns, name string) error
+	// SecretHasKey reports whether Secret `name` in namespace `ns` exists and
+	// carries a non-empty value for `key`. It backs the control plane's
+	// pre-flight credential check (coreapi, WS-15 Part A): a run whose namespace
+	// lacks its harness's credential Secret is rejected before a doomed pod is
+	// scheduled. A missing namespace or Secret is (false, nil), not an error.
+	SecretHasKey(ctx context.Context, ns, name, key string) (bool, error)
 	// StreamLogs opens the log stream of the run's current pod. container
 	// defaults to DefaultLogContainer when empty and is validated against the
 	// known container names. follow keeps the stream open (tail -f semantics).
@@ -137,6 +148,44 @@ func (k *K8s) DeleteRun(ctx context.Context, ns, name string) error {
 	run := &wrenv1.AgentRun{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name}}
 	err := k.c.Delete(ctx, run)
 	return client.IgnoreNotFound(err)
+}
+
+func (k *K8s) RequestCancel(ctx context.Context, ns, name string) error {
+	var run wrenv1.AgentRun
+	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &run); err != nil {
+		return err // NotFound → 404 at the transport
+	}
+	if run.Annotations[wrenv1.CancelAnnotation] == "true" {
+		return nil // already requested
+	}
+	// Patch ONLY the annotation (merge patch, no resourceVersion): the operator
+	// writes run status concurrently, so a read-modify-write Update here would
+	// lose the race with a "object has been modified" conflict.
+	base := run.DeepCopy()
+	if run.Annotations == nil {
+		run.Annotations = map[string]string{}
+	}
+	run.Annotations[wrenv1.CancelAnnotation] = "true"
+	return k.c.Patch(ctx, &run, client.MergeFrom(base))
+}
+
+func (k *K8s) SecretHasKey(ctx context.Context, ns, name, key string) (bool, error) {
+	sec, err := k.cs.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	// Secret values live in Data (base64-decoded by the client); StringData is
+	// write-only server-side but is checked too so fakes/round-trips agree.
+	if v, ok := sec.Data[key]; ok && len(v) > 0 {
+		return true, nil
+	}
+	if v, ok := sec.StringData[key]; ok && v != "" {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (k *K8s) StreamLogs(ctx context.Context, ns, runID, container string, follow bool) (io.ReadCloser, error) {

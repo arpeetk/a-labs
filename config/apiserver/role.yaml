@@ -7,7 +7,8 @@ metadata:
 rules:
 - apiGroups: ["wren.dev"]
   resources: ["agentruns"]
-  verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # patch: `wren run stop` sets the cancel annotation via a merge patch (WS-15).
+  verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
 - apiGroups: ["wren.dev"]
   resources: ["agentruns/status"]
   verbs: ["get"]

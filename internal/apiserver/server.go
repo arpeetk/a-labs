@@ -37,6 +37,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/runs", s.createRun)
 	mux.HandleFunc("GET /v1/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
+	mux.HandleFunc("DELETE /v1/runs/{id}", s.deleteRun)
+	mux.HandleFunc("POST /v1/runs/{id}/stop", s.stopRun)
 	mux.HandleFunc("GET /v1/runs/{id}/logs", s.runLogs)
 	mux.HandleFunc("POST /v1/projects", s.createProject)
 	mux.HandleFunc("GET /v1/projects", s.listProjects)
@@ -110,6 +112,25 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+// deleteRun removes a run and its cluster resources (`wren run rm`).
+func (s *Server) deleteRun(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.DeleteRun(r.Context(), r.PathValue("id")); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// stopRun cancels a run without deleting it (`wren run stop`): the operator
+// halts the pod and drives the run to Canceled (terminal, no auto-resume).
+func (s *Server) stopRun(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.StopRun(r.Context(), r.PathValue("id")); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
 }
 
 // runLogs streams a run's pod logs as plaintext (chunked, flush-per-line). It

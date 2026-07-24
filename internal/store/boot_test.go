@@ -28,7 +28,8 @@ func (f fallbackStore) GetRun(ctx context.Context, id string) (*Run, error) {
 func (f fallbackStore) ListRuns(ctx context.Context, fl RunFilter) ([]*Run, error) {
 	return f.m.ListRuns(ctx, fl)
 }
-func (f fallbackStore) UpdateRun(ctx context.Context, r *Run) error { return f.m.UpdateRun(ctx, r) }
+func (f fallbackStore) UpdateRun(ctx context.Context, r *Run) error    { return f.m.UpdateRun(ctx, r) }
+func (f fallbackStore) DeleteRun(ctx context.Context, id string) error { return f.m.DeleteRun(ctx, id) }
 
 func TestUpsertRunFallback(t *testing.T) {
 	ctx := context.Background()

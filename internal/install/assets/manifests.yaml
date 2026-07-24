@@ -348,6 +348,7 @@ rules:
   - list
   - watch
   - update
+  - patch
   - delete
 - apiGroups:
   - wren.dev
@@ -514,6 +515,9 @@ spec:
       containers:
       - args:
         - --addr=:8090
+        env:
+        - name: WREN_DEFAULT_RUN_NAMESPACE
+          value: wren-runs
         image: wren/apiserver:dev
         livenessProbe:
           httpGet:

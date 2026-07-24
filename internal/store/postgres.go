@@ -313,6 +313,17 @@ func (p *Postgres) UpdateRun(ctx context.Context, r *Run) error {
 	return nil
 }
 
+func (p *Postgres) DeleteRun(ctx context.Context, id string) error {
+	tag, err := p.pool.Exec(ctx, `DELETE FROM runs WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("delete run: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // UpsertRun inserts or replaces a run by id. It backs reconcile-on-boot: a
 // restarted apiserver re-learns in-flight runs from the AgentRun CRs, and must
 // tolerate rows that already exist (from before the restart) as well as ones it

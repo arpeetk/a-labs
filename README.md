@@ -69,8 +69,8 @@ wren run logs   r-9d4c09a -f        # tail the agent's live logs (--container to
 ```
 
 Each run is attributable, resumable, and produces a reviewable PR — not a mystery
-diff. (`attach`/`steer`, `fleet`, and `usage` are milestone-tagged in the CLI and
-land in M1–M2.)
+diff. (Interactive `attach`/`steer`, the `fleet` dashboard, and `usage` reporting
+are on the roadmap for M1–M2, not yet shipped — see [`SETUP.md`](SETUP.md#later-milestones-not-yet-built).)
 
 ## Installing Wren (admin / handover)
 

@@ -23,11 +23,3 @@ func newVersionCmd() *cobra.Command {
 		},
 	}
 }
-
-// notImplemented is the standard error for commands whose server side is pending.
-func notImplemented(group, cmd, milestone string) error {
-	if group != "" {
-		return fmt.Errorf("`wren %s %s` is not implemented yet (lands in %s)", group, cmd, milestone)
-	}
-	return fmt.Errorf("`wren %s` is not implemented yet (lands in %s)", cmd, milestone)
-}

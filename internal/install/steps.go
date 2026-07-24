@@ -243,37 +243,48 @@ Or via the LoadBalancer (team setups):
   %s -n %s get svc %s   # EXTERNAL-IP, then use <ip>:8090 below
 `, kctl, SystemNamespace, ApiserverService)
 	}
+	// The credential Secrets live in --run-namespace, which install just made the
+	// apiserver's default (WS-15 Part A), and harness/model/cpu/memory/disk all
+	// have control-plane defaults — so the minimum project is just a name + repo.
+	// On a registry install the default harness image (wren/claude-code:dev) is
+	// not on the cluster, so the project must still point at the pushed image.
 	if ref, ok := s.harnessImageHint(); ok {
-		fmt.Fprintf(s.in.Out, `
+		if s.opts.KindCluster != "" {
+			fmt.Fprintf(s.in.Out, `
 Then, as an engineer:
   wren login --control-plane localhost:8090 --user you@corp.com
-  wren project create demo --repo owner/repo --harness claude-code \
-      --harness-image %s --cpu 1 --memory 2Gi --disk 5Gi --namespace %s
+  wren project create demo --repo owner/repo
   wren run create --project demo --task "Add a health endpoint"
-
-NOTE: the control plane authenticates callers with a trusted X-Wren-User header
-only (M0 stand-in; SSO/OIDC is a later milestone). Keep it on port-forward or a
-trusted network — do NOT expose it publicly.
-`, ref, s.opts.RunNamespace)
+%s`, authNote)
+		} else {
+			fmt.Fprintf(s.in.Out, `
+Then, as an engineer:
+  wren login --control-plane localhost:8090 --user you@corp.com
+  wren project create demo --repo owner/repo --harness-image %s
+  wren run create --project demo --task "Add a health endpoint"
+%s`, ref, authNote)
+		}
 		return
 	}
 	fmt.Fprintf(s.in.Out, `
 Then, as an engineer:
   wren login --control-plane localhost:8090 --user you@corp.com
-  wren project create demo --harness mock \
-      --cpu 1 --memory 2Gi --disk 5Gi --namespace %s
+  wren project create demo --harness mock
   wren run create --project demo --task "Add a health endpoint"
 
 NOTE: this install built no claude-code harness image (--harness-images=%s).
 mock is the only harness available until you re-run install with it included,
 e.g. `+"`wren install ... --harness-images=claude-code`"+` — or point a project at a
 harness image you built/pushed yourself.
+%s`, s.opts.HarnessImages, authNote)
+}
 
+// authNote is the shared M0 auth caveat printed at the end of the hand-off.
+const authNote = `
 NOTE: the control plane authenticates callers with a trusted X-Wren-User header
 only (M0 stand-in; SSO/OIDC is a later milestone). Keep it on port-forward or a
 trusted network — do NOT expose it publicly.
-`, s.opts.RunNamespace, s.opts.HarnessImages)
-}
+`
 
 // harnessImageHint resolves the --harness-image example for the hand-off: the
 // image this install actually built for the project's default harness

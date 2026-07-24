@@ -39,7 +39,7 @@ func TestVersionCommand(t *testing.T) {
 
 func TestRootHasExpectedSubcommands(t *testing.T) {
 	root := NewRootCommand()
-	want := []string{"run", "project", "mcp", "fleet", "usage", "login", "version"}
+	want := []string{"run", "project", "login", "version", "install", "uninstall"}
 	have := map[string]bool{}
 	for _, c := range root.Commands() {
 		have[c.Name()] = true
@@ -114,14 +114,16 @@ func TestLoginRequiresServer(t *testing.T) {
 	}
 }
 
-func TestPlaceholderReportsMilestone(t *testing.T) {
-	_, err := run(t, "fleet")
-	if err == nil || !strings.Contains(err.Error(), "M1") {
-		t.Fatalf("expected fleet placeholder M1 error, got %v", err)
-	}
-	_, err = run(t, "mcp", "add")
-	if err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("expected mcp add placeholder, got %v", err)
+// TestNoNotImplementedCommands guards WS-15 Part C: the CLI ships no command
+// that exists only to error with "not implemented yet". Removed roadmap
+// commands (fleet, mcp, usage) are simply absent, so cobra reports them as
+// unknown rather than running a placeholder.
+func TestNoNotImplementedCommands(t *testing.T) {
+	for _, name := range []string{"fleet", "usage"} {
+		_, err := run(t, name)
+		if err == nil || !strings.Contains(err.Error(), "unknown command") {
+			t.Errorf("`wren %s` should be an unknown command, got %v", name, err)
+		}
 	}
 }
 
@@ -205,6 +207,74 @@ func TestRunCommandsHitControlPlane(t *testing.T) {
 	}
 	if out, err := execIn(t, dir, "run", "get", "r-xyz"); err != nil || !strings.Contains(out, "Running") {
 		t.Fatalf("run get = %q, %v", out, err)
+	}
+}
+
+// TestRunStopAndRm covers the WS-15 Part C commands hitting the control plane.
+func TestRunStopAndRm(t *testing.T) {
+	var stopHit, delHit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/r-1/stop":
+			stopHit = true
+			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/runs/r-1":
+			delHit = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if _, err := execIn(t, dir, "login", "--control-plane", srv.URL, "--user", "me"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := execIn(t, dir, "run", "stop", "r-1"); err != nil || !strings.Contains(out, "stopping") {
+		t.Fatalf("run stop = %q, %v", out, err)
+	}
+	if !stopHit {
+		t.Error("run stop did not POST /stop")
+	}
+	if out, err := execIn(t, dir, "run", "rm", "r-1"); err != nil || !strings.Contains(out, "deleted") {
+		t.Fatalf("run rm = %q, %v", out, err)
+	}
+	if !delHit {
+		t.Error("run rm did not DELETE the run")
+	}
+}
+
+// TestRunCreateRejectsNonRuncRuntime is WS-15 Part C: --runtime gvisor|kata is
+// rejected client-side with an M4 pointer instead of a confusing pod-admission
+// failure downstream.
+func TestRunCreateRejectsNonRuncRuntime(t *testing.T) {
+	dir := t.TempDir()
+	// No server needed: validation fails before any request.
+	_, err := execIn(t, dir, "run", "create", "--project", "p", "--task", "t", "--runtime", "gvisor")
+	if err == nil || !strings.Contains(err.Error(), "M4") {
+		t.Fatalf("expected M4 rejection for --runtime gvisor, got %v", err)
+	}
+}
+
+// TestProjectGetHitsControlPlane covers the real `wren project get`.
+func TestProjectGetHitsControlPlane(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/projects/payments" {
+			_, _ = w.Write([]byte(`{"name":"payments","repo":"acme/payments"}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if _, err := execIn(t, dir, "login", "--control-plane", srv.URL, "--user", "me"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := execIn(t, dir, "project", "get", "payments")
+	if err != nil || !strings.Contains(out, "acme/payments") {
+		t.Fatalf("project get = %q, %v", out, err)
 	}
 }
 

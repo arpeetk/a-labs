@@ -109,6 +109,17 @@ func testRunCRUDAndFilter(t *testing.T, s Store) {
 	if _, err := s.GetRun(ctx, "ghost"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get missing = %v, want ErrNotFound", err)
 	}
+
+	// Delete removes the row; deleting a missing run is ErrNotFound.
+	if err := s.DeleteRun(ctx, "r-2"); err != nil {
+		t.Fatalf("delete run: %v", err)
+	}
+	if _, err := s.GetRun(ctx, "r-2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("get after delete = %v, want ErrNotFound", err)
+	}
+	if err := s.DeleteRun(ctx, "r-2"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete missing = %v, want ErrNotFound", err)
+	}
 }
 
 // testUpsertRun exercises the reconcile-on-boot seam through the free-function
