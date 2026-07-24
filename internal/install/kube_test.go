@@ -3,6 +3,7 @@ package install
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	fakediscovery "k8s.io/client-go/discovery/fake"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 // These cover the typed-client half of realKube through the client-go fake.
@@ -123,6 +125,141 @@ func TestOverrideImages(t *testing.T) {
 	}
 	if count != 1 {
 		t.Errorf("after re-override, --runtime-image occurrences = %d", count)
+	}
+}
+
+// conflictOnceReactor returns a k8stesting.ReactionFunc that answers the
+// first "update" on the named Deployment with a Conflict error (as the real
+// API server does when the Deployment controller's own write lands between a
+// caller's Get and Update — reproduced live against GKE, see commit
+// d9ede69) and lets every subsequent attempt (and every other object) fall
+// through to the fake clientset's default handling. attempts counts every
+// call seen for the named deployment, so callers can assert a retry actually
+// happened rather than just that the end state converged.
+func conflictOnceReactor(deploymentName string, attempts *int) k8stesting.ReactionFunc {
+	return func(action k8stesting.Action) (bool, runtime.Object, error) {
+		ua, ok := action.(k8stesting.UpdateAction)
+		if !ok {
+			return false, nil, nil
+		}
+		d, ok := ua.GetObject().(*appsv1.Deployment)
+		if !ok || d.Name != deploymentName {
+			return false, nil, nil
+		}
+		*attempts++
+		if *attempts == 1 {
+			return true, nil, apierrors.NewConflict(
+				schema.GroupResource{Group: "apps", Resource: "deployments"},
+				d.Name, errors.New("stale resourceVersion: the Deployment controller wrote first"))
+		}
+		return false, nil, nil // let the fake apply the update normally
+	}
+}
+
+// TestOverrideImagesRecoversFromConflict proves the retry.RetryOnConflict
+// wrapping added in commit d9ede69 actually recovers from a genuine 409, not
+// just that the happy path (TestOverrideImages) still works. Without the
+// retry, OverrideImages would bubble the first Conflict straight up and
+// `wren install` would fail nondeterministically under the exact contention
+// observed live on GKE.
+func TestOverrideImagesRecoversFromConflict(t *testing.T) {
+	op := deployment(SystemNamespace, OperatorDeployment, "operator", "wren/operator:dev",
+		"--leader-elect", "--runtime-image=wren/runtime:dev")
+	api := deployment(SystemNamespace, ApiserverDeployment, "apiserver", "wren/apiserver:dev")
+	cs := fake.NewSimpleClientset(op, api)
+	var opAttempts int
+	cs.PrependReactor("update", "deployments", conflictOnceReactor(OperatorDeployment, &opAttempts))
+	k := &realKube{cs: cs}
+	ctx := context.Background()
+	reg := "us-central1-docker.pkg.dev/p/wren"
+
+	if err := k.OverrideImages(ctx, reg, "abc1234"); err != nil {
+		t.Fatalf("OverrideImages did not recover from a single conflict: %v", err)
+	}
+	if opAttempts < 2 {
+		t.Errorf("operator deployment update attempts = %d, want >=2 (retry after conflict)", opAttempts)
+	}
+	got, _ := k.cs.AppsV1().Deployments(SystemNamespace).Get(ctx, OperatorDeployment, metav1.GetOptions{})
+	oc := containerByName(got, "operator")
+	if oc.Image != reg+"/operator:abc1234" {
+		t.Errorf("operator image = %q, want converged despite the conflict", oc.Image)
+	}
+}
+
+// TestSetApiserverRunNamespace covers the happy path — realKube's
+// SetApiserverRunNamespace had zero test coverage before this change (only
+// its Fake counterpart, install/fake.go, was exercised).
+func TestSetApiserverRunNamespace(t *testing.T) {
+	api := deployment(SystemNamespace, ApiserverDeployment, "apiserver", "wren/apiserver:dev")
+	k := fakeKube(api)
+	ctx := context.Background()
+
+	if err := k.SetApiserverRunNamespace(ctx, "wren-runs"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := k.cs.AppsV1().Deployments(SystemNamespace).Get(ctx, ApiserverDeployment, metav1.GetOptions{})
+	ac := containerByName(got, "apiserver")
+	found := false
+	for _, e := range ac.Env {
+		if e.Name == "WREN_DEFAULT_RUN_NAMESPACE" {
+			found = true
+			if e.Value != "wren-runs" {
+				t.Errorf("WREN_DEFAULT_RUN_NAMESPACE = %q, want wren-runs", e.Value)
+			}
+		}
+	}
+	if !found {
+		t.Error("WREN_DEFAULT_RUN_NAMESPACE not set")
+	}
+
+	// Idempotent: replaces in place rather than duplicating the env var.
+	if err := k.SetApiserverRunNamespace(ctx, "wren-runs-2"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = k.cs.AppsV1().Deployments(SystemNamespace).Get(ctx, ApiserverDeployment, metav1.GetOptions{})
+	ac = containerByName(got, "apiserver")
+	count := 0
+	for _, e := range ac.Env {
+		if e.Name == "WREN_DEFAULT_RUN_NAMESPACE" {
+			count++
+			if e.Value != "wren-runs-2" {
+				t.Errorf("WREN_DEFAULT_RUN_NAMESPACE = %q, want wren-runs-2", e.Value)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("WREN_DEFAULT_RUN_NAMESPACE occurrences = %d, want 1", count)
+	}
+}
+
+// TestSetApiserverRunNamespaceRecoversFromConflict is SetApiserverRunNamespace's
+// counterpart to TestOverrideImagesRecoversFromConflict: it lands right after
+// OverrideImages touches the same Deployment (per the doc comment on
+// SetApiserverRunNamespace), so it needs the same retry proof.
+func TestSetApiserverRunNamespaceRecoversFromConflict(t *testing.T) {
+	api := deployment(SystemNamespace, ApiserverDeployment, "apiserver", "wren/apiserver:dev")
+	cs := fake.NewSimpleClientset(api)
+	var attempts int
+	cs.PrependReactor("update", "deployments", conflictOnceReactor(ApiserverDeployment, &attempts))
+	k := &realKube{cs: cs}
+	ctx := context.Background()
+
+	if err := k.SetApiserverRunNamespace(ctx, "wren-runs"); err != nil {
+		t.Fatalf("SetApiserverRunNamespace did not recover from a single conflict: %v", err)
+	}
+	if attempts < 2 {
+		t.Errorf("apiserver deployment update attempts = %d, want >=2 (retry after conflict)", attempts)
+	}
+	got, _ := k.cs.AppsV1().Deployments(SystemNamespace).Get(ctx, ApiserverDeployment, metav1.GetOptions{})
+	ac := containerByName(got, "apiserver")
+	found := false
+	for _, e := range ac.Env {
+		if e.Name == "WREN_DEFAULT_RUN_NAMESPACE" && e.Value == "wren-runs" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("WREN_DEFAULT_RUN_NAMESPACE not converged despite the conflict")
 	}
 }
 
