@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
@@ -216,4 +217,177 @@ func TestFakeStreamLogs(t *testing.T) {
 	if _, err := f.StreamLogs(ctx, "ns", "r-1", "harness", false); err == nil {
 		t.Error("LogsErr not surfaced")
 	}
+}
+
+// TestK8sRequestCancel exercises the real K8s.RequestCancel against a fake
+// controller-runtime client: it must set CancelAnnotation, be idempotent once
+// already set, and surface NotFound for a missing run untouched (the apiserver
+// maps that to 404).
+func TestK8sRequestCancel(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := sampleRun("ns", "r-1")
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(run).Build()
+	k := &K8s{c: c}
+
+	if err := k.RequestCancel(ctx, "ns", "r-1"); err != nil {
+		t.Fatalf("RequestCancel: %v", err)
+	}
+	got, err := k.GetRun(ctx, "ns", "r-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[wrenv1.CancelAnnotation] != "true" {
+		t.Errorf("annotations = %v, want %s=true", got.Annotations, wrenv1.CancelAnnotation)
+	}
+
+	// Idempotent: a second call on an already-canceled run is a no-op that
+	// still returns nil.
+	if err := k.RequestCancel(ctx, "ns", "r-1"); err != nil {
+		t.Errorf("second RequestCancel = %v, want nil (already requested)", err)
+	}
+
+	// Missing run surfaces NotFound so the apiserver can map it to 404.
+	if err := k.RequestCancel(ctx, "ns", "missing"); !apierrors.IsNotFound(err) {
+		t.Errorf("RequestCancel on missing run = %v, want NotFound", err)
+	}
+}
+
+// TestK8sRequestCancelSurvivesConcurrentStatusWrite proves the reason
+// RequestCancel uses a merge Patch (client.MergeFrom) rather than a
+// read-modify-write Update: the operator writes run status concurrently, and
+// a naive Update built from a stale read would either clobber that write or
+// fail with a resourceVersion conflict — the exact race class fixed in
+// internal/install/kube.go (commit d9ede69) via retry.RetryOnConflict for its
+// Deployment updates. Here the run's status changes (simulating the operator)
+// after RequestCancel's internal Get would have read it, and RequestCancel
+// must still succeed and must not stomp the concurrent status write.
+func TestK8sRequestCancelSurvivesConcurrentStatusWrite(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := sampleRun("ns", "r-1")
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(run).WithStatusSubresource(&wrenv1.AgentRun{}).Build()
+	k := &K8s{c: c}
+
+	// Simulate the operator concurrently advancing status — this bumps the
+	// object's resourceVersion, exactly like a live cluster under contention.
+	live, err := k.GetRun(ctx, "ns", "r-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Status.Phase = wrenv1.PhaseRunning
+	if err := c.Status().Update(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := k.RequestCancel(ctx, "ns", "r-1"); err != nil {
+		t.Fatalf("RequestCancel after concurrent status write: %v", err)
+	}
+	got, err := k.GetRun(ctx, "ns", "r-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[wrenv1.CancelAnnotation] != "true" {
+		t.Errorf("annotation not applied: %v", got.Annotations)
+	}
+	if got.Status.Phase != wrenv1.PhaseRunning {
+		t.Errorf("concurrent status write was clobbered: phase = %q", got.Status.Phase)
+	}
+}
+
+// TestK8sSecretHasKey covers all three branches SecretHasKey's contract
+// promises callers (coreapi.checkCredentials treats it as best-effort, never
+// an error, for a missing Secret or namespace): key present (via Data, the
+// path a real round-tripped Secret takes), key present via StringData
+// (write-only server-side, but checked so fakes/round-trips agree per the
+// doc comment), key absent from an existing Secret, and the Secret entirely
+// absent.
+func TestK8sSecretHasKey(t *testing.T) {
+	ctx := context.Background()
+	withData := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds", Namespace: "ns"},
+		Data:       map[string][]byte{"token": []byte("abc")},
+	}
+	withStringData := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds-sd", Namespace: "ns"},
+		StringData: map[string]string{"token": "abc"},
+	}
+	missingKey := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "creds-nokey", Namespace: "ns"},
+		Data:       map[string][]byte{"other": []byte("x")},
+	}
+	cs := k8sfake.NewSimpleClientset(withData, withStringData, missingKey)
+	k := &K8s{cs: cs}
+
+	if ok, err := k.SecretHasKey(ctx, "ns", "creds", "token"); err != nil || !ok {
+		t.Errorf("Data-backed key: ok=%v err=%v, want true,nil", ok, err)
+	}
+	if ok, err := k.SecretHasKey(ctx, "ns", "creds-sd", "token"); err != nil || !ok {
+		t.Errorf("StringData-backed key: ok=%v err=%v, want true,nil", ok, err)
+	}
+	if ok, err := k.SecretHasKey(ctx, "ns", "creds-nokey", "token"); err != nil || ok {
+		t.Errorf("key absent from existing Secret: ok=%v err=%v, want false,nil", ok, err)
+	}
+	if ok, err := k.SecretHasKey(ctx, "ns", "does-not-exist", "token"); err != nil || ok {
+		t.Errorf("Secret entirely absent: ok=%v err=%v, want false,nil", ok, err)
+	}
+}
+
+// TestK8sListRuns covers the real ListRuns against a fake controller-runtime
+// client seeded with AgentRuns across multiple namespaces: it must return
+// every run cluster-wide (the apiserver's reconcile-on-boot needs to re-learn
+// in-flight runs regardless of which namespace they landed in).
+func TestK8sListRuns(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1 := sampleRun("ns-a", "r-1")
+	r2 := sampleRun("ns-a", "r-2")
+	r3 := sampleRun("ns-b", "r-3")
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(r1, r2, r3).Build()
+	k := &K8s{c: c}
+
+	got, err := k.ListRuns(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("ListRuns returned %d runs, want 3: %+v", len(got), got)
+	}
+	names := map[string]bool{}
+	for _, r := range got {
+		names[r.Namespace+"/"+r.Name] = true
+	}
+	for _, want := range []string{"ns-a/r-1", "ns-a/r-2", "ns-b/r-3"} {
+		if !names[want] {
+			t.Errorf("ListRuns missing %q, got %v", want, names)
+		}
+	}
+}
+
+// TestNewK8s confirms the constructor wires both the controller-runtime client
+// and the typed clientset from a REST config without panicking or dialing the
+// cluster (client construction is lazy — no network call happens until a
+// request is issued).
+func TestNewK8s(t *testing.T) {
+	cfg := &rest.Config{Host: "https://127.0.0.1:1"}
+	k, err := NewK8s(cfg)
+	if err != nil {
+		t.Fatalf("NewK8s: %v", err)
+	}
+	if k.c == nil {
+		t.Error("controller-runtime client not wired")
+	}
+	if k.cs == nil {
+		t.Error("typed clientset not wired")
+	}
+	var _ Launcher = k
 }
