@@ -153,16 +153,20 @@ func (k *K8s) DeleteRun(ctx context.Context, ns, name string) error {
 func (k *K8s) RequestCancel(ctx context.Context, ns, name string) error {
 	var run wrenv1.AgentRun
 	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &run); err != nil {
-		return err
+		return err // NotFound → 404 at the transport
 	}
 	if run.Annotations[wrenv1.CancelAnnotation] == "true" {
 		return nil // already requested
 	}
+	// Patch ONLY the annotation (merge patch, no resourceVersion): the operator
+	// writes run status concurrently, so a read-modify-write Update here would
+	// lose the race with a "object has been modified" conflict.
+	base := run.DeepCopy()
 	if run.Annotations == nil {
 		run.Annotations = map[string]string{}
 	}
 	run.Annotations[wrenv1.CancelAnnotation] = "true"
-	return k.c.Update(ctx, &run)
+	return k.c.Patch(ctx, &run, client.MergeFrom(base))
 }
 
 func (k *K8s) SecretHasKey(ctx context.Context, ns, name, key string) (bool, error) {

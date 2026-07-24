@@ -348,6 +348,7 @@ rules:
   - list
   - watch
   - update
+  - patch
   - delete
 - apiGroups:
   - wren.dev
