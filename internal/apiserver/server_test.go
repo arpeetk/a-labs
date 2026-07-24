@@ -2,11 +2,15 @@ package apiserver
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
 	"github.com/summiteight/wren/internal/coreapi"
@@ -307,6 +311,83 @@ func TestRunLogsUnknownRun(t *testing.T) {
 	w := do(t, h, "GET", "/v1/runs/ghost/logs", "u@x", "")
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("unknown-run logs code = %d, want 404", w.Code)
+	}
+}
+
+// slowStreamLauncher wraps a Fake and returns a deliberately slow-dribbling
+// log reader from StreamLogs, so tests can simulate a live `-f` tail that
+// takes longer than a server's WriteTimeout to fully write out.
+type slowStreamLauncher struct {
+	*launcher.Fake
+	chunks     int
+	chunkDelay time.Duration
+}
+
+func (s *slowStreamLauncher) StreamLogs(_ context.Context, _, _, _ string, _ bool) (io.ReadCloser, error) {
+	return &slowReader{remaining: s.chunks, delay: s.chunkDelay}, nil
+}
+
+type slowReader struct {
+	remaining int
+	delay     time.Duration
+}
+
+func (r *slowReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	time.Sleep(r.delay)
+	r.remaining--
+	line := fmt.Sprintf("chunk-%d\n", r.remaining)
+	return copy(p, line), nil
+}
+
+func (r *slowReader) Close() error { return nil }
+
+// TestRunLogsFollowSurvivesServerWriteTimeout proves the WS-16 A.2 fix: the
+// apiserver's blanket http.Server.WriteTimeout (added for slowloris
+// hardening; cmd/wren-apiserver/main.go) must not truncate the `?follow=true`
+// log-tail endpoint. It runs the real handler behind a REAL http.Server
+// (httptest.NewUnstartedServer, not a ResponseRecorder — WriteTimeout is
+// unenforceable against a fake ResponseWriter) with a WriteTimeout much
+// shorter than the simulated tail takes to finish, and asserts the full
+// stream still arrives intact.
+func TestRunLogsFollowSurvivesServerWriteTimeout(t *testing.T) {
+	st := store.NewMemory()
+	fake := launcher.NewFake()
+	const chunks = 6
+	lc := &slowStreamLauncher{Fake: fake, chunks: chunks, chunkDelay: 80 * time.Millisecond}
+	svc := coreapi.New(st, lc, coreapi.DefaultDefaults())
+	h := New(svc, lc).Handler()
+
+	srv := httptest.NewUnstartedServer(h)
+	// Total simulated stream time is ~6*80ms=480ms; a 150ms WriteTimeout is
+	// well short of that, so this only passes if runLogs actually disables
+	// its own write deadline rather than inheriting the server's.
+	srv.Config.WriteTimeout = 150 * time.Millisecond
+	srv.Start()
+	defer srv.Close()
+
+	id, ns := createRunViaAPI(t, h)
+	lc.SetStatus(ns, id, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning})
+
+	resp, err := http.Get(srv.URL + "/v1/runs/" + id + "/logs?follow=true")
+	if err != nil {
+		t.Fatalf("GET logs?follow=true: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("logs?follow=true code = %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("stream was cut short by the server's WriteTimeout: %v (got %q)", err, body)
+	}
+	for i := 0; i < chunks; i++ {
+		want := fmt.Sprintf("chunk-%d\n", i)
+		if !strings.Contains(string(body), want) {
+			t.Errorf("stream missing %q — truncated by WriteTimeout? full body: %q", want, body)
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -84,6 +85,16 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	// Ensure the durable prerequisites exist before the pod.
 	if err := r.ensurePVC(ctx, &run); err != nil {
+		if errors.Is(err, errWorkspaceLost) {
+			// A permanent, non-retryable condition (like PodAdmissionForbidden
+			// below): recreating an empty PVC and resuming into it wouldn't
+			// recover anything, it would just hide that the work is gone. Fail
+			// deterministically rather than requeue-and-hang (code standards
+			// rule #2) or silently resume into an empty workspace (WS-8
+			// truthing pass; WS-16 A.4).
+			return r.setPhase(ctx, &run, wrenv1.PhaseFailed, "WorkspaceLost",
+				"workspace PVC is gone after the run had already progressed past Pending — the disk (and any in-progress work) was destroyed; this run cannot resume and will not be retried")
+		}
 		return ctrl.Result{}, fmt.Errorf("ensure workspace pvc: %w", err)
 	}
 	if err := r.ensureRunSpec(ctx, &run); err != nil {
@@ -151,8 +162,31 @@ func findCondition(run *wrenv1.AgentRun, condType string) *metav1.Condition {
 	return nil
 }
 
-// ensurePVC creates the workspace PVC if it does not already exist. The PVC name
-// is stable across restarts so a surviving disk is reattached on resume.
+// errWorkspaceLost is ensurePVC's sentinel for a disk-destroying loss: the
+// workspace PVC is NotFound on a run that has already progressed past
+// Pending, i.e. this is not the PVC's first-ever creation. Mapped to
+// PhaseFailed at the Reconcile call site (code standards rule #4: sentinels,
+// mapped deliberately at the boundary).
+var errWorkspaceLost = errors.New("workspace PVC lost after provisioning")
+
+// ensurePVC creates the workspace PVC if it does not already exist. The PVC
+// name is stable across restarts so a surviving disk is reattached on resume
+// (see mode() / RestartCount).
+//
+// A NotFound PVC is ambiguous by itself — it's expected exactly once, on this
+// run's first-ever reconcile past admission, and a data-loss signal every
+// time after. Phase disambiguates them for free, no new field needed: the
+// very first ensurePVC call for a run always happens while Status.Phase is
+// still Pending (Reconcile only reaches ensurePVC once Phase != "", and
+// ensurePVC runs — and the PVC gets created — before ensurePod/
+// reconcilePodState ever advance the phase past Pending within that same
+// call). So a NotFound PVC on any LATER reconcile (Phase already
+// Provisioning/Running/Interrupted/...) means a PVC that definitely existed
+// is now gone — a real disk-destroying loss (node/zone loss, manual
+// deletion), not first-time provisioning. Silently creating a fresh, empty
+// PVC in that case would resume the harness into a workspace with no signal
+// that everything on disk was lost (WS-8 truthing pass; WS-16 A.4) — so this
+// case returns errWorkspaceLost instead of recreating.
 func (r *AgentRunReconciler) ensurePVC(ctx context.Context, run *wrenv1.AgentRun) error {
 	var existing corev1.PersistentVolumeClaim
 	err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: pvcName(run)}, &existing)
@@ -161,6 +195,9 @@ func (r *AgentRunReconciler) ensurePVC(ctx context.Context, run *wrenv1.AgentRun
 	}
 	if !apierrors.IsNotFound(err) {
 		return err
+	}
+	if run.Status.Phase != wrenv1.PhasePending {
+		return errWorkspaceLost
 	}
 	pvc := buildWorkspacePVC(run)
 	if err := controllerutil.SetControllerReference(run, pvc, r.Scheme); err != nil {

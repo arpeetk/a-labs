@@ -160,7 +160,7 @@ func newRunLogsCmd() *cobra.Command {
 func newRunGetCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "get <run-id>",
-		Short: "Show a run's state, PR, and usage",
+		Short: "Show a run's state and PR",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := clientFromFlags(cmd)

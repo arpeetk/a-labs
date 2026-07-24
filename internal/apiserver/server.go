@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
 	"github.com/summiteight/wren/internal/coreapi"
@@ -164,6 +165,14 @@ func (s *Server) runLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer stream.Close()
+
+	// The server sets a blanket WriteTimeout (cmd/wren-apiserver/main.go) to
+	// harden the rest of the API against slow-client resource exhaustion, but
+	// that same timeout would truncate a `?follow=true` tail mid-stream — an
+	// agent run can legitimately run far longer than any fixed write budget.
+	// Disable the write deadline for this handler specifically (zero value =
+	// no deadline) rather than weakening the server-wide setting.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

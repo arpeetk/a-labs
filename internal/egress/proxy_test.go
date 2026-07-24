@@ -360,6 +360,97 @@ func TestConnectPortRestrictedTo443(t *testing.T) {
 	}
 }
 
+// TestConnectResolvesOnceAgainstRebinding proves the WS-16 A.3 fix: the proxy
+// resolves an allowlisted CONNECT hostname exactly ONCE and dials that
+// resolved IP literal — it never re-resolves at connect time. That single-
+// resolution property is what defeats DNS rebinding: an attacker who controls
+// (or has poisoned) DNS for an allowlisted name can make a SECOND lookup
+// return a different, non-validated address, but the proxy never performs
+// that second lookup.
+//
+// The test's fake resolver plays the "rebinding DNS server": on the first
+// call (this request's one-and-only resolution) it returns the address of a
+// real listener; on any further call it would return an unroutable
+// documentation-only address (RFC 5737 TEST-NET-3) simulating the attacker's
+// rebound answer. If handleConnect regressed to dialing r.Host directly (the
+// pre-fix behavior), the fake resolver would never be consulted at all — the
+// bogus hostname used here doesn't exist in real DNS, so the dial would fail
+// outright and this test would fail, proving the assertion has teeth.
+func TestConnectResolvesOnceAgainstRebinding(t *testing.T) {
+	// The "safe" listener stands in for the address validated by the one
+	// legitimate resolution.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(c, c)
+	}()
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	prevPort := connectPort
+	connectPort = port
+	defer func() { connectPort = prevPort }()
+
+	const host = "wren-dns-rebind-test.invalid" // RFC 2606: guaranteed never real-DNS-resolvable
+	var calls int
+	prevResolve := resolveHost
+	resolveHost = func(h string) (net.IP, error) {
+		calls++
+		if h != host {
+			t.Errorf("resolveHost called with unexpected host %q", h)
+		}
+		if calls == 1 {
+			return net.ParseIP("127.0.0.1"), nil // the one validated resolution
+		}
+		// A second call would only happen if the proxy re-resolved at
+		// connect time — the rebinding window this fix closes. Answer with
+		// an address nothing is listening on so a regression fails loudly
+		// (dial error) rather than silently succeeding against it.
+		return net.ParseIP("203.0.113.1"), nil
+	}
+	defer func() { resolveHost = prevResolve }()
+
+	p, _ := New(Config{Allowlist: []string{host}})
+	front := httptest.NewServer(p)
+	defer front.Close()
+
+	target := net.JoinHostPort(host, port)
+	conn, err := net.Dial("tcp", strings.TrimPrefix(front.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT to allowlisted (rebinding-simulated) host = %d, want 200", resp.StatusCode)
+	}
+
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(br, buf); err != nil {
+		t.Fatalf("tunnel did not reach the validated (first-resolution) address: %v", err)
+	}
+	if string(buf) != "ping" {
+		t.Errorf("tunnel echo = %q, want ping", buf)
+	}
+
+	if calls != 1 {
+		t.Errorf("resolveHost called %d times, want exactly 1 — a second call means the proxy re-resolved at connect time, reopening the DNS-rebinding TOCTOU window", calls)
+	}
+}
+
 func TestForwardStripsInboundCredsAndHopByHop(t *testing.T) {
 	var gotAuth, gotProxyAuth, gotConnClose string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
