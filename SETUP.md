@@ -179,6 +179,77 @@ install` already wrote — no extra credential needed). Codex/opencode are
 construction, event parsing, credential wiring) versus what still needs a
 live-key smoke run.
 
+## Experimental: GCS checkpoint mount (WS-18)
+
+Off by default and independent of the core task→PR loop. This mounts a run's
+checkpoint bucket into the **checkpointer container only** (never the untrusted
+harness) via GKE's Cloud Storage FUSE CSI driver, and exposes it to Go as a
+`blob.Store` of plain files. It proves the mount + store plumbing; the real
+periodic checkpointer (interval snapshots + restore-on-resume) is still
+deferred (spec §5.5), so today the only thing that uses the mount is a startup
+self-check that writes/reads/lists one object and logs the result.
+
+Prerequisites on the cluster and project (all one-time):
+
+```sh
+PROJECT=my-proj ; ZONE=us-central1-a ; CLUSTER=my-cluster
+BUCKET=my-checkpoint-bucket ; NS=<run-namespace>
+GSA=wren-ckpt-gsa@$PROJECT.iam.gserviceaccount.com
+
+# 1. Enable the Cloud Storage FUSE CSI driver addon (not enabled by
+#    --create-cluster; this feature is opt-in). The cluster must also have
+#    Workload Identity enabled (--workload-pool=$PROJECT.svc.id.goog — set at
+#    creation, or `clusters update` to add it).
+gcloud container clusters update $CLUSTER --zone $ZONE --project $PROJECT \
+  --update-addons GcsFuseCsiDriver=ENABLED
+
+# 2. Bucket + a dedicated GCP SA with objectAdmin ON THE BUCKET ONLY (least
+#    privilege — a bucket IAM binding, never a project-wide role).
+gcloud storage buckets create gs://$BUCKET --project $PROJECT --location <region> \
+  --uniform-bucket-level-access
+gcloud iam service-accounts create wren-ckpt-gsa --project $PROJECT
+gcloud storage buckets add-iam-policy-binding gs://$BUCKET \
+  --member="serviceAccount:$GSA" --role="roles/storage.objectAdmin"
+
+# 3. A dedicated Kubernetes SA (default name `wren-checkpointer`) used ONLY by
+#    pods that enable the mount, annotated with the GSA, plus the Workload
+#    Identity binding that lets it impersonate the GSA.
+kubectl create namespace $NS 2>/dev/null || true
+kubectl create serviceaccount wren-checkpointer -n $NS
+kubectl annotate serviceaccount wren-checkpointer -n $NS \
+  iam.gke.io/gcp-service-account=$GSA
+gcloud iam service-accounts add-iam-policy-binding $GSA --project $PROJECT \
+  --role roles/iam.workloadIdentityUser \
+  --member "serviceAccount:$PROJECT.svc.id.goog[$NS/wren-checkpointer]"
+```
+
+Then enable the operator flag and point a project at the bucket:
+
+```sh
+# operator: --checkpoint-gcs-mount (default off); --checkpoint-ksa overrides the
+# KSA name (default wren-checkpointer). The mount is added to a run's pod only
+# when this flag is on AND the run's project sets a checkpoint bucket.
+wren-operator --checkpoint-gcs-mount ...
+
+# give the project a checkpoint bucket, then run:
+wren project create demo --repo owner/repo --checkpoint-bucket gs://$BUCKET
+wren run create --project demo --task "..."
+```
+
+The checkpointer container's logs will show
+`checkpointer: mount self-check PASSED — wrote+read+listed
+_wren-mount-check/<run-id>.txt ...`, and the object is visible in the bucket:
+
+```sh
+gcloud storage cat gs://$BUCKET/_wren-mount-check/<run-id>.txt
+```
+
+**Trust boundary:** the CSI volume and the bucket-scoped credential live on the
+checkpointer sidecar only. The harness — which runs untrusted model-generated
+code — never gets the volume mount (pinned in the pod builder and asserted by
+`TestBuildAgentPod_GCSMount_HarnessNeverMounts`), the same trust-tier split as
+the egress-proxy/runner uid boundary.
+
 ## Uninstall
 
 ```sh
@@ -222,7 +293,10 @@ instead of building locally.
   `internal/github`; wiring is WS-2).
 - **SSO/OIDC** for the apiserver front-door (replacing the `X-Wren-User`
   header) and managed **Postgres** provisioning + a **Helm chart** (WS-5).
-- **Workload Identity** for the operator/pods → GCP.
+- **Workload Identity** for the operator/pods → GCP. First use landed in WS-18:
+  the experimental GCS checkpoint mount binds a dedicated checkpointer KSA to a
+  GCP SA (see "Experimental: GCS checkpoint mount" above); the operator/apiserver
+  and the general pod→GCP path are still ambient-credential / node-scoped.
 - **Roadmap CLI surface** (deliberately not shipped yet — the CLI lists only
   commands that work, so these are absent rather than stubbed): `wren run
   attach` / `wren run steer` (interactive steering), `wren run resume` (manual
