@@ -5,6 +5,19 @@
 > project is, where it sits in the landscape, what shape the code is in, and what
 > blocks an open-source release.
 
+> **Update (2026-07-27):** of the four blockers below, two are now resolved —
+> **security-claim honesty** (egress bypass enforcement shipped and verified
+> live on real GKE Standard, WS-1) and **control-plane durability** (a
+> Postgres store option now exists, WS-3 — though in-memory stays the
+> honestly-documented default). **Project name** is *decided* (`skein` /
+> `skein-sh` / `skein.dev`, locked 2026-07-22, WS-10) but not yet *executed* —
+> the mechanical rename + fresh-history repo cut (which also resolves the
+> **git history contamination** blocker, per WS-10's plan to copy the tree at
+> HEAD with no history) is still deferred, secondary to the onboarding/
+> multi-harness push. Also stale below: **the license decision changed from
+> MIT to Apache-2.0** (+ NOTICE at cut, WS-10) — this doc predates that call.
+> Live state: [`tasks/STATUS.md`](tasks/STATUS.md).
+
 ---
 
 ## 1. Verdict (TL;DR)
@@ -108,8 +121,8 @@ Reviewed: all 61 Go files (~7.7k lines), the CRDs, manifests, Dockerfiles,
 
 | Area | Issue | Severity for OSS launch |
 |---|---|---|
-| Security | Egress proxy is bypassable (cooperative routing only, shared netns) | **Blocker** for the current claims — enforce or reframe |
-| Durability | In-memory store: an apiserver restart loses all run records, in a product whose pitch is "durable" | **Blocker** — Postgres (or SQLite/bbolt for the small path) |
+| Security | ~~Egress proxy is bypassable (cooperative routing only, shared netns)~~ | ~~**Blocker**~~ **Resolved (WS-1)** — iptables uid-lockdown enforces it; verified live on real GKE Standard |
+| Durability | ~~In-memory store: an apiserver restart loses all run records~~ | ~~**Blocker**~~ **Resolved (WS-3)** — Postgres store option exists (`--store=postgres`); in-memory stays the honest dev default |
 | Durability | Checkpointer is a stub; crash-resume currently relies on PVC survival only | High — implement or de-scope the checkpoint claims for v0 |
 | Auth | `X-Wren-User` trusted header; fine for M0, must be prominently documented as "do not expose" | High — SECURITY.md + network-level guidance |
 | GitHub | PAT in proxy secret; the App-token minter exists but isn't wired | High — closes a big enterprise objection cheaply |

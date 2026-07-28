@@ -63,14 +63,17 @@ threat model in the [spec](docs/technical-spec.md#25-end-to-end-workflow-journey
 ```sh
 wren login --control-plane wren.corp.internal --user you   # SSO lands in M1
 wren run create --project payments-api --task "Fix the flaky retry in checkout"
-wren run get    r-9d4c09a          # phase, PR url, restart count (token usage lands with wren usage, M1)
+wren run get    r-9d4c09a          # phase, PR url, restart count (token/cost usage reporting is roadmap, M1)
 wren run list   --scope mine
 wren run logs   r-9d4c09a -f        # tail the agent's live logs (--container to pick a sidecar)
+wren run stop   r-9d4c09a          # cancel a run (no auto-resume) and delete its pod
+wren run rm     r-9d4c09a          # delete a run and its cluster resources
 ```
 
 Each run is attributable, resumable, and produces a reviewable PR — not a mystery
-diff. (Interactive `attach`/`steer`, the `fleet` dashboard, and `usage` reporting
-are on the roadmap for M1–M2, not yet shipped — see [`SETUP.md`](SETUP.md#later-milestones-not-yet-built).)
+diff. Interactive steering, a fleet dashboard, and token/cost usage reporting
+are roadmap items (M1–M2) — the CLI doesn't ship them as stub commands in the
+meantime, see [`SETUP.md`](SETUP.md#later-milestones-not-yet-built).
 
 ## Installing Wren (admin / handover)
 
@@ -126,9 +129,10 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Area | M0 (as built) | Target |
 |---|---|---|
 | Task → PR (Journey A) | ✅ real Claude agent → PR, on kind **and** GKE | same |
+| Onboarding | ✅ one command (`wren install --kind`/`--registry`) builds+delivers all 6 images, deploys the control plane, and hands off a **minimal** `wren project create`/`wren run create` — install-configured namespace closes a silent credential footgun; a stuck image pull gets diagnosed with the exact fix, not a dead end; zero placeholder CLI commands ([SETUP.md](SETUP.md)) | `--create-cluster` opt-in GKE provisioning (in progress) |
 | Harnesses | ✅ `claude-code` (proven e2e) + `mock` (keyless gate); `codex` + `opencode` adapters, images, and the `/openai/` egress route built — **not yet run against live providers** ([docs/harnesses.md](docs/harnesses.md)) | + BYO conformance suite |
-| Crash-resume | ✅ infra crashes (OOM/eviction) resume via PVC reattach + resume-mode; deterministic failures fail fast; a disk-destroying node/zone loss = clean `Failed` | + object-store checkpoints (`workspace.checkpoint.*` accepted, **no-op** until the checkpointer lands post-launch; `internal/blob.Store` is the socket) |
-| Egress-proxy | ✅ injects creds (github.com, api.github.com, api.anthropic.com, api.openai.com) + allowlist; runner holds no secret; **bypass enforced** (iptables uid-lockdown + per-run canary; `--egress-enforcement=off` escape hatch with `config/netpol/` FQDN policies) | verify enforcement on GKE Standard (privileged init-container node policy) |
+| Crash-resume | ✅ infra crashes (OOM/eviction) resume via PVC reattach + resume-mode; deterministic failures fail fast; a disk-destroying node/zone loss = clean `Failed` (deterministically, not by accident — reconciler distinguishes first-provision from a PVC that vanished later) | + object-store checkpoints (`workspace.checkpoint.*` accepted, **no-op** until the checkpointer lands post-launch; `internal/blob.Store` is the socket) |
+| Egress-proxy | ✅ injects creds (github.com, api.github.com, api.anthropic.com, api.openai.com) + allowlist; runner holds no secret; **bypass enforced** (iptables uid-lockdown + per-run canary; `--egress-enforcement=off` escape hatch with `config/netpol/` FQDN policies) + a DNS-rebinding-closed CONNECT path — **verified on real GKE Standard**, not just kind | — |
 | Control plane | ✅ runs in-cluster (operator + apiserver Deployments, `config/default`; `make e2e` rides them) — local-against-cluster remains the dev loop | published images + Ingress/OIDC front-door |
 | GitHub creds | ✅ PAT in the proxy secret | per-run **GitHub App** tokens |
 | API transport | HTTP/JSON | gRPC + Connect |
@@ -137,8 +141,9 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Isolation | hardened `runc` pods | + gVisor/Kata (deferred, M4) |
 
 Next up: per-run **GitHub App** tokens (the minter is built; wiring is next),
-verifying egress enforcement on GKE Standard, and the object-store checkpointer
-behind `internal/blob.Store` (post-launch).
+`wren install --create-cluster` (a bounded, opt-in path to skip standing up the
+GKE cluster by hand, in progress), and the object-store checkpointer behind
+`internal/blob.Store` (post-launch).
 
 ## Repository layout
 

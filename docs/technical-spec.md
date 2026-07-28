@@ -1,21 +1,22 @@
 # Wren — Technical Specification
 
-> **Status:** Draft v0.4 (living) · **Owner:** Platform / Software Factory · **Last updated:** 2026-07-13
+> **Status:** Draft v0.5 (living) · **Owner:** Platform / Software Factory · **Last updated:** 2026-07-27
 >
 > `Wren` is a working name for the platform and its CLI binary (`wren`). Names are placeholders and can change without affecting the design.
 
 ### Implementation status (living — updated as we build)
 
-The **core of milestone M0 — Journey A (task → PR)** — is built and validated end-to-end (unit tests + real-cluster e2e on **kind and real GKE**). A few M0 hardening items remain (see "Next milestones"). Built and validated:
+The **core of milestone M0 — Journey A (task → PR)** — is built and validated end-to-end (unit tests + real-cluster e2e on **kind and real GKE**), and the onboarding path (Journey D) is now the same bar: one CLI command to a working control plane, verified live on both. A few M0 hardening items remain (see "Next milestones"). Built and validated:
 
-- **CLI** (`cmd/wren`) — command tree; `login`, `run create/list/get/logs` wired to the control-plane HTTP API (`run logs [-f] [--container]` streams pod logs — resolves the run's current pod by the `wren.dev/run` label and tails the `pods/log` subresource).
-- **Operator** (`cmd/wren-operator`, `internal/controller`) — `AgentRun` reconciler (hardened pod + workspace PVC + RunSpec ConfigMap, lifecycle, crash-resume via PVC reattach + resume-mode — see the §5.5 v0.1 status), `AgentPool` skeleton. CRDs + RBAC + manager manifests under `config/`.
+- **CLI** (`cmd/wren`) — `login`, `install`/`uninstall`, `project create/list/get`, `run create/list/get/logs/stop/rm` wired to the control-plane HTTP API (`run logs [-f] [--container]` streams pod logs — resolves the run's current pod by the `wren.dev/run` label and tails the `pods/log` subresource). **Zero placeholder commands** (WS-15): everything `--help` lists actually works; `mcp`/`fleet`/`usage`/`run attach`/`run steer`/`project config` were removed from the CLI surface rather than shipped as commands that error — they're roadmap (M1–M2), documented in SETUP.md, not stubs.
+- **Operator** (`cmd/wren-operator`, `internal/controller`) — `AgentRun` reconciler (hardened pod + workspace PVC + RunSpec ConfigMap, lifecycle, crash-resume via PVC reattach + resume-mode — see the §5.5 v0.1 status). CRDs + RBAC + manager manifests under `config/`. (The `AgentPool` skeleton mentioned in earlier drafts was removed as dead code — no runs ever took the warm-pool path; `AgentPool` stays a **target-only** M3 design, §5.4/§10.)
 - **Control plane** (`cmd/wren-apiserver`, `internal/{apiserver,coreapi,store,launcher}`) — Runs + Projects services; creates `AgentRun` CRs and mirrors CR status back.
-- **Harness runtime** (`cmd/wren-runtime`, `internal/{harness,podruntime}`) — the multi-call in-pod binary implementing the §5.4 contract's batch subset (RunSpec in, event stream + exit-code contract out; interactive input lands in M2, transcript-restore resume is post-launch with the checkpointer). Adapters: **claude-code** (real — drives the bundled `claude` CLI headless in the cloned workspace and parses its stream-json events into Wren events + token usage), **codex** + **opencode** (WS-12: adapters, images, and credential wiring built and unit-tested — **not yet run against the live providers**; see docs/harnesses.md), and **mock** (deterministic, keyless). Images: `build/Dockerfile.{runtime,claude-code,codex,opencode}`.
-- **Egress-proxy** (`internal/egress`) — the pod's controlled egress: enforces a domain allowlist and **injects the GitHub token + model key** for github.com / api.github.com / api.anthropic.com / api.openai.com (the `/openai/` route, WS-12, is wired but not yet exercised against a live key). The credentials live only on the proxy container; the runner holds no secret.
-- **GitHub PR / finalize** (`internal/{github,gitwork,finalize}`) — go-git clone/commit/push (distroless-friendly, no git binary) + open a PR with the rubric body, plus a GitHub **App installation-token minter**. Hydrate clones and finalize pushes/opens the PR *through the egress-proxy*.
-- **Verified e2e on kind AND real GKE (Journey A):** `wren run create` → CR (carrying `repo`) → operator schedules the hardened pod → egress-proxy (holds creds) → hydrate clones via proxy → **the real Claude Code agent does the task** (Bash/Write tools, autonomous) → finalize opens a **real PR** through the proxy → pod `Completed` → run **`Succeeded`** → `wren run get` reflects it. On GKE: image pulled from Artifact Registry, workspace on a Persistent Disk, runner container held **no token or model key** (both injected at the proxy).
-- **Onboarding (WS-13):** `wren install`/`wren uninstall` (`internal/install`) — preflight with remediation, the `config/default` render embedded via go:embed (`make assets` re-renders; `make check-assets` guards drift in CI), images built + pushed for `--registry` (GKE) or built + `kind load`ed (`--kind`), credentials collected env → `gh auth token` → hidden prompt (never echoed) into the proxy Secrets, Ready wait, engineer hand-off (with the header-auth warning). `wren project create`/`list` are real against `POST/GET /v1/projects`. Private tag releases: goreleaser CLI archives (darwin/linux × amd64/arm64) + checksums on this repo's releases, and the three images on GHCR (`ghcr.io/arpeetk/wren/*`).
+- **Harness runtime** (`cmd/wren-runtime`, `internal/{harness,podruntime}`) — the multi-call in-pod binary implementing the §5.4 contract's batch subset (RunSpec in, event stream + exit-code contract out; interactive input lands in M2, transcript-restore resume is post-launch with the checkpointer). Adapters: **claude-code** (real — drives the bundled `claude` CLI headless in the cloned workspace and parses its stream-json events into Wren events + token usage), **codex** + **opencode** (WS-12: adapters, images, and credential wiring built and unit-tested — **not yet run against the live providers**; see docs/harnesses.md), and **mock** (deterministic, keyless — always resolves to the runtime image regardless of any harness-image default, so it never depends on a project's `--harness-image` being set correctly). Images: `build/Dockerfile.{runtime,claude-code,codex,opencode}`, all built + pushed/loaded automatically by `wren install` (WS-14).
+- **Egress-proxy** (`internal/egress`) — the pod's controlled egress: enforces a domain allowlist and **injects the GitHub token + model key** for github.com / api.github.com / api.anthropic.com / api.openai.com (the `/openai/` route, WS-12, is wired but not yet exercised against a live key). The credentials live only on the proxy container; the runner holds no secret. CONNECT resolves the target host once and dials the resolved IP directly (WS-16), closing a DNS-rebinding TOCTOU window in the allowlist check.
+- **GitHub PR / finalize** (`internal/{github,gitwork,finalize}`) — go-git clone/commit/push (distroless-friendly, no git binary) + open a PR with the rubric body, plus a GitHub **App installation-token minter**. Hydrate clones and finalize pushes/opens the PR *through the egress-proxy*. Finalize is idempotent and retry-classified (WS-11): a resumed run reuses its existing branch instead of failing "already exists," and transient push/PR failures (network, 429/5xx) retry while permanent ones (401/403/422) fail fast.
+- **Verified e2e on kind AND real GKE (Journey A):** `wren run create` → CR (carrying `repo`) → operator schedules the hardened pod → egress-proxy (holds creds) → hydrate clones via proxy → **the real Claude Code agent does the task** (Bash/Write tools, autonomous) → finalize opens a **real PR** through the proxy → pod `Completed` → run **`Succeeded`** → `wren run get` reflects it. On GKE: image pulled from Artifact Registry, workspace on a Persistent Disk, runner container held **no token or model key** (both injected at the proxy). **Egress bypass enforcement verified on real GKE Standard** (iptables lockdown + canary; no longer just kind-verified).
+- **Onboarding (WS-13/14/15):** `wren install`/`wren uninstall` (`internal/install`) — preflight with remediation (including a live diagnosis of a stuck `ImagePullBackOff`, printing the exact Artifact Registry IAM remedy instead of a dead-end "check the logs"), the `config/default` render embedded via go:embed (`make assets` re-renders; `make check-assets` guards drift in CI), all six images (3 control-plane + 3 harness, `--harness-images` to restrict) built + pushed for `--registry` (GKE) or built + `kind load`ed (`--kind`), credentials collected env → `gh auth token` → hidden prompt (never echoed) into the proxy Secrets, Ready wait, engineer hand-off (with the header-auth warning and a minimal, real `wren project create` example). `wren project create/list/get` are real against `POST/GET /v1/projects[/{name}]`; a project created with **no `--namespace`** lands in the same namespace `wren install` wrote the credentials to by default (the install-configured default, not a per-user namespace that has no Secrets — WS-15 closed a silent-failure gap here: `run create` now fails loud with the exact remedy if a project's resolved namespace is missing a Secret its harness needs, instead of scheduling a pod that can never authenticate). Private tag releases: goreleaser CLI archives (darwin/linux × amd64/arm64) + checksums on this repo's releases, and the images on GHCR (`ghcr.io/arpeetk/wren/*`).
+- **Robustness pass (WS-16):** `hack/e2e.sh`/`hack/e2e-gke.sh` share `hack/lib/e2e-common.sh`; apiserver has real Read/Write/Idle timeouts (log-tail streaming unaffected); a disk-destroying loss (PVC gone after a run has already progressed past `Pending`) now fails the run `Failed`/`WorkspaceLost` instead of silently resuming into an empty workspace with no signal anything was lost; `internal/launcher`'s real Kubernetes-backed implementation went from 0% to real coverage on `RequestCancel`/`SecretHasKey`/`ListRuns` (previously only its test fake was exercised — the same shape of gap that produced two live-GKE-only bugs this pass, both fixed: a Deployment-update race now retries on conflict, and the fixes above).
 
 **M0 implementation decisions (deviations from the target design, to revisit):**
 
@@ -31,9 +32,10 @@ The **core of milestone M0 — Journey A (task → PR)** — is built and valida
 **Next milestones (not yet built):**
 
 1. **GitHub App + control-plane front-door** — the operator + apiserver already run **in-cluster** (`config/default`; exercised by `make e2e`), installs land via `wren install`, and images publish to GHCR on tag. Remaining: an apiserver Ingress/OIDC front-door and minting per-run, repo-scoped **GitHub App** installation tokens in place of the PAT. This makes the platform self-hosting and the handover real.
-2. ~~**Egress bypass enforcement**~~ — **done** (iptables uid-match lockdown; NetworkPolicy examples shipped under `config/netpol/` as a belt-and-suspenders second layer). Remaining: verify on GKE Standard (privileged init container node-pool policy) before launch.
+2. ~~**Egress bypass enforcement**~~ — **done** (iptables uid-match lockdown; NetworkPolicy examples shipped under `config/netpol/` as a belt-and-suspenders second layer). ~~Remaining: verify on GKE Standard.~~ **Done (2026-07-24)** — live-validated on a real GKE Standard cluster: lockdown applied, canary proved the direct-dial/direct-HTTPS paths blocked and the proxy path succeeded, `EgressEnforcement=True/Iptables`. GKE Autopilot/PSA-restricted admission remains untestable in this environment (covered by design: a deterministic `PodAdmissionForbidden`, not a silent failure).
+3. **`wren install --create-cluster`** (in progress) — a bounded, opt-in GKE Standard cluster provisioning path (shells out to `gcloud`) so the one remaining manual step in onboarding — standing up the cluster itself — has a one-command quickstart option too, alongside the existing bring-your-own-cluster path (still the recommended flow for a real team setup).
 
-Also pending: the object-store **checkpointer** + checkpoint-restore hydrate — **de-scoped to post-launch (WS-8)**: v0.1 resumes via PVC reattach + resume-mode only, the checkpointer sidecar is an experimental liveness stub, the `workspace.checkpoint.*` CRD fields are accepted but **no-op**, and `internal/blob.Store` is the interface the real checkpointer (S3-compatible / GCS; MinIO in e2e) will plug into. Also: `wren project get`/`config`, `mcp`, `fleet`, `usage` (`project create`/`list` are real — WS-13), historical/aggregated logs (GCS) and multi-restart `--previous` for `run logs` (live-tail is built), managed Postgres provisioning (the store impl exists — see above), gRPC/Connect transport, isolated agent node pool.
+Also pending: the object-store **checkpointer** + checkpoint-restore hydrate — **de-scoped to post-launch (WS-8)**: v0.1 resumes via PVC reattach + resume-mode only, the checkpointer sidecar is an experimental liveness stub, the `workspace.checkpoint.*` CRD fields are accepted but **no-op**, and `internal/blob.Store` is the interface the real checkpointer (S3-compatible / GCS; MinIO in e2e) will plug into. Also: `mcp`, `fleet`, `usage`, `project config`, `run attach`/`steer` — all deliberately **removed from the CLI surface** (WS-15) rather than left as stub commands; they're M1–M2 roadmap, not regressions (`project create/list/get` and `run create/list/get/logs/stop/rm` are all real). `run resume` (manual resume of a terminally-`Failed` run) was evaluated and deferred — it needs real new behavior (reset the retry budget, clear the leftover pod), not just a CLI wrapper. Also still open: historical/aggregated logs (GCS) and multi-restart `--previous` for `run logs` (live-tail is built), managed Postgres provisioning (the store impl exists — see above), gRPC/Connect transport, isolated agent node pool.
 
 **Repo:** the M0 codebase is on GitHub at `arpeetk/a-labs` (PR #2, branch `wren/m0-foundations`). Contributor/agent working guide: [`AGENTS.md`](../AGENTS.md) — read it before making changes.
 
@@ -72,7 +74,7 @@ The agent runs as a **hardened pod on GKE**, works in a **durable workspace**, *
 
 1. **Durable by default.** No agent work is ever lost to a crash, eviction, or restart. Every run is resumable.
 2. **Secure by default.** Agent code is treated as untrusted. Default-deny networking, an egress proxy, least-privilege identity, and credentials that never enter the sandbox — with kernel-level isolation (gVisor/Kata) designed in as a drop-in layer for later.
-3. **Minimal onboarding.** An org adopts Wren with an admin `wren setup` and engineers with a single `wren login`. No per-machine credential juggling.
+3. **Minimal onboarding.** An org adopts Wren with an admin `wren install` and engineers with a single `wren login`. No per-machine credential juggling.
 4. **Harness-agnostic.** Claude Code, Codex, and bring-your-own agents are first-class through one adapter contract.
 5. **Fleet-native.** Every run is observable, attributable, metered, and steerable from the CLI.
 6. **GitOps-shaped output.** The unit of output is a reviewable pull request, not a mystery diff.
@@ -128,8 +130,8 @@ Pod is OOMKilled mid-run. Operator detects termination, recreates the pod, an in
 
 ### 2.4 Journey D — Onboarding
 
-- **Admin (once):** `wren setup` → connect GCP project, deploy control plane + operator, install the GitHub App, set org defaults.
-- **Engineer (once):** `wren login` (SSO) → ready. `wren project add <repo>` to register a repo.
+- **Admin (once):** `wren install` → connect GCP project, deploy control plane + operator, install the GitHub App, set org defaults.
+- **Engineer (once):** `wren login` (SSO) → ready. `wren project create <name> --repo <repo>` to register a repo (real today, minus the SSO — WS-13/14/15).
 
 ### 2.5 End-to-end workflow (Journey A)
 
@@ -300,9 +302,9 @@ wren login                       # SSO/OIDC device flow → token
 wren logout / whoami / context   # manage contexts (dev/stage/prod control planes)
 
 # Projects
-wren project add <github-repo>   # register repo (interactive config)
-wren project list | get <name>
-wren project config <name>       # edit base image, harness, rubric, egress, budgets
+wren project create <name> --repo <github-repo>   # register repo (real today — WS-13/14/15)
+wren project list | get <name>                    # both real today
+wren project config <name>       # edit base image, harness, rubric, egress, budgets (target — removed as a stub, WS-15)
 
 # MCP
 wren mcp add <project> --name db --transport http --url https://... [--auth ...]
@@ -327,7 +329,7 @@ wren fleet [--team <t>]          # dashboard: all runs, states, live cost
 wren usage [--mine|--team] [--since 7d]   # tokens, cost, CPU, mem
 
 # Admin
-wren setup                       # bootstrap (see §11)
+wren install                       # bootstrap (see §11)
 wren pool create/list            # pre-warmed pools
 wren quota set / budget set      # per-user/project limits
 wren admin ...                   # users, roles, audit
@@ -525,11 +527,11 @@ The agent runs untrusted, model-generated code. **v1 relies on hardened-containe
 
 ### 5.7 GitHub integration
 
-> **M0 status:** the **finalize** step is built (`internal/{github,gitwork,finalize}`): go-git clone/commit/push + open a PR with the rubric body, plus a GitHub **App installation-token minter**. Real live PRs have been produced end-to-end against `arpeetk/a-labs` on kind and GKE, with the token injected at the **egress-proxy** (the runner holds nothing). Remaining vs. the target: (1) the token is a **PAT** in the proxy secret rather than a per-run App installation token (the minter exists; wiring is the next milestone); (2) the branch is `wren/<sanitized-user>/<run-id>` — the `-<slug>` suffix and rubric *validation* are not yet implemented; (3) the App *setup* flow (`wren setup`) is pending.
+> **M0 status:** the **finalize** step is built (`internal/{github,gitwork,finalize}`): go-git clone/commit/push + open a PR with the rubric body, plus a GitHub **App installation-token minter**. Real live PRs have been produced end-to-end against `arpeetk/a-labs` on kind and GKE, with the token injected at the **egress-proxy** (the runner holds nothing). Remaining vs. the target: (1) the token is a **PAT** in the proxy secret rather than a per-run App installation token (the minter exists; wiring is the next milestone); (2) the branch is `wren/<sanitized-user>/<run-id>` — the `-<slug>` suffix and rubric *validation* are not yet implemented; (3) the App *setup* flow (`wren install`) is pending.
 
 **Auth model: a GitHub App** (org-installed), not PATs.
 
-- **Setup (admin):** `wren setup` walks the admin through installing the Wren GitHub App on the org and selecting repos. The App's private key is stored in Secret Manager. Required permissions: `contents:write`, `pull_requests:write`, `metadata:read` (no admin, no org-wide write).
+- **Setup (admin):** `wren install` walks the admin through installing the Wren GitHub App on the org and selecting repos. The App's private key is stored in Secret Manager. Required permissions: `contents:write`, `pull_requests:write`, `metadata:read` (no admin, no org-wide write).
 - **Per-run:** the control plane mints a **short-lived installation access token scoped to the single target repo**, passed to the egress-proxy. `git`/`gh` in the runner route through the proxy, which injects the token. Token lifetime ≈ run duration; auto-refreshed for long runs.
 
 **PR flow:**
@@ -594,7 +596,7 @@ servers:
 | Observability | Cloud Monitoring + Logging, OTEL collector, optional Managed Prometheus/Grafana |
 | Analytics | BigQuery (usage/cost warehouse) |
 
-Everything is provisioned by **Terraform modules** shipped with Wren so `wren setup` can stand up (or attach to) the full stack in the org's GCP project.
+Everything is provisioned by **Terraform modules** shipped with Wren so `wren install` can stand up (or attach to) the full stack in the org's GCP project.
 
 ---
 
@@ -635,10 +637,10 @@ Everything is provisioned by **Terraform modules** shipped with Wren so `wren se
 v1 targets multi-harness + steering; the build is sequenced but all lands within v1.
 
 - **M0 — Foundations.** Control-plane skeleton (auth, projects, runs), operator + `AgentRun` CRD, **Claude Code** harness, async task→PR, Regional PD workspace (the GCS checkpointer moved post-launch — WS-8), hardened `runc` pod on an isolated agent node pool, egress-proxy, GitHub App + repo-scoped tokens, `run create/get/logs`. *(Journey A + C end-to-end.)*
-  - **Done:** operator (`AgentRun` reconcile + crash-resume with retry classification, `AgentPool` skeleton); control-plane Runs/Projects services + HTTP API, running **in-cluster** (`config/default` Deployments + Service); CLI `run create/list/get/logs` (`logs [-f]` live-tails via `pods/log`); CR-status mirroring; the `wren-runtime` image + the **real Claude Code agent**; the **egress-proxy** (credential injection + allowlist, runner holds no secret) with **bypass enforcement** (iptables uid-lockdown + per-run canary, WS-1); the **Postgres store** (WS-3) alongside the in-memory default; and **GitHub PR/finalize**. **Verified e2e on kind and real GKE: Journey A to `Succeeded` with a real Claude agent opening a real PR** on `arpeetk/a-labs`. **Remaining:** **GitHub App** tokens wired per-run (the minter is built), egress-enforcement verification on GKE Standard, published control-plane images + Ingress/OIDC front-door, isolated node pool, managed Postgres provisioning (WS-5), gRPC transport. The GCS checkpointer + checkpoint-restore moved **post-launch** (WS-8): v0.1 resumes via PVC reattach + resume-mode only, and `workspace.checkpoint.*` is accepted but no-op (§5.5 v0.1 status).
+  - **Done:** operator (`AgentRun` reconcile + crash-resume with retry classification; the `AgentPool` skeleton mentioned in earlier drafts was removed as dead code — it stays a target-only M3 design, nothing built); control-plane Runs/Projects services + HTTP API, running **in-cluster** (`config/default` Deployments + Service); CLI `run create/list/get/logs/stop/rm`, `project create/list/get` (`logs [-f]` live-tails via `pods/log`; **zero placeholder commands** — WS-15); CR-status mirroring; the `wren-runtime` image + the **real Claude Code agent** + **codex**/**opencode** adapters (WS-12, not yet live-key-validated); the **egress-proxy** (credential injection + allowlist, runner holds no secret) with **bypass enforcement** (iptables uid-lockdown + per-run canary, WS-1 — **verified on real GKE Standard**, not just kind) and a DNS-rebinding-closed CONNECT path (WS-16); the **Postgres store** (WS-3) alongside the in-memory default; idempotent, retry-classified **GitHub PR/finalize** (WS-11); and **onboarding as product surface** (WS-13/14/15: `wren install` builds+delivers all 6 images, the install-configured namespace closes a silent credential-footgun, a stuck image pull gets diagnosed with the exact IAM remedy). **Verified e2e on kind and real GKE: Journey A to `Succeeded` with a real Claude agent opening a real PR**, and the full onboarding loop (install → project create → run create → Succeeded) live-verified the same way, on `arpeetk/a-labs`. **Remaining:** **GitHub App** tokens wired per-run (the minter is built), published control-plane images + Ingress/OIDC front-door, isolated node pool, managed Postgres provisioning (WS-5), gRPC transport, `wren install --create-cluster` (WS-17, in progress). The GCS checkpointer + checkpoint-restore moved **post-launch** (WS-8): v0.1 resumes via PVC reattach + resume-mode only, and `workspace.checkpoint.*` is accepted but no-op (§5.5 v0.1 status); a disk-destroying loss now ends the run `Failed`/`WorkspaceLost` deterministically rather than silently resuming into an empty workspace (WS-16).
 - **M1 — Breadth.** **Codex** + **BYO** harness adapters, MCP config service + `wren mcp`, usage metering (tokens/CPU/mem) + `wren usage`, `fleet` views, RBAC.
 - **M2 — Interactive.** agent-gateway + steering stream, `run attach/steer`, tool-permission routing, rubric validation modes.
-- **M3 — Scale & polish.** `AgentPool` warm pools, quotas/budgets with hard-cap pause, Terraform-driven `wren setup`, read-only web dashboard.
+- **M3 — Scale & polish.** `AgentPool` warm pools, quotas/budgets with hard-cap pause, Terraform-driven `wren install`, read-only web dashboard.
 - **M4 — Kernel isolation (deferred).** gVisor/Kata sandbox node pool + `RuntimeClass` rollout, per-toolchain validation under gVisor. Drop-in; no other component changes.
 
 ---
@@ -648,7 +650,7 @@ v1 targets multi-harness + steering; the build is sequenced but all lands within
 **Admin (one-time, ~15 min):**
 
 ```
-$ wren setup
+$ wren install
   ? GCP project: corp-wren-prod
   ? Region: us-central1
   → Applying Terraform (GKE + gVisor pool, Cloud SQL, GCS, Secret Manager, …)   ✓
@@ -663,7 +665,7 @@ $ wren setup
 ```
 $ wren login --control-plane wren.corp.internal
   → Opening browser for SSO…  ✓  Logged in as arpeet@corp.com
-$ wren project add corp/payments-api
+$ wren project create payments-api --repo corp/payments-api
   → Registered. Defaults: harness=claude-code, sandbox=gvisor, rubric=default.
 $ wren run create --project payments-api --task "…"
 ```

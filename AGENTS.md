@@ -64,6 +64,7 @@ internal/
   blob/                object-store contract for checkpoints (interface only — no impls yet)
   harness/             harness adapters (mock, claude-code, codex, opencode) + event protocol
   podruntime/          in-pod role runners (harness/hydrate/sidecars) + dispatch
+  egress/              the credential-injecting allowlist proxy (github/anthropic/openai routes)
   github/              GitHub PR client + App installation-token minter + Fake
   gitwork/             go-git clone/commit/push (no git binary needed)
   finalize/            commit → push branch → open PR (+ rubric)
@@ -72,7 +73,9 @@ config/                kustomize manifests (crd, rbac, manager) + samples
 build/                 Dockerfile.runtime + per-harness images (claude-code, codex, opencode) + generic gobin
 hack/                  dev/test tooling ONLY (e2e gates) — onboarding/install is
                        product surface and lives in the CLI (code standards rule 8)
-docs/technical-spec.md the living design spec (Draft v0.2)
+                       hack/lib/e2e-common.sh holds logic shared by e2e.sh/e2e-gke.sh
+docs/technical-spec.md the living design spec (Draft v0.5 — keep this in sync
+                       when you bump it; it drifts if only one of the two gets updated)
 ```
 
 **Component flow (Journey A):**
@@ -105,11 +108,18 @@ make fmt              # gofmt -w .
 ```
 
 **Coverage bar:** keep coverage **high** on every logic package, and ship tests in
-the *same change* as new code — do not defer. Typical numbers: store ~97, config
-~91, finalize ~88, coreapi/api/controller ~87, apiserver/launcher ~83, github ~79,
-gitwork/harness/podruntime ~72–74. `cmd/*` `main` wiring and real-network glue
-(real GitHub client, real `claude` CLI) are the only intentionally-uncovered spots
-— call those out explicitly if you add more.
+the *same change* as new code — do not defer. Run `make cover` for live numbers
+rather than trusting a hardcoded table here — every package's percentage has
+moved, sometimes by double digits, across nearly every workstream this project
+has shipped, in both directions (`internal/launcher` went 57%→77% when its
+real-Kubernetes-backed methods finally got tested against a fake clientset
+instead of only their test double; `internal/store`'s share dropped as
+Postgres's error-branch code diluted an already-high percentage). As of
+2026-07-27, every logic package sits roughly **mid-70s to mid-90s**; treat a
+new package landing meaningfully below that band as a signal to add tests, not
+as the new normal. `cmd/*` `main` wiring and real-network glue (real GitHub
+client, real `claude`/`codex`/`opencode` CLIs) are the only intentionally-
+uncovered spots — call those out explicitly if you add more.
 
 ## 5. Code generation (when you change `api/v1alpha1`)
 
@@ -230,6 +240,13 @@ real PR without touching github.com.
 
 ## 8. Status & M0 stand-ins (things deliberately not "real" yet)
 
+- **CLI surface:** zero stand-ins as of WS-15 — every command `wren --help`
+  (and every subcommand's `--help`) lists actually works. `mcp`/`fleet`/
+  `usage`/`run attach`/`run steer`/`project config` used to exist as
+  placeholder commands that printed "not implemented yet"; they were removed
+  from the CLI entirely rather than left as stubs (code standards rule 8) —
+  they're still roadmap (M1–M2), just not shipped as fake commands in the
+  meantime. If you're adding a new command, ship it real or don't ship it.
 - **Harness:** the **mock** adapter (deterministic, no key) is the default; the
   real Claude Code adapter needs `ANTHROPIC_API_KEY` + the egress path. The
   **codex** and **opencode** adapters (WS-12) are built — adapters, images,
