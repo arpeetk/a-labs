@@ -95,7 +95,15 @@ func TestRunSidecarStopsOnCancel(t *testing.T) {
 }
 
 // runCheckpointerUntil starts RunCheckpointer, waits for the self-check to run,
-// returns the log so far, then cancels and waits for a clean stop.
+// then cancels and waits for a clean stop before reading the log. Reading buf
+// only after RunCheckpointer has actually returned (not just after the sleep)
+// matters: RunCheckpointer's sidecar-liveness loop keeps running — and keeps
+// writing to buf — until it observes ctx cancellation, so reading buf.String()
+// on the test goroutine before that return is a data race with whatever the
+// background goroutine is still writing (caught live by `go test -race` in CI
+// on the original version of this test — race detected, not hypothetical).
+// Once <-done has fired, RunCheckpointer has returned and nothing else can
+// write to buf, so the read below is race-free by construction.
 func runCheckpointerUntil(t *testing.T) func() string {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -103,7 +111,6 @@ func runCheckpointerUntil(t *testing.T) func() string {
 	done := make(chan error, 1)
 	go func() { done <- RunCheckpointer(ctx, &buf, "checkpointer") }()
 	time.Sleep(50 * time.Millisecond) // let the one-shot self-check complete
-	logSoFar := buf.String()
 	cancel()
 	select {
 	case err := <-done:
@@ -113,6 +120,7 @@ func runCheckpointerUntil(t *testing.T) func() string {
 	case <-time.After(2 * time.Second):
 		t.Fatal("checkpointer did not stop on cancel")
 	}
+	logSoFar := buf.String()
 	return func() string { return logSoFar }
 }
 
