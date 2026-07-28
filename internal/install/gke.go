@@ -2,6 +2,7 @@ package install
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -24,6 +25,48 @@ func regionFromZone(zone string) string {
 		return zone[:i]
 	}
 	return zone
+}
+
+// checkGCloudAuth preflights gcloud itself: on PATH and logged into an active
+// account. Shared by install's --create-cluster preflight and uninstall's
+// --delete-cluster path so both fail fast, before any gcloud call, with the
+// same actionable remedy.
+func checkGCloudAuth(ctx context.Context, r Runner) error {
+	if !r.LookPath("gcloud") {
+		return errors.New("gcloud not found on PATH\nremedy: install the Google Cloud SDK (https://cloud.google.com/sdk/docs/install)")
+	}
+	acct, err := r.Output(ctx, "gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
+	if err != nil || strings.TrimSpace(acct) == "" {
+		return errors.New("gcloud has no active authenticated account\nremedy: run `gcloud auth login` (then `gcloud config set project <project>`)")
+	}
+	return nil
+}
+
+// deleteGKECluster permanently deletes the GKE cluster wren uninstall
+// --delete-cluster targets — the uninstall counterpart to Options.CreateCluster's
+// provisionGKE, closing the natural follow-up WS-17 flagged. Idempotent: an
+// already-absent cluster (checked the same way provisionGKE checks for reuse)
+// is treated as success rather than erroring, so a repeat --delete-cluster
+// uninstall converges.
+func (in *Installer) deleteGKECluster(ctx context.Context, opts UninstallOptions) error {
+	r := in.Runner
+	if err := checkGCloudAuth(ctx, r); err != nil {
+		return err
+	}
+	proj, zone, name := opts.GCPProject, opts.GCPZone, opts.GCPClusterName
+	_, err := r.Output(ctx, "gcloud", "container", "clusters", "describe", name,
+		"--zone", zone, "--project", proj, "--format=value(name)")
+	if err != nil {
+		fmt.Fprintf(in.Out, "==> GKE cluster %q already absent in %s/%s\n", name, proj, zone)
+		return nil
+	}
+	fmt.Fprintf(in.Out, "==> deleting GKE cluster %q (project %s, zone %s) — this permanently destroys the cluster\n", name, proj, zone)
+	if err := r.Run(ctx, "gcloud", "container", "clusters", "delete", name,
+		"--zone", zone, "--project", proj, "--quiet"); err != nil {
+		return fmt.Errorf("delete GKE cluster %q: %w", name, err)
+	}
+	fmt.Fprintf(in.Out, "GKE cluster %q deleted\n", name)
+	return nil
 }
 
 // provisionGKE creates (or reuses) a GKE Standard cluster and wires everything

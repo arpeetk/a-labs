@@ -114,9 +114,10 @@ reused, not recreated).
 > **GKE Standard only:** Autopilot is unsupported because it forbids the
 > privileged init container Wren's egress lockdown (WS-1) needs. Preflight
 > requires `gcloud` on `PATH` and an active account (`gcloud auth login`).
-> Tear the cluster down when you're done: `gcloud container clusters delete
-> wren --zone us-central1-a --project my-proj`. (A `wren uninstall
-> --delete-cluster` counterpart is a natural follow-up, not yet built.)
+> Tear the cluster down when you're done — `wren uninstall --delete-cluster
+> --gcp-project my-proj --confirm` (still gated by `--confirm`; deletes the
+> namespaces/CRDs first, then the GKE cluster itself), or by hand:
+> `gcloud container clusters delete wren --zone us-central1-a --project my-proj`.
 
 ## Engineer onboarding
 
@@ -186,6 +187,19 @@ wren uninstall --kube-context <cluster-context> --confirm
 
 Removes the `wren-system` + run namespaces and the Wren CRDs (every AgentRun
 goes with them — hence the confirmation gate).
+
+For a `--create-cluster` install, add `--delete-cluster` (+ `--gcp-project`,
+and `--gcp-zone`/`--gcp-cluster-name` if you overrode them) to also
+permanently delete the underlying GKE cluster in the same step — still gated
+by the same `--confirm`:
+
+```sh
+wren uninstall --kube-context <cluster-context> \
+  --delete-cluster --gcp-project my-proj --confirm
+```
+
+Idempotent: re-running against an already-deleted cluster succeeds (it's
+treated as already gone, not an error).
 
 ## Getting the CLI
 

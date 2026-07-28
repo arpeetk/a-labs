@@ -133,3 +133,29 @@ func TestUninstallRequiresConfirm(t *testing.T) {
 		t.Fatalf("expected --confirm gate, got %v", err)
 	}
 }
+
+// TestUninstallDeleteClusterRequiresConfirm guards that --delete-cluster is
+// still gated behind --confirm (WS-17 follow-up) — and that the gate's error
+// says so explicitly, not just the namespace/CRD removal.
+func TestUninstallDeleteClusterRequiresConfirm(t *testing.T) {
+	_, err := run(t, "uninstall", "--delete-cluster", "--gcp-project", "proj")
+	if err == nil || !strings.Contains(err.Error(), "--confirm") || !strings.Contains(err.Error(), "delete GKE cluster") {
+		t.Fatalf("expected --confirm gate mentioning the cluster deletion, got %v", err)
+	}
+}
+
+func TestUninstallHasDeleteClusterFlag(t *testing.T) {
+	root := NewRootCommand()
+	for _, c := range root.Commands() {
+		if c.Name() != "uninstall" {
+			continue
+		}
+		for _, flag := range []string{"delete-cluster", "gcp-project", "gcp-zone", "gcp-cluster-name"} {
+			if c.Flags().Lookup(flag) == nil {
+				t.Errorf("uninstall command missing --%s flag", flag)
+			}
+		}
+		return
+	}
+	t.Fatal("uninstall subcommand not found")
+}

@@ -163,6 +163,91 @@ func TestGKEContextName(t *testing.T) {
 	}
 }
 
+// deleteClusterOpts is a valid `wren uninstall --delete-cluster` invocation
+// (project set), defaults filled by UninstallOptions.defaults().
+func deleteClusterOpts() UninstallOptions {
+	return UninstallOptions{DeleteCluster: true, GCPProject: "wren-proj"}
+}
+
+func TestUninstallDeleteClusterRequiresProject(t *testing.T) {
+	in, _, _, _ := fixture(t)
+	opts := deleteClusterOpts()
+	opts.GCPProject = ""
+	err := in.Uninstall(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "--gcp-project") {
+		t.Fatalf("expected --gcp-project guidance, got %v", err)
+	}
+}
+
+func TestUninstallDeleteClusterPreflightMissingGcloud(t *testing.T) {
+	in, _, r, _ := fixture(t)
+	r.Tools = map[string]bool{"kubectl": true, "docker": true} // no gcloud
+	err := in.Uninstall(context.Background(), deleteClusterOpts())
+	if err == nil || !strings.Contains(err.Error(), "gcloud not found") || !strings.Contains(err.Error(), "remedy:") {
+		t.Fatalf("expected gcloud-missing remediation, got %v", err)
+	}
+}
+
+func TestUninstallDeleteClusterPreflightUnauthenticated(t *testing.T) {
+	in, _, r, _ := fixture(t)
+	r.Outputs["gcloud auth list --filter=status:ACTIVE --format=value(account)"] = "\n"
+	err := in.Uninstall(context.Background(), deleteClusterOpts())
+	if err == nil || !strings.Contains(err.Error(), "no active authenticated account") {
+		t.Fatalf("expected unauthenticated remediation, got %v", err)
+	}
+}
+
+func TestUninstallDeleteClusterHappyPath(t *testing.T) {
+	in, k, r, out := fixture(t)
+	r.Outputs["gcloud auth list --filter=status:ACTIVE --format=value(account)"] = "me@example.com\n"
+	r.Outputs["gcloud container clusters describe wren --zone us-central1-a --project wren-proj --format=value(name)"] = "wren\n"
+	if err := in.Uninstall(context.Background(), deleteClusterOpts()); err != nil {
+		t.Fatal(err)
+	}
+	// Namespaces/cluster-scoped resources still get torn down first.
+	for _, want := range []string{"DeleteNamespace:" + SystemNamespace, "DeleteClusterScoped"} {
+		if !k.HasCall(want) {
+			t.Errorf("expected call %q, calls: %v", want, k.Calls)
+		}
+	}
+	if !r.Ran("gcloud container clusters delete wren --zone us-central1-a --project wren-proj --quiet") {
+		t.Errorf("expected cluster delete, runs: %v", r.Runs)
+	}
+	if !strings.Contains(out.String(), "GKE cluster \"wren\" deleted") {
+		t.Errorf("expected deletion confirmation, out:\n%s", out.String())
+	}
+}
+
+func TestUninstallDeleteClusterIdempotentAbsent(t *testing.T) {
+	in, _, r, out := fixture(t)
+	r.Outputs["gcloud auth list --filter=status:ACTIVE --format=value(account)"] = "me@example.com\n"
+	// No canned describe output -> Output errors -> treated as already absent.
+	if err := in.Uninstall(context.Background(), deleteClusterOpts()); err != nil {
+		t.Fatal(err)
+	}
+	if r.Ran("gcloud container clusters delete") {
+		t.Errorf("an already-absent cluster must not attempt delete, runs: %v", r.Runs)
+	}
+	if !strings.Contains(out.String(), "already absent") {
+		t.Errorf("expected an already-absent notice, out:\n%s", out.String())
+	}
+}
+
+func TestUninstallDeleteClusterCustomCoordinates(t *testing.T) {
+	in, _, r, _ := fixture(t)
+	r.Outputs["gcloud auth list --filter=status:ACTIVE --format=value(account)"] = "me@example.com\n"
+	r.Outputs["gcloud container clusters describe wren-eu --zone europe-west1-b --project wren-proj --format=value(name)"] = "wren-eu\n"
+	opts := deleteClusterOpts()
+	opts.GCPZone = "europe-west1-b"
+	opts.GCPClusterName = "wren-eu"
+	if err := in.Uninstall(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Ran("gcloud container clusters delete wren-eu --zone europe-west1-b --project wren-proj --quiet") {
+		t.Errorf("expected custom-coordinate delete, runs: %v", r.Runs)
+	}
+}
+
 func TestRegionFromZone(t *testing.T) {
 	// Input is always a GKE zone (region + "-" + letter).
 	cases := map[string]string{
