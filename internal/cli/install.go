@@ -56,7 +56,7 @@ func newInstallCmd() *cobra.Command {
 	f.StringVar(&kubeContext, "kube-context", "", "kubectl context to install into (default: current; kind installs default to kind-<name>)")
 	f.StringVar(&opts.KindCluster, "kind", "", "local eval: create/reuse this kind cluster and load images into it")
 	f.StringVar(&opts.Registry, "registry", "", "image prefix to build (linux/amd64), push, and point the control plane at (e.g. an Artifact Registry path)")
-	f.BoolVar(&opts.CreateCluster, "create-cluster", false, "quickstart/eval: provision a fresh GKE Standard cluster to install into (the GCP equivalent of --kind), then install. Requires --registry and --gcp-project. Creates real, billable Google Cloud infrastructure. GKE Standard only — Autopilot can't run the egress lockdown. Not SETUP.md's recommended path for a real team; tear it down with `gcloud container clusters delete` when done")
+	f.BoolVar(&opts.CreateCluster, "create-cluster", false, "quickstart/eval: provision a fresh GKE Standard cluster to install into (the GCP equivalent of --kind), then install. Requires --registry and --gcp-project. Creates real, billable Google Cloud infrastructure. GKE Standard only — Autopilot can't run the egress lockdown. Not SETUP.md's recommended path for a real team; tear it down with 'wren uninstall --delete-cluster' (or gcloud container clusters delete) when done")
 	f.StringVar(&opts.GCPProject, "gcp-project", "", "GCP project to create the cluster in (required with --create-cluster)")
 	f.StringVar(&opts.GCPZone, "gcp-zone", "us-central1-a", "zone for the --create-cluster GKE cluster")
 	f.StringVar(&opts.GCPClusterName, "gcp-cluster-name", "wren", "name for the --create-cluster GKE cluster")
