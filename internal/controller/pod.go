@@ -52,6 +52,29 @@ const (
 	gcsFuseCSIDriver        = "gcsfuse.csi.storage.gke.io"
 	gcsFuseVolumeAnnotation = "gke-gcsfuse/volumes"
 
+	// GCS-FUSE checkpoint-mount egress under the default lockdown (WS-19). The
+	// GKE-injected gke-gcsfuse-sidecar runs as gcsFuseSidecarUID — a uid GKE sets,
+	// verified live on GKE 1.35 / CSI driver v1.22.16 to be 65534 (non-root),
+	// distinct from runnerUID/proxyUID. Its traffic cannot be routed through the
+	// egress-proxy: the injection webhook discards any env/args on a
+	// user-declared sidecar (verified — HTTPS_PROXY is stripped), and gcsfuse
+	// exposes no proxy mount option. So under the default iptables lockdown it
+	// must reach Cloud Storage + the metadata server directly. To keep that hole
+	// tight, the pod pins storage.googleapis.com to the restricted Google APIs
+	// VIP (a fixed /30) via hostAliases — instead of its broad, rotating public
+	// GFE ranges — and the lockdown allows this uid to reach ONLY that /30 and the
+	// metadata /32 (see internal/podruntime/lockdown.go). If GKE ever changes the
+	// sidecar uid, the exemption simply stops matching and the mount fails closed
+	// (never opens the hole to the runner). Requires Private Google Access on the
+	// node subnet so the VIP routes — a documented prerequisite (SETUP.md).
+	gcsFuseSidecarUID     int64 = 65534
+	gcsStorageHost              = "storage.googleapis.com"
+	gcsRestrictedAPIsVIP        = "199.36.153.4"    // restricted.googleapis.com VIP
+	gcsRestrictedAPIsCIDR       = "199.36.153.4/30" // the VIP's /30
+	gcpMetadataHost             = "metadata.google.internal"
+	gcpMetadataIP               = "169.254.169.254"
+	gcpMetadataCIDR             = "169.254.169.254/32"
+
 	// DefaultCheckpointKSA is the Kubernetes ServiceAccount used ONLY by pods
 	// that have the GCS checkpoint mount enabled. It is annotated
 	// iam.gke.io/gcp-service-account so the CSI sidecar authenticates to GCS via
@@ -439,6 +462,8 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 
 	var podAnnotations map[string]string
 	var saName string
+	var hostAliases []corev1.HostAlias
+	gcsMount := cfg.CheckpointGCSMount && run.Spec.Workspace.Checkpoint.Bucket != ""
 	// GCS checkpoint mount (WS-18): a CSI volume backed by the run's checkpoint
 	// bucket, mounted into the checkpointer container ONLY. The checkpointer is a
 	// trusted native sidecar; the harness runs untrusted model-generated code and
@@ -446,7 +471,7 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 	// its own workspace PVC. This is the same trust-tier reasoning as the
 	// egress-proxy/runner uid split (code standards rule #1) — the invariant is
 	// pinned here in code and asserted by TestBuildAgentPod_GCSMount_HarnessNever*.
-	if cfg.CheckpointGCSMount && run.Spec.Workspace.Checkpoint.Bucket != "" {
+	if gcsMount {
 		volumes = append(volumes, corev1.Volume{
 			Name: VolumeCheckpoints,
 			VolumeSource: corev1.VolumeSource{
@@ -468,6 +493,18 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 		// dedicated KSA — applied only here, so pods without the mount keep the
 		// namespace default KSA untouched (WS-18 item 4).
 		saName = cfg.checkpointKSA()
+		// Pin storage.googleapis.com to the restricted Google APIs VIP (a fixed
+		// /30) and metadata.google.internal to the GCE metadata IP (WS-19). This
+		// lets the lockdown's gcs-fuse exemption be destination-scoped to two small
+		// stable CIDRs instead of Storage's broad, rotating public ranges, and lets
+		// the credential fetch resolve with no DNS under lockdown. hostAliases
+		// applies to every container's /etc/hosts, but only the gcs-fuse sidecar
+		// (and only its uid) is granted egress to these destinations, so the
+		// untrusted harness gains nothing. See the gcsFuseSidecarUID comment.
+		hostAliases = []corev1.HostAlias{
+			{IP: gcsRestrictedAPIsVIP, Hostnames: []string{gcsStorageHost}},
+			{IP: gcpMetadataIP, Hostnames: []string{gcpMetadataHost}},
+		}
 	}
 
 	return &corev1.Pod{
@@ -491,9 +528,10 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 			// is in place before anything else touches the network; then the
 			// egress-proxy sidecar comes up; then hydrate (which needs egress to
 			// clone); then the remaining sidecars; then the harness.
-			InitContainers: initContainers(cfg, egressProxy, hydrate, checkpointer, gateway),
+			InitContainers: initContainers(cfg, gcsMount, egressProxy, hydrate, checkpointer, gateway),
 			Containers:     []corev1.Container{harness},
 			Volumes:        volumes,
+			HostAliases:    hostAliases,
 		},
 	}
 }
@@ -502,28 +540,39 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 // privileged egress-lockdown container when enforcement is on. With enforcement
 // off the lockdown container is omitted entirely (the escape hatch); the run's
 // EgressEnforcement=Disabled condition then records the weaker posture.
-func initContainers(cfg PodConfig, egressProxy, hydrate, checkpointer, gateway corev1.Container) []corev1.Container {
+func initContainers(cfg PodConfig, gcsMount bool, egressProxy, hydrate, checkpointer, gateway corev1.Container) []corev1.Container {
 	rest := []corev1.Container{egressProxy, hydrate, checkpointer, gateway}
 	if cfg.enforcementMode() == EgressEnforcementOff {
 		return rest
 	}
-	return append([]corev1.Container{buildLockdownContainer(cfg)}, rest...)
+	return append([]corev1.Container{buildLockdownContainer(cfg, gcsMount)}, rest...)
 }
 
 // buildLockdownContainer builds the egress-lockdown init container: the
 // wren-runtime image invoked with the egress-lockdown role, running privileged
 // enough to program iptables and nothing more. It carries the proxy port and
 // uid the iptables rules match on.
-func buildLockdownContainer(cfg PodConfig) corev1.Container {
+func buildLockdownContainer(cfg PodConfig, gcsMount bool) corev1.Container {
+	env := []corev1.EnvVar{
+		{Name: "WREN_EGRESS_PORT", Value: cfg.egressPort()},
+		{Name: "WREN_PROXY_UID", Value: fmt.Sprintf("%d", proxyUID)},
+	}
+	if gcsMount {
+		// Narrow gcs-fuse exemption (WS-19): only the sidecar's uid, only the
+		// restricted Google APIs VIP (where storage.googleapis.com is pinned) and
+		// the metadata server. The runner uid can never match it. See the
+		// gcsFuseSidecarUID comment and internal/podruntime/lockdown.go.
+		env = append(env,
+			corev1.EnvVar{Name: "WREN_GCSFUSE_UID", Value: fmt.Sprintf("%d", gcsFuseSidecarUID)},
+			corev1.EnvVar{Name: "WREN_GCSFUSE_DST_CIDRS", Value: gcsRestrictedAPIsCIDR + "," + gcpMetadataCIDR},
+		)
+	}
 	return corev1.Container{
 		Name:            InitEgressLockdown,
 		Image:           cfg.Images.Runtime,
 		Args:            []string{InitEgressLockdown},
 		SecurityContext: lockdownSecurityContext(),
-		Env: []corev1.EnvVar{
-			{Name: "WREN_EGRESS_PORT", Value: cfg.egressPort()},
-			{Name: "WREN_PROXY_UID", Value: fmt.Sprintf("%d", proxyUID)},
-		},
+		Env:             env,
 	}
 }
 
