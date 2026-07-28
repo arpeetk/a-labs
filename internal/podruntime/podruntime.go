@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/summiteight/wren/internal/blob"
 	"github.com/summiteight/wren/internal/egress"
 	"github.com/summiteight/wren/internal/finalize"
 	"github.com/summiteight/wren/internal/github"
@@ -389,6 +390,68 @@ func RunSidecar(ctx context.Context, out io.Writer, name string) error {
 	}
 }
 
+// RunCheckpointer runs the checkpointer sidecar. When a GCS checkpoint mount is
+// configured (both WREN_CHECKPOINT_BUCKET and WREN_CHECKPOINT_MOUNT_PATH set —
+// the operator sets the mount-path env only when --checkpoint-gcs-mount added
+// the CSI volume), it first runs a one-shot mount self-check: a Put+Get+List
+// round-trip against a small object, proving the mount is live and writable.
+// It then falls through to the shared sidecar liveness loop.
+//
+// This is NOT the checkpoint feature (interval snapshots + restore-on-resume
+// stay deferred — WS-8); it is WS-18's "prove the mount end to end" hook. With
+// no mount configured the behavior is identical to the plain sidecar stub, so
+// runs without the feature are completely unaffected. The self-check is
+// deliberately non-fatal: this is an experimental liveness sidecar, and
+// crash-looping it would abort the whole pod — so a failure is logged loudly
+// and the sidecar continues as a stub (spec §5.5).
+func RunCheckpointer(ctx context.Context, out io.Writer, role string) error {
+	bucket := os.Getenv("WREN_CHECKPOINT_BUCKET")
+	mountPath := os.Getenv("WREN_CHECKPOINT_MOUNT_PATH")
+	if bucket != "" && mountPath != "" {
+		em := harness.NewEmitter(out)
+		if err := mountSelfCheck(ctx, em, mountPath, os.Getenv("WREN_RUN_ID")); err != nil {
+			em.Message(fmt.Sprintf("%s: mount self-check FAILED at %s: %v", role, mountPath, err))
+		}
+	}
+	return RunSidecar(ctx, out, role)
+}
+
+// mountSelfCheck writes, reads back, and lists a small self-check object through
+// the mounted store, returning an error on any step or a read-back mismatch. On
+// success it logs a clear PASSED line naming the object and mount path — the
+// hook the WS-18 live proof asserts on (and cross-checks with gcloud).
+func mountSelfCheck(ctx context.Context, em *harness.Emitter, mountPath, runID string) error {
+	if runID == "" {
+		runID = "unknown"
+	}
+	store := blob.NewMountStore(mountPath, "")
+	key := "_wren-mount-check/" + runID + ".txt"
+	payload := fmt.Sprintf("wren mount self-check run=%s at=%s\n", runID, time.Now().UTC().Format(time.RFC3339Nano))
+
+	if err := store.Put(ctx, key, strings.NewReader(payload)); err != nil {
+		return fmt.Errorf("put: %w", err)
+	}
+	rc, err := store.Get(ctx, key)
+	if err != nil {
+		return fmt.Errorf("get: %w", err)
+	}
+	got, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		return fmt.Errorf("read: %w", err)
+	}
+	if string(got) != payload {
+		return fmt.Errorf("read-back mismatch: wrote %d bytes, read %d", len(payload), len(got))
+	}
+	objs, err := store.List(ctx, "_wren-mount-check/")
+	if err != nil {
+		return fmt.Errorf("list: %w", err)
+	}
+	em.Message(fmt.Sprintf("checkpointer: mount self-check PASSED — wrote+read+listed %s (%d bytes, %d object(s) under prefix) at %s",
+		key, len(got), len(objs), mountPath))
+	return nil
+}
+
 // Roles that the dispatcher understands.
 const (
 	RoleHarness        = "harness"
@@ -410,7 +473,9 @@ func Dispatch(ctx context.Context, out io.Writer, role, specPath string) error {
 		return RunEgressProxy(ctx, out)
 	case RoleEgressLockdown:
 		return RunLockdown(ctx, out, DefaultLockdownConfig())
-	case RoleCheckpointer, RoleGateway:
+	case RoleCheckpointer:
+		return RunCheckpointer(ctx, out, role)
+	case RoleGateway:
 		return RunSidecar(ctx, out, role)
 	default:
 		return fmt.Errorf("unknown role %q", role)

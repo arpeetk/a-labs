@@ -31,17 +31,33 @@ const (
 	runnerUID int64 = 65532
 	proxyUID  int64 = 65533
 
-	VolumeWorkspace = "workspace"
-	VolumeIPC       = "ipc"
-	VolumeRunSpec   = "runspec"
-	VolumeMCP       = "mcp"
-	VolumeTmp       = "tmp"
-	VolumeHome      = "home"
+	VolumeWorkspace   = "workspace"
+	VolumeIPC         = "ipc"
+	VolumeRunSpec     = "runspec"
+	VolumeMCP         = "mcp"
+	VolumeTmp         = "tmp"
+	VolumeHome        = "home"
+	VolumeCheckpoints = "checkpoints"
 
-	MountIPC  = "/var/run/wren"
-	MountMCP  = "/etc/wren/mcp"
-	MountTmp  = "/tmp"
-	MountHome = "/home/agent"
+	MountIPC         = "/var/run/wren"
+	MountMCP         = "/etc/wren/mcp"
+	MountTmp         = "/tmp"
+	MountHome        = "/home/agent"
+	MountCheckpoints = "/mnt/checkpoints"
+
+	// gcsFuseCSIDriver is GKE's Cloud Storage FUSE CSI driver; it surfaces a GCS
+	// bucket as a POSIX filesystem inside the container. gcsFuseVolumeAnnotation
+	// is the pod annotation its sidecar-injection webhook requires — set only
+	// when the mount is actually added (WS-18, spec §5.5).
+	gcsFuseCSIDriver        = "gcsfuse.csi.storage.gke.io"
+	gcsFuseVolumeAnnotation = "gke-gcsfuse/volumes"
+
+	// DefaultCheckpointKSA is the Kubernetes ServiceAccount used ONLY by pods
+	// that have the GCS checkpoint mount enabled. It is annotated
+	// iam.gke.io/gcp-service-account so the CSI sidecar authenticates to GCS via
+	// Workload Identity. Pods without the mount keep the namespace "default" KSA
+	// unchanged — no new identity, no behavior change (WS-18 item 4).
+	DefaultCheckpointKSA = "wren-checkpointer"
 
 	LabelRun       = "wren.dev/run"
 	LabelComponent = "wren.dev/component"
@@ -88,6 +104,25 @@ type PodConfig struct {
 	// EgressEnforcement selects the bypass-prevention mechanism (default
 	// iptables). Empty is treated as iptables.
 	EgressEnforcement EgressEnforcement
+	// CheckpointGCSMount enables mounting the run's checkpoint bucket into the
+	// checkpointer container via the GCS FUSE CSI driver (WS-18). Off by default:
+	// experimental, requires the CSI addon + a Workload Identity binding, and the
+	// real checkpointer feature does not exist yet. The mount is added only when
+	// this is true AND the run sets a checkpoint bucket.
+	CheckpointGCSMount bool
+	// CheckpointKSA is the Kubernetes ServiceAccount bound (via Workload
+	// Identity) to a GCP SA with objectAdmin on the checkpoint bucket. Applied to
+	// the pod ONLY when the GCS mount is added; empty falls back to
+	// DefaultCheckpointKSA.
+	CheckpointKSA string
+}
+
+// checkpointKSA is the ServiceAccount for GCS-mount pods, defaulting when unset.
+func (c PodConfig) checkpointKSA() string {
+	if c.CheckpointKSA != "" {
+		return c.CheckpointKSA
+	}
+	return DefaultCheckpointKSA
 }
 
 // enforcementMode normalizes the configured mode, defaulting to iptables.
@@ -402,15 +437,50 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 		harness.VolumeMounts = append(harness.VolumeMounts, mcpMount)
 	}
 
+	var podAnnotations map[string]string
+	var saName string
+	// GCS checkpoint mount (WS-18): a CSI volume backed by the run's checkpoint
+	// bucket, mounted into the checkpointer container ONLY. The checkpointer is a
+	// trusted native sidecar; the harness runs untrusted model-generated code and
+	// must never hold a credential or a writable path to durable storage outside
+	// its own workspace PVC. This is the same trust-tier reasoning as the
+	// egress-proxy/runner uid split (code standards rule #1) — the invariant is
+	// pinned here in code and asserted by TestBuildAgentPod_GCSMount_HarnessNever*.
+	if cfg.CheckpointGCSMount && run.Spec.Workspace.Checkpoint.Bucket != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: VolumeCheckpoints,
+			VolumeSource: corev1.VolumeSource{
+				CSI: &corev1.CSIVolumeSource{
+					Driver:           gcsFuseCSIDriver,
+					VolumeAttributes: map[string]string{"bucketName": gcsBucketName(run.Spec.Workspace.Checkpoint.Bucket)},
+				},
+			},
+		})
+		// Mount into the checkpointer sidecar only — never the harness. (checkpointer
+		// is passed by value into initContainers below, so mutate it here first.)
+		checkpointer.VolumeMounts = append(checkpointer.VolumeMounts,
+			corev1.VolumeMount{Name: VolumeCheckpoints, MountPath: MountCheckpoints})
+		checkpointer.Env = append(checkpointer.Env,
+			corev1.EnvVar{Name: "WREN_CHECKPOINT_MOUNT_PATH", Value: MountCheckpoints})
+		// The CSI sidecar-injection webhook only runs when this annotation is present.
+		podAnnotations = map[string]string{gcsFuseVolumeAnnotation: "true"}
+		// The mount's GCS credentials come from Workload Identity bound to this
+		// dedicated KSA — applied only here, so pods without the mount keep the
+		// namespace default KSA untouched (WS-18 item 4).
+		saName = cfg.checkpointKSA()
+	}
+
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      podName(run),
-			Namespace: run.Namespace,
-			Labels:    runLabels(run),
+			Name:        podName(run),
+			Namespace:   run.Namespace,
+			Labels:      runLabels(run),
+			Annotations: podAnnotations,
 		},
 		Spec: corev1.PodSpec{
 			RestartPolicy:                corev1.RestartPolicyNever, // operator owns re-creation
 			RuntimeClassName:             runtimeClassName(run.Spec.Sandbox.RuntimeClass),
+			ServiceAccountName:           saName,
 			AutomountServiceAccountToken: ptr(false),
 			SecurityContext: &corev1.PodSecurityContext{
 				RunAsNonRoot:   ptr(true),
@@ -469,6 +539,18 @@ func checkpointInterval(run *wrenv1.AgentRun) int32 {
 		return iv
 	}
 	return defaultCheckpointInterval
+}
+
+// gcsBucketName extracts the bare bucket name the CSI driver's bucketName
+// attribute wants from a checkpoint-bucket value. It strips the "gs://" scheme
+// and keeps only the first path segment (the bucket); any prefix path within
+// the bucket is handled by the Store's per-run prefix, not the mount.
+func gcsBucketName(bucket string) string {
+	b := strings.TrimPrefix(bucket, "gs://")
+	if i := strings.IndexByte(b, '/'); i >= 0 {
+		b = b[:i]
+	}
+	return b
 }
 
 func joinAllowlist(list []string) string {
