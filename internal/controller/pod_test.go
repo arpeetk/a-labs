@@ -320,3 +320,142 @@ func TestBuildAgentPod_ProxyUIDSeparation(t *testing.T) {
 		t.Errorf("harness RunAsUser = %d, want pinned runner uid %d (an unpinned harness image could set USER %d and bypass the lockdown)", got, runnerUID, proxyUID)
 	}
 }
+
+// --- WS-18: GCS checkpoint mount ---
+
+func podVolume(pod *corev1.Pod, name string) *corev1.Volume {
+	for i := range pod.Spec.Volumes {
+		if pod.Spec.Volumes[i].Name == name {
+			return &pod.Spec.Volumes[i]
+		}
+	}
+	return nil
+}
+
+// TestBuildAgentPod_GCSMount_DisabledByDefault: with the flag off (the default),
+// nothing about the pod changes — no CSI volume, no annotation, no ServiceAccount
+// override, and the checkpointer has no checkpoints mount. Runs on clusters
+// without the feature are completely unaffected.
+func TestBuildAgentPod_GCSMount_DisabledByDefault(t *testing.T) {
+	run := testRun() // testRun already sets a checkpoint bucket
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
+
+	if v := podVolume(pod, VolumeCheckpoints); v != nil {
+		t.Error("checkpoints CSI volume present with the flag off; want absent")
+	}
+	if pod.Annotations[gcsFuseVolumeAnnotation] != "" {
+		t.Errorf("gcsfuse annotation set with the flag off: %q", pod.Annotations[gcsFuseVolumeAnnotation])
+	}
+	if pod.Spec.ServiceAccountName != "" {
+		t.Errorf("ServiceAccountName = %q with the flag off; want empty (namespace default)", pod.Spec.ServiceAccountName)
+	}
+	ck := containerByName(pod.Spec.InitContainers, ContainerCheckpointer)
+	if volumeMount(*ck, VolumeCheckpoints) != nil {
+		t.Error("checkpointer has the checkpoints mount with the flag off")
+	}
+}
+
+// TestBuildAgentPod_GCSMount_Enabled: flag on + a bucket set adds the CSI volume
+// (correct driver + bare bucket name), mounts it into the checkpointer only,
+// sets the sidecar-injection annotation, the mount-path env, and the dedicated
+// ServiceAccount.
+func TestBuildAgentPod_GCSMount_Enabled(t *testing.T) {
+	run := testRun()
+	run.Spec.Workspace.Checkpoint.Bucket = "gs://wren-ckpt-bucket/some/prefix"
+	pod := buildAgentPod(run, PodConfig{Images: testImages, CheckpointGCSMount: true})
+
+	v := podVolume(pod, VolumeCheckpoints)
+	if v == nil || v.CSI == nil {
+		t.Fatal("expected a CSI checkpoints volume")
+	}
+	if v.CSI.Driver != gcsFuseCSIDriver {
+		t.Errorf("CSI driver = %q, want %q", v.CSI.Driver, gcsFuseCSIDriver)
+	}
+	// bucketName must be the bare bucket, gs:// stripped and any path dropped.
+	if got := v.CSI.VolumeAttributes["bucketName"]; got != "wren-ckpt-bucket" {
+		t.Errorf("bucketName = %q, want %q", got, "wren-ckpt-bucket")
+	}
+	if pod.Annotations[gcsFuseVolumeAnnotation] != "true" {
+		t.Errorf("gcsfuse annotation = %q, want \"true\"", pod.Annotations[gcsFuseVolumeAnnotation])
+	}
+	if pod.Spec.ServiceAccountName != DefaultCheckpointKSA {
+		t.Errorf("ServiceAccountName = %q, want %q", pod.Spec.ServiceAccountName, DefaultCheckpointKSA)
+	}
+	// Automounting the SA token stays off even with the mount + a KSA set; the
+	// CSI sidecar's Workload-Identity auth does not depend on it (WS-18 finding).
+	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
+		t.Error("AutomountServiceAccountToken must remain false with the GCS mount enabled")
+	}
+
+	ck := containerByName(pod.Spec.InitContainers, ContainerCheckpointer)
+	vm := volumeMount(*ck, VolumeCheckpoints)
+	if vm == nil {
+		t.Fatal("checkpointer missing the checkpoints mount")
+	}
+	if vm.MountPath != MountCheckpoints {
+		t.Errorf("checkpointer mount path = %q, want %q", vm.MountPath, MountCheckpoints)
+	}
+	if !hasEnv(ck.Env, "WREN_CHECKPOINT_MOUNT_PATH", MountCheckpoints) {
+		t.Errorf("checkpointer missing WREN_CHECKPOINT_MOUNT_PATH=%s env", MountCheckpoints)
+	}
+}
+
+// TestBuildAgentPod_GCSMount_CustomKSA confirms the operator flag overrides the
+// default KSA name.
+func TestBuildAgentPod_GCSMount_CustomKSA(t *testing.T) {
+	run := testRun()
+	pod := buildAgentPod(run, PodConfig{Images: testImages, CheckpointGCSMount: true, CheckpointKSA: "custom-ksa"})
+	if pod.Spec.ServiceAccountName != "custom-ksa" {
+		t.Errorf("ServiceAccountName = %q, want custom-ksa", pod.Spec.ServiceAccountName)
+	}
+}
+
+// TestBuildAgentPod_GCSMount_NoBucket: the flag on but no bucket set adds
+// nothing — the mount requires both.
+func TestBuildAgentPod_GCSMount_NoBucket(t *testing.T) {
+	run := testRun()
+	run.Spec.Workspace.Checkpoint.Bucket = ""
+	pod := buildAgentPod(run, PodConfig{Images: testImages, CheckpointGCSMount: true})
+	if v := podVolume(pod, VolumeCheckpoints); v != nil {
+		t.Error("checkpoints volume added despite an empty bucket")
+	}
+	if pod.Spec.ServiceAccountName != "" {
+		t.Errorf("ServiceAccountName = %q with no bucket; want empty", pod.Spec.ServiceAccountName)
+	}
+}
+
+// TestBuildAgentPod_GCSMount_HarnessNeverMounts is the load-bearing invariant
+// test (code standards rule #1, WS-18 item 3): the untrusted harness container
+// must NEVER see the GCS checkpoint volume — neither its VolumeMounts nor any
+// mount at the checkpoints path — whether the feature is enabled or disabled.
+// It mirrors TestBuildAgentPod_ProxyUIDSeparation: pin the boundary in code, and
+// have a test assert the pin. The checkpointer holds the bucket credential and a
+// writable path to durable storage; the harness runs model-generated code and
+// must not.
+func TestBuildAgentPod_GCSMount_HarnessNeverMounts(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		run := testRun()
+		pod := buildAgentPod(run, PodConfig{Images: testImages, CheckpointGCSMount: enabled})
+		h := containerByName(pod.Spec.Containers, ContainerHarness)
+		if h == nil {
+			t.Fatalf("enabled=%v: no harness container", enabled)
+		}
+		for _, vm := range h.VolumeMounts {
+			if vm.Name == VolumeCheckpoints {
+				t.Errorf("enabled=%v: harness has the checkpoints volume mount %q — SECURITY BOUNDARY VIOLATION", enabled, vm.Name)
+			}
+			if vm.MountPath == MountCheckpoints {
+				t.Errorf("enabled=%v: harness mounts something at the checkpoints path %q", enabled, MountCheckpoints)
+			}
+		}
+	}
+}
+
+func hasEnv(env []corev1.EnvVar, name, val string) bool {
+	for _, e := range env {
+		if e.Name == name && e.Value == val {
+			return true
+		}
+	}
+	return false
+}

@@ -262,7 +262,12 @@ real PR without touching github.com.
   GKE Autopilot) — `config/netpol/` has a weaker NetworkPolicy layer for that
   path. Residual: a runc escape to the node (gVisor/Kata, M4).
   **checkpointer** is an experimental liveness stub (no snapshots; crash-resume
-  is PVC reattach + resume-mode — spec §5.5 v0.1); **gateway** is still a
+  is PVC reattach + resume-mode — spec §5.5 v0.1). WS-18 made *one* narrow thing
+  real: an opt-in GCS-FUSE **mount** into the checkpointer container
+  (`--checkpoint-gcs-mount`, default off) backed by `internal/blob.MountStore`,
+  with a startup Put/Get/List self-check proven live on GKE via Workload
+  Identity — but the actual checkpoint feature (interval snapshots + restore)
+  still does not exist. **gateway** is still a
   liveness stand-in (run results reach status via the operator's pods/log
   scrape, WS-11; the event bridge is the v0.2 target).
 - **Transport:** control-plane API is HTTP/JSON (target: gRPC + Connect).

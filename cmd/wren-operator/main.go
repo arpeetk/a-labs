@@ -43,6 +43,10 @@ func main() {
 	var egressEnforcement string
 	flag.StringVar(&egressEnforcement, "egress-enforcement", string(controller.EgressEnforcementIptables),
 		"egress bypass enforcement: iptables (privileged lockdown init container, default) | off (escape hatch for clusters that forbid privileged init containers, e.g. GKE Autopilot)")
+	flag.BoolVar(&podCfg.CheckpointGCSMount, "checkpoint-gcs-mount", false,
+		"experimental (WS-18): mount the run's checkpoint bucket into the checkpointer container via the GKE Cloud Storage FUSE CSI driver; requires the GcsFuseCsiDriver addon + a Workload Identity binding on --checkpoint-ksa")
+	flag.StringVar(&podCfg.CheckpointKSA, "checkpoint-ksa", controller.DefaultCheckpointKSA,
+		"Kubernetes ServiceAccount (Workload-Identity-bound to a GCP SA with objectAdmin on the checkpoint bucket) applied to pods with --checkpoint-gcs-mount enabled")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
