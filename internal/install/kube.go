@@ -418,7 +418,13 @@ func (k *realKube) SetServiceType(ctx context.Context, ns, name, svcType string)
 }
 
 // WaitDeployments polls until each Deployment reports Available (mirrors
-// `kubectl rollout status`, without exec'ing kubectl).
+// `kubectl rollout status`, without exec'ing kubectl). On a timeout, it makes
+// one attempt to diagnose *why* before giving up: a stuck image pull is a
+// common, easy-to-miss GKE/Artifact-Registry IAM gap (SETUP.md's node-SA
+// note), and "control plane did not become Ready" + "check the logs" is a
+// dead end for it — an ImagePullBackOff pod never starts, so there ARE no
+// logs. diagnosePullFailure turns that into an actionable, project-specific
+// remediation instead (WS-16 follow-up: preflight the GKE IAM gap).
 func (k *realKube) WaitDeployments(ctx context.Context, ns string, names []string, timeout time.Duration) error {
 	deploys := k.cs.AppsV1().Deployments(ns)
 	for _, name := range names {
@@ -443,10 +449,59 @@ func (k *realKube) WaitDeployments(ctx context.Context, ns string, names []strin
 			return false, nil
 		})
 		if err != nil {
+			if diag := k.diagnosePullFailure(ctx, ns, name); diag != "" {
+				return fmt.Errorf("deployment/%s: %w\n%s", name, err, diag)
+			}
 			return fmt.Errorf("deployment/%s: %w", name, err)
 		}
 	}
 	return nil
+}
+
+// diagnosePullFailure looks for a stuck image pull among the pods behind a
+// Deployment that failed to become Ready, and returns an actionable
+// diagnostic if it finds one. Returns "" if it can't identify a pull failure
+// (some other cause — the caller's bare wait-timeout error is all there is).
+func (k *realKube) diagnosePullFailure(ctx context.Context, ns, deploymentName string) string {
+	pods, err := k.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=" + deploymentName,
+	})
+	if err != nil {
+		return ""
+	}
+	for _, pod := range pods.Items {
+		statuses := append(append([]corev1.ContainerStatus{}, pod.Status.InitContainerStatuses...), pod.Status.ContainerStatuses...)
+		for _, cs := range statuses {
+			w := cs.State.Waiting
+			if w == nil || (w.Reason != "ImagePullBackOff" && w.Reason != "ErrImagePull") {
+				continue
+			}
+			return imagePullRemedy(cs.Image)
+		}
+	}
+	return ""
+}
+
+// imagePullRemedy builds a registry-appropriate remediation for a stuck image
+// pull. Artifact Registry (*-docker.pkg.dev) needs a specific, easy-to-miss
+// IAM grant on the node service account — the project ID is parsed straight
+// out of the failing image ref (LOCATION-docker.pkg.dev/PROJECT/...), so the
+// printed command is copy-pasteable, not a placeholder. Anything else gets a
+// generic pointer; this only recognizes the one registry shape Wren's own
+// docs (SETUP.md) call out as a known gap.
+func imagePullRemedy(image string) string {
+	parts := strings.SplitN(image, "/", 3)
+	if len(parts) < 2 || !strings.HasSuffix(parts[0], "-docker.pkg.dev") {
+		return fmt.Sprintf("cause: the cluster's nodes can't pull %q — check registry credentials/pull permissions for this cluster's nodes.", image)
+	}
+	project := parts[1]
+	return fmt.Sprintf(`cause: the cluster's nodes can't pull %q — this is almost always a missing
+Artifact Registry IAM grant on the node service account (SETUP.md's GKE note).
+remedy: grant it, then re-run 'wren install':
+  PROJNUM=$(gcloud projects describe %s --format='value(projectNumber)')
+  gcloud projects add-iam-policy-binding %s \
+    --member="serviceAccount:${PROJNUM}-compute@developer.gserviceaccount.com" \
+    --role="roles/artifactregistry.reader"`, image, project, project)
 }
 
 // DeleteNamespace deletes a namespace (absent is fine) and waits until the API

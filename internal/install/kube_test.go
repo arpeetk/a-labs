@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -296,6 +297,84 @@ func TestWaitDeploymentsTimesOut(t *testing.T) {
 	err := k.WaitDeployments(context.Background(), SystemNamespace, []string{OperatorDeployment}, 50*time.Millisecond)
 	if err == nil {
 		t.Fatal("expected timeout for a never-Available deployment")
+	}
+}
+
+func TestWaitDeploymentsTimesOutWithArtifactRegistryPullDiagnosis(t *testing.T) {
+	d := deployment(SystemNamespace, OperatorDeployment, "operator", "img")
+	image := "us-central1-docker.pkg.dev/wren-gke-fdea81/wren/operator:abc123"
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: SystemNamespace, Name: "wren-operator-x",
+			Labels: map[string]string{"app.kubernetes.io/name": OperatorDeployment},
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Image: image,
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "ImagePullBackOff"}},
+			}},
+		},
+	}
+	k := fakeKube(d, pod)
+	err := k.WaitDeployments(context.Background(), SystemNamespace, []string{OperatorDeployment}, 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout for a never-Available deployment")
+	}
+	for _, want := range []string{image, "gcloud projects add-iam-policy-binding wren-gke-fdea81", "roles/artifactregistry.reader"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q; got:\n%s", want, err)
+		}
+	}
+}
+
+func TestWaitDeploymentsTimesOutNoDeploymentDiagnosis(t *testing.T) {
+	// No pods behind the deployment at all (e.g. a scheduling failure, not a
+	// pull failure) — must fall back to the bare timeout, not fabricate a
+	// diagnosis it can't actually support.
+	d := deployment(SystemNamespace, OperatorDeployment, "operator", "img")
+	k := fakeKube(d)
+	err := k.WaitDeployments(context.Background(), SystemNamespace, []string{OperatorDeployment}, 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout for a never-Available deployment")
+	}
+	if strings.Contains(err.Error(), "cause:") {
+		t.Errorf("expected no pull diagnosis without a stuck pod, got: %s", err)
+	}
+}
+
+func TestImagePullRemedy(t *testing.T) {
+	cases := []struct {
+		name, image string
+		want        []string
+		wantNotAR   bool
+	}{
+		{
+			name:  "artifact registry",
+			image: "us-central1-docker.pkg.dev/my-proj/wren/apiserver:v1",
+			want: []string{
+				"my-proj",
+				"gcloud projects add-iam-policy-binding my-proj",
+				"roles/artifactregistry.reader",
+			},
+		},
+		{
+			name:      "docker hub",
+			image:     "wren/runtime:dev",
+			wantNotAR: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := imagePullRemedy(tc.image)
+			if tc.wantNotAR && strings.Contains(got, "artifactregistry") {
+				t.Errorf("expected no Artifact Registry remedy for %q, got: %s", tc.image, got)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("remedy for %q missing %q; got:\n%s", tc.image, want, got)
+				}
+			}
+		})
 	}
 }
 
