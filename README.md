@@ -88,6 +88,9 @@ GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
 
 # kind (local eval): build + kind load, zero credentials
 wren install --kind wren-eval --skip-credentials
+
+# GKE quickstart: provision the cluster too (billable; GKE Standard only) —
+# add --create-cluster --gcp-project <proj> to the --registry line above
 ```
 
 The credential Secrets are read only by the egress-proxy (never the runner).

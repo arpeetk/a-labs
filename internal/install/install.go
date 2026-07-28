@@ -58,6 +58,22 @@ type Options struct {
 	// KindCluster, when set, selects the local-eval path: the kind cluster is
 	// created if absent and the images are built and `kind load`ed into it.
 	KindCluster string
+	// CreateCluster, when set, provisions a fresh GKE Standard cluster to
+	// install into (the GCP equivalent of --kind for quickstart/eval): enable
+	// the container + Artifact Registry APIs, create the cluster, fetch
+	// credentials, wire Artifact Registry auth + the node-SA pull grant, then
+	// run the normal install against it. Requires Registry and GCPProject;
+	// mutually exclusive with KindCluster. GKE Standard only — Autopilot forbids
+	// the WS-1 egress-lockdown privileged init container. See gke.go.
+	CreateCluster bool
+	// GCPProject is the target GCP project (required with CreateCluster).
+	GCPProject string
+	// GCPZone / GCPClusterName / GCPMachineType / GCPNumNodes size the created
+	// cluster (defaults: us-central1-a, wren, e2-standard-2, 1).
+	GCPZone        string
+	GCPClusterName string
+	GCPMachineType string
+	GCPNumNodes    int
 	// ImageTag tags pushed registry images. Empty resolves to the source
 	// tree's short git SHA, falling back to "dev".
 	ImageTag string
@@ -105,6 +121,20 @@ func (o *Options) defaults() {
 	if o.WaitTimeout <= 0 {
 		o.WaitTimeout = 3 * time.Minute
 	}
+	if o.CreateCluster {
+		if o.GCPZone == "" {
+			o.GCPZone = "us-central1-a"
+		}
+		if o.GCPClusterName == "" {
+			o.GCPClusterName = "wren"
+		}
+		if o.GCPMachineType == "" {
+			o.GCPMachineType = "e2-standard-2"
+		}
+		if o.GCPNumNodes <= 0 {
+			o.GCPNumNodes = 1
+		}
+	}
 }
 
 func (o *UninstallOptions) defaults() {
@@ -120,6 +150,9 @@ func (o *UninstallOptions) defaults() {
 func (o *Options) contextName() string {
 	if o.KubeContext != "" {
 		return o.KubeContext
+	}
+	if o.CreateCluster {
+		return GKEContextName(o.GCPProject, o.GCPZone, o.GCPClusterName)
 	}
 	if o.KindCluster != "" {
 		return "kind-" + o.KindCluster
@@ -183,11 +216,22 @@ type Installer struct {
 // credentials → wait → hand-off. Safe to re-run (idempotent throughout).
 func (in *Installer) Install(ctx context.Context, opts Options) error {
 	opts.defaults()
-	if opts.Registry == "" && opts.KindCluster == "" {
-		return errors.New("one of --registry (build + push images for a real cluster) or --kind (build + load into kind) is required")
-	}
 	if opts.Registry != "" && opts.KindCluster != "" {
 		return errors.New("--registry and --kind are mutually exclusive")
+	}
+	if opts.CreateCluster {
+		if opts.KindCluster != "" {
+			return errors.New("--create-cluster and --kind are mutually exclusive (--create-cluster provisions a GKE cluster; --kind is local)")
+		}
+		if opts.GCPProject == "" {
+			return errors.New("--create-cluster requires --gcp-project <project>")
+		}
+		if opts.Registry == "" {
+			return errors.New("--create-cluster requires --registry <prefix> (the cluster is created, but images still need somewhere to push to)")
+		}
+	}
+	if opts.Registry == "" && opts.KindCluster == "" {
+		return errors.New("one of --registry (build + push images for a real cluster) or --kind (build + load into kind) is required")
 	}
 	if opts.Expose != "" && opts.Expose != "LoadBalancer" {
 		return fmt.Errorf("--expose must be LoadBalancer or empty, got %q", opts.Expose)
@@ -202,6 +246,9 @@ func (in *Installer) Install(ctx context.Context, opts Options) error {
 		return err
 	}
 	if err := st.ensureKind(ctx); err != nil {
+		return err
+	}
+	if err := st.provisionGKE(ctx); err != nil {
 		return err
 	}
 	if err := st.checkServer(ctx); err != nil {
@@ -288,6 +335,17 @@ func (s *steps) preflight(ctx context.Context) error {
 	}
 	if s.opts.KindCluster != "" && !r.LookPath("kind") {
 		return errors.New("kind not found on PATH\nremedy: brew install kind (or https://kind.sigs.k8s.io/docs/user/quick-start/#installation)")
+	}
+	// --create-cluster drives gcloud; fail here (before any gcloud call) with a
+	// clear remedy rather than a confusing failure three steps into provisioning.
+	if s.opts.CreateCluster {
+		if !r.LookPath("gcloud") {
+			return errors.New("gcloud not found on PATH\nremedy: install the Google Cloud SDK (https://cloud.google.com/sdk/docs/install)")
+		}
+		acct, err := r.Output(ctx, "gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
+		if err != nil || strings.TrimSpace(acct) == "" {
+			return errors.New("gcloud has no active authenticated account\nremedy: run `gcloud auth login` (then `gcloud config set project <project>`)")
+		}
 	}
 	return nil
 }

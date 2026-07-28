@@ -81,6 +81,40 @@ wren install --kind wren-eval --skip-credentials
 (Use any cluster name; omit `--skip-credentials` to also store real
 credentials in the local cluster.)
 
+## GKE quickstart — provision the cluster too (`--create-cluster`)
+
+The headline GKE path above assumes you already have a cluster. For a fast
+eval — or a genuinely brand-new GCP project — `--create-cluster` provisions
+one for you in a single command, the cloud equivalent of `--kind`:
+
+```sh
+GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
+  wren install --create-cluster \
+    --gcp-project my-proj \
+    --registry us-central1-docker.pkg.dev/my-proj/wren
+```
+
+This enables the `container` + `artifactregistry` APIs, creates a **GKE
+Standard** cluster (defaults: zone `us-central1-a`, name `wren`, one
+`e2-standard-2` node — override with `--gcp-zone`/`--gcp-cluster-name`/
+`--gcp-machine-type`/`--gcp-num-nodes`), fetches its credentials, wires docker
+→ Artifact Registry auth, and grants the node service account
+`roles/artifactregistry.reader` — so the `ImagePullBackOff` gap the GKE note
+above warns about simply can't happen. It then runs the normal install into
+the new cluster. Re-running is idempotent (an existing cluster of that name is
+reused, not recreated).
+
+> **This creates real, billable Google Cloud infrastructure.** `--create-cluster`
+> is a quickstart/eval convenience, **not** the recommended path for a real
+> team — sizing, region, and cost are decisions a team should usually make
+> deliberately, so the bring-your-own-cluster flow above stays the headline.
+> **GKE Standard only:** Autopilot is unsupported because it forbids the
+> privileged init container Wren's egress lockdown (WS-1) needs. Preflight
+> requires `gcloud` on `PATH` and an active account (`gcloud auth login`).
+> Tear the cluster down when you're done: `gcloud container clusters delete
+> wren --zone us-central1-a --project my-proj`. (A `wren uninstall
+> --delete-cluster` counterpart is a natural follow-up, not yet built.)
+
 ## Engineer onboarding
 
 Once install prints "Wren control plane is Ready", each engineer:
