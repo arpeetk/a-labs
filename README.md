@@ -94,9 +94,10 @@ wren install --kind wren-eval --skip-credentials
 ```
 
 The credential Secrets are read only by the egress-proxy (never the runner).
-`wren uninstall --confirm` removes the install. Engineers then port-forward,
-`wren login`, `wren project create`, `wren run create` — see
-[`SETUP.md`](SETUP.md#engineer-onboarding).
+`wren uninstall --confirm` removes the install (add `--delete-cluster
+--gcp-project <proj>` to also tear down a `--create-cluster` cluster).
+Engineers then port-forward, `wren login`, `wren project create`,
+`wren run create` — see [`SETUP.md`](SETUP.md#engineer-onboarding).
 
 ## Architecture at a glance
 

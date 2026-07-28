@@ -73,7 +73,9 @@ func newInstallCmd() *cobra.Command {
 
 // newUninstallCmd wires `wren uninstall`: remove the install (namespaces +
 // CRDs). Destructive and gated behind --confirm — deleting the CRDs deletes
-// every AgentRun cluster-wide.
+// every AgentRun cluster-wide. --delete-cluster (WS-17 follow-up) goes one
+// step further and permanently deletes the underlying GKE cluster too — the
+// counterpart to `wren install --create-cluster`.
 func newUninstallCmd() *cobra.Command {
 	var opts install.UninstallOptions
 	var kubeContext string
@@ -83,8 +85,12 @@ func newUninstallCmd() *cobra.Command {
 		Short: "Remove the Wren control plane (namespaces + CRDs) from the cluster",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if !confirm {
-				return fmt.Errorf("uninstall removes namespaces %s, %s, all Wren CRDs (every AgentRun goes with them) and the cluster RBAC — re-run with --confirm to proceed",
+				msg := fmt.Sprintf("uninstall removes namespaces %s, %s, all Wren CRDs (every AgentRun goes with them) and the cluster RBAC",
 					"wren-system", opts.RunNamespace)
+				if opts.DeleteCluster {
+					msg += fmt.Sprintf("; --delete-cluster will also permanently delete GKE cluster %q in project %s", opts.GCPClusterName, opts.GCPProject)
+				}
+				return fmt.Errorf("%s — re-run with --confirm to proceed", msg)
 			}
 			opts.KubeContext = kubeContext
 			in, err := install.New(kubeContext, cmd.OutOrStdout())
@@ -97,6 +103,10 @@ func newUninstallCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&kubeContext, "kube-context", "", "kubectl context (default: current)")
 	f.StringVar(&opts.RunNamespace, "run-namespace", "wren-runs", "run namespace to remove (must match install's)")
+	f.BoolVar(&opts.DeleteCluster, "delete-cluster", false, "also permanently delete the underlying GKE cluster (the uninstall counterpart to install --create-cluster); requires --gcp-project; still gated by --confirm")
+	f.StringVar(&opts.GCPProject, "gcp-project", "", "GCP project the cluster lives in (required with --delete-cluster)")
+	f.StringVar(&opts.GCPZone, "gcp-zone", "us-central1-a", "zone of the cluster to delete (--delete-cluster)")
+	f.StringVar(&opts.GCPClusterName, "gcp-cluster-name", "wren", "name of the cluster to delete (--delete-cluster)")
 	f.BoolVar(&confirm, "confirm", false, "confirm the destructive uninstall")
 	return cmd
 }

@@ -114,6 +114,16 @@ type UninstallOptions struct {
 	RunNamespace string
 	// WaitTimeout bounds the wait for namespace deletion.
 	WaitTimeout time.Duration
+	// DeleteCluster, when set, also permanently deletes the underlying GKE
+	// cluster after the namespaces/cluster-scoped resources are removed — the
+	// `wren uninstall` counterpart to `wren install --create-cluster` (WS-17
+	// follow-up). Requires GCPProject; GCPZone/GCPClusterName default the same
+	// as install's (us-central1-a, wren). Gated behind the same --confirm the
+	// CLI already requires for the namespace/CRD deletion.
+	DeleteCluster  bool
+	GCPProject     string
+	GCPZone        string
+	GCPClusterName string
 }
 
 func (o *Options) defaults() {
@@ -148,6 +158,14 @@ func (o *UninstallOptions) defaults() {
 	}
 	if o.WaitTimeout <= 0 {
 		o.WaitTimeout = 2 * time.Minute
+	}
+	if o.DeleteCluster {
+		if o.GCPZone == "" {
+			o.GCPZone = "us-central1-a"
+		}
+		if o.GCPClusterName == "" {
+			o.GCPClusterName = "wren"
+		}
 	}
 }
 
@@ -292,9 +310,14 @@ func (in *Installer) Install(ctx context.Context, opts Options) error {
 // Uninstall removes the install: the system + run namespaces and every
 // cluster-scoped object the install created (CRDs — deleting them deletes
 // every AgentRun cluster-wide — and cluster RBAC). The CLI gates
-// this behind --confirm.
+// this behind --confirm. With DeleteCluster set (the wren install
+// --create-cluster counterpart), it goes one step further and permanently
+// deletes the underlying GKE cluster too — also gated behind --confirm.
 func (in *Installer) Uninstall(ctx context.Context, opts UninstallOptions) error {
 	opts.defaults()
+	if opts.DeleteCluster && opts.GCPProject == "" {
+		return errors.New("--delete-cluster requires --gcp-project <project>")
+	}
 	if err := in.Kube.DeleteNamespace(ctx, SystemNamespace, opts.WaitTimeout); err != nil {
 		return fmt.Errorf("delete namespace %s: %w", SystemNamespace, err)
 	}
@@ -308,6 +331,11 @@ func (in *Installer) Uninstall(ctx context.Context, opts UninstallOptions) error
 	}
 	fmt.Fprintf(in.Out, "wren uninstalled: namespaces %s, %s and cluster-scoped resources (CRDs, cluster RBAC) removed\n",
 		SystemNamespace, opts.RunNamespace)
+	if opts.DeleteCluster {
+		if err := in.deleteGKECluster(ctx, opts); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -344,13 +372,7 @@ func (s *steps) preflight(ctx context.Context) error {
 	// --create-cluster drives gcloud; fail here (before any gcloud call) with a
 	// clear remedy rather than a confusing failure three steps into provisioning.
 	if s.opts.CreateCluster {
-		if !r.LookPath("gcloud") {
-			return errors.New("gcloud not found on PATH\nremedy: install the Google Cloud SDK (https://cloud.google.com/sdk/docs/install)")
-		}
-		acct, err := r.Output(ctx, "gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)")
-		if err != nil || strings.TrimSpace(acct) == "" {
-			return errors.New("gcloud has no active authenticated account\nremedy: run `gcloud auth login` (then `gcloud config set project <project>`)")
-		}
+		return checkGCloudAuth(ctx, r)
 	}
 	return nil
 }
