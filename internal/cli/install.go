@@ -25,7 +25,11 @@ func newInstallCmd() *cobra.Command {
 			"build and deliver the images, store the agent credentials as proxy Secrets,\n" +
 			"and wait for the control plane to become Ready.\n\n" +
 			"  GKE (real cluster):  wren install --registry us-central1-docker.pkg.dev/PROJ/wren\n" +
-			"  kind (local eval):   wren install --kind wren-eval",
+			"  GKE (provision it):  wren install --create-cluster --gcp-project PROJ \\\n" +
+			"                         --registry us-central1-docker.pkg.dev/PROJ/wren\n" +
+			"  kind (local eval):   wren install --kind wren-eval\n\n" +
+			"--create-cluster is a quickstart/eval convenience (GKE Standard, sane defaults),\n" +
+			"not the recommended path for a real team — it bills real Google Cloud cost.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.KubeContext = kubeContext
 			// Env is the non-interactive credential path; GITHUB_TOKEN falls
@@ -52,6 +56,12 @@ func newInstallCmd() *cobra.Command {
 	f.StringVar(&kubeContext, "kube-context", "", "kubectl context to install into (default: current; kind installs default to kind-<name>)")
 	f.StringVar(&opts.KindCluster, "kind", "", "local eval: create/reuse this kind cluster and load images into it")
 	f.StringVar(&opts.Registry, "registry", "", "image prefix to build (linux/amd64), push, and point the control plane at (e.g. an Artifact Registry path)")
+	f.BoolVar(&opts.CreateCluster, "create-cluster", false, "quickstart/eval: provision a fresh GKE Standard cluster to install into (the GCP equivalent of --kind), then install. Requires --registry and --gcp-project. Creates real, billable Google Cloud infrastructure. GKE Standard only — Autopilot can't run the egress lockdown. Not SETUP.md's recommended path for a real team; tear it down with `gcloud container clusters delete` when done")
+	f.StringVar(&opts.GCPProject, "gcp-project", "", "GCP project to create the cluster in (required with --create-cluster)")
+	f.StringVar(&opts.GCPZone, "gcp-zone", "us-central1-a", "zone for the --create-cluster GKE cluster")
+	f.StringVar(&opts.GCPClusterName, "gcp-cluster-name", "wren", "name for the --create-cluster GKE cluster")
+	f.StringVar(&opts.GCPMachineType, "gcp-machine-type", "e2-standard-2", "node machine type for the --create-cluster GKE cluster")
+	f.IntVar(&opts.GCPNumNodes, "gcp-num-nodes", 1, "node count for the --create-cluster GKE cluster")
 	f.StringVar(&opts.ImageTag, "tag", "", "image tag for --registry pushes (default: source tree's short git SHA, else \"dev\")")
 	f.StringVar(&opts.HarnessImages, "harness-images", "", "comma list of harness images to build/deliver: claude-code,codex,opencode (default: all three; \"none\" skips harness images entirely)")
 	f.StringVar(&opts.SrcDir, "src", ".", "repo checkout to build images from")
@@ -97,6 +107,12 @@ func newUninstallCmd() *cobra.Command {
 func installKubeContext(opts install.Options) string {
 	if opts.KubeContext != "" {
 		return opts.KubeContext
+	}
+	if opts.CreateCluster {
+		// The gke_<project>_<zone>_<name> context provisionGKE's get-credentials
+		// writes — resolved here from the (cobra-defaulted) flags so the rest of
+		// Install targets the created cluster, exactly like the kind path.
+		return install.GKEContextName(opts.GCPProject, opts.GCPZone, opts.GCPClusterName)
 	}
 	if opts.KindCluster != "" {
 		return "kind-" + opts.KindCluster
