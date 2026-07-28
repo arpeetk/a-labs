@@ -17,6 +17,15 @@ transition; this file is the single glance-view for the sprint.
 > review-follow-up ledger below plus a real-implementation test-coverage gap
 > in `internal/launcher`, rather than net-new features.
 
+> **Priority call (2026-07-27, owner):** trying `wren install --registry`
+> against real GCP surfaced the one manual step onboarding didn't touch —
+> standing up the GKE cluster itself (Standard-vs-Autopilot, node-SA IAM for
+> Artifact Registry pulls). Fixed the silent half of that immediately
+> (`84a4337`: `wren install` now diagnoses a stuck `ImagePullBackOff` with the
+> exact IAM remedy instead of a dead-end "check the logs"). WS-17 is the other
+> half — a bounded, opt-in `--create-cluster` quickstart path, **not** the
+> recommended team-setup flow (bring-your-own-cluster stays that).
+
 | WS | Title | Brief | State | Worker/branch | Blocker |
 |----|-------|-------|-------|---------------|---------|
 | 0  | e2e validation loop | [WS-0](WS-0-e2e-loop.md) | merged | #12 | done — gate live on main |
@@ -40,6 +49,8 @@ transition; this file is the single glance-view for the sprint.
 | **15** | **Onboarding friction pass + CLI surface cleanup** | [WS-15](WS-15-onboarding-cli-cleanup.md) | merged | #25 | done — install-configured default run-namespace closes the footgun (live-validated), pre-flight credential check (400 not silent failure), `project get`/`run rm`/`run stop` real, `run resume`/`mcp`/`fleet`/`usage`/`attach`/`steer`/`project config` removed from CLI (zero "not implemented yet" left), `--runtime gvisor|kata` rejected client-side with an M4 pointer |
 | **16a** | **Robustness cleanup: infra/docs** | [WS-16](WS-16-robustness-cleanup.md) | merged | #27 | done — `hack/e2e*.sh` deduped into `hack/lib/e2e-common.sh`; apiserver Read/Write/Idle timeouts (log-tail streaming unaffected, verified live); CONNECT resolves once + dials by IP (closes DNS-rebinding TOCTOU); `ensurePVC` now fails a run `Failed`/`WorkspaceLost` on disk loss past `Pending` instead of silently resuming into an empty PVC; stale doc spots closed. `make e2e` green live in both enforcement modes |
 | **16b** | **Robustness cleanup: launcher/install test coverage** | [WS-16](WS-16-robustness-cleanup.md) | merged | #26 | done — launcher 57.1%→76.9% (`RequestCancel`/`SecretHasKey`/`ListRuns`/`NewK8s` 0%→70-100%), install 72%→75%; checked `RequestCancel` for the install-style Update race — already used a merge-patch, no fix needed, proved it with a concurrent-write test instead of just asserting it |
+| —  | `wren install` diagnoses stuck image pulls | (chore, no brief) | merged | `84a4337` | done — `WaitDeployments` timeout now inspects pods for `ImagePullBackOff`/`ErrImagePull` and prints the exact, project-specific `gcloud` IAM remedy instead of a dead-end "check the logs" hint |
+| **17** | **`wren install --create-cluster`** | [WS-17](WS-17-create-cluster.md) | dispatched | `../wren-ws17` | bounded, opt-in GKE Standard cluster provisioning (shells out to `gcloud` via the existing `Runner`) — quickstart/eval path, not the recommended team-setup flow; DoD requires one real, torn-down-after live GCP proof, not just unit tests |
 
 ## Human-gated items (start now — lead time)
 
