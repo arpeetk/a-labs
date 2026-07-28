@@ -93,7 +93,6 @@ log "deploying control plane (operator + apiserver) into $NS_SYSTEM"
 k apply -k config/default >/dev/null
 if [ -n "$RUNTIME_IMAGE_OVERRIDE" ]; then
   # Point the operator at a runtime image that will never pull.
-  k -n "$NS_SYSTEM" set env deploy/wren-operator - >/dev/null 2>&1 || true
   k -n "$NS_SYSTEM" patch deploy/wren-operator --type=json \
     -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--runtime-image=${RUNTIME_IMAGE_OVERRIDE}\"}]" >/dev/null
 fi

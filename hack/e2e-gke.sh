@@ -155,8 +155,14 @@ log "verifying terminal state (Succeeded, no PR)"
 final="$("$WREN" run get "$RUN_ID" 2>/dev/null || true)"
 printf '%s' "$final" | grep -q '"phase"[[:space:]]*:[[:space:]]*"Succeeded"' \
   || die "final phase not Succeeded"
-pr_url="$(printf '%s' "$final" | sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-[ -z "$pr_url" ] || warn "expected no PR in keyless mode, got: $pr_url"
+# The run JSON field is prUrl (store.Run) — matching bare "url" here found
+# nothing on any real run, keyless or not, making this a vacuous check that
+# could never fail (the exact incident hack/e2e.sh's own history documents
+# fixing, testing.md rule #1: never ship an assertion you haven't proven
+# capable of failing). Hard-fail like e2e.sh does, not just warn: a keyless
+# run opening a PR is a real regression, not a soft signal.
+pr_url="$(printf '%s' "$final" | sed -n 's/.*"prUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+[ -z "$pr_url" ] || die "expected no PR in keyless mode, got: $pr_url"
 
 # --- 9. WS-1 assertions: egress enforcement ---
 log "checking WS-1 egress enforcement assertions"
