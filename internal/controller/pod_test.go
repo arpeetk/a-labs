@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -458,4 +460,95 @@ func hasEnv(env []corev1.EnvVar, name, val string) bool {
 		}
 	}
 	return false
+}
+
+func envVal(env []corev1.EnvVar, name string) (string, bool) {
+	for _, e := range env {
+		if e.Name == name {
+			return e.Value, true
+		}
+	}
+	return "", false
+}
+
+func hostAliasIP(pod *corev1.Pod, host string) string {
+	for _, ha := range pod.Spec.HostAliases {
+		for _, h := range ha.Hostnames {
+			if h == host {
+				return ha.IP
+			}
+		}
+	}
+	return ""
+}
+
+// TestBuildAgentPod_GCSMount_EgressExemption is the WS-19 wiring test: with the
+// mount enabled under the default iptables lockdown, the egress-lockdown init
+// container is told to carve a narrow hole for the gcs-fuse sidecar — scoped to
+// its OWN uid (never the runner's) AND a fixed destination set — and the pod
+// pins Storage/metadata hostnames onto those destinations via hostAliases so the
+// hole stays tight to the restricted-APIs VIP rather than Storage's broad
+// public ranges.
+func TestBuildAgentPod_GCSMount_EgressExemption(t *testing.T) {
+	run := testRun()
+	run.Spec.Workspace.Checkpoint.Bucket = "gs://wren-ckpt-bucket"
+	pod := buildAgentPod(run, PodConfig{Images: testImages, CheckpointGCSMount: true})
+
+	lk := containerByName(pod.Spec.InitContainers, InitEgressLockdown)
+	if lk == nil {
+		t.Fatal("expected an egress-lockdown init container under default enforcement")
+	}
+	uid, ok := envVal(lk.Env, "WREN_GCSFUSE_UID")
+	if !ok || uid != fmt.Sprintf("%d", gcsFuseSidecarUID) {
+		t.Errorf("WREN_GCSFUSE_UID = %q (present=%v), want %d", uid, ok, gcsFuseSidecarUID)
+	}
+	// The exemption uid must NOT be the runner's — that is the whole boundary.
+	if uid == fmt.Sprintf("%d", runnerUID) {
+		t.Fatal("gcs-fuse exemption uid equals the runner uid — SECURITY BOUNDARY COLLAPSE")
+	}
+	cidrs, ok := envVal(lk.Env, "WREN_GCSFUSE_DST_CIDRS")
+	if !ok {
+		t.Fatal("WREN_GCSFUSE_DST_CIDRS not set")
+	}
+	for _, want := range []string{gcsRestrictedAPIsCIDR, gcpMetadataCIDR} {
+		if !strings.Contains(cidrs, want) {
+			t.Errorf("WREN_GCSFUSE_DST_CIDRS = %q, missing %q", cidrs, want)
+		}
+	}
+
+	// hostAliases pin Storage to the restricted VIP and metadata to its fixed IP.
+	if got := hostAliasIP(pod, gcsStorageHost); got != gcsRestrictedAPIsVIP {
+		t.Errorf("hostAlias %s = %q, want %q", gcsStorageHost, got, gcsRestrictedAPIsVIP)
+	}
+	if got := hostAliasIP(pod, gcpMetadataHost); got != gcpMetadataIP {
+		t.Errorf("hostAlias %s = %q, want %q", gcpMetadataHost, got, gcpMetadataIP)
+	}
+}
+
+// TestBuildAgentPod_GCSMount_NoExemptionWhenOff: without the mount, the lockdown
+// carries no gcs-fuse exemption and the pod sets no hostAliases — the WS-19
+// change is inert for every run that does not use the feature.
+func TestBuildAgentPod_GCSMount_NoExemptionWhenOff(t *testing.T) {
+	// Flag on but no bucket, and flag off entirely: both must stay inert.
+	cases := []PodConfig{
+		{Images: testImages, CheckpointGCSMount: false},
+		{Images: testImages, CheckpointGCSMount: true}, // no bucket set on the run
+	}
+	for i, cfg := range cases {
+		run := testRun()
+		if i == 0 {
+			run.Spec.Workspace.Checkpoint.Bucket = "gs://wren-ckpt" // present, but feature off
+		} else {
+			run.Spec.Workspace.Checkpoint.Bucket = ""
+		}
+		pod := buildAgentPod(run, cfg)
+		if lk := containerByName(pod.Spec.InitContainers, InitEgressLockdown); lk != nil {
+			if _, ok := envVal(lk.Env, "WREN_GCSFUSE_UID"); ok {
+				t.Errorf("case %d: lockdown carries a gcs-fuse exemption with the mount inactive", i)
+			}
+		}
+		if len(pod.Spec.HostAliases) != 0 {
+			t.Errorf("case %d: pod sets hostAliases with the mount inactive: %+v", i, pod.Spec.HostAliases)
+		}
+	}
 }

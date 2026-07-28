@@ -157,6 +157,123 @@ func TestRunLockdownAppliesIPv6RulesWhenBinaryPresent(t *testing.T) {
 	}
 }
 
+// gcsFuseTestCfg is a lockdown config with the WS-19 GCS-FUSE exemption active:
+// the sidecar uid (65534) may reach the restricted Google APIs VIP and the
+// metadata server, and nothing else.
+func gcsFuseTestCfg() LockdownConfig {
+	return LockdownConfig{
+		EgressPort:   "8099",
+		ProxyUID:     "65533",
+		GCSFuseUID:   "65534",
+		GCSFuseCIDRs: []string{"199.36.153.4/30", "169.254.169.254/32"},
+	}
+}
+
+// TestGCSFuseExemptionScopedByUIDAndDest is the load-bearing WS-19 security test
+// (brief outcome B): the new exemption must let ONLY the gcs-fuse sidecar uid
+// reach ONLY the two fixed destinations, and must NOT give the untrusted runner
+// (uid 65532, pinned in the pod spec by hardened()) any way to reach them. If
+// this ever regresses, the harness could exfiltrate to Cloud Storage.
+func TestGCSFuseExemptionScopedByUIDAndDest(t *testing.T) {
+	const runnerUID = "65532" // pinned in internal/controller/pod.go hardened()
+	cfg := gcsFuseTestCfg()
+	rules := iptablesRules(cfg, rejectIPv4)
+
+	// Every exemption CIDR gets exactly one ACCEPT, uid-scoped to the sidecar AND
+	// destination-scoped to that CIDR — never a destination-only or runner-uid
+	// ACCEPT.
+	for _, cidr := range cfg.GCSFuseCIDRs {
+		found := 0
+		for _, r := range rules {
+			j := strings.Join(r, " ")
+			if !strings.Contains(j, "-d "+cidr) {
+				continue
+			}
+			if !contains(r, "ACCEPT") {
+				continue
+			}
+			found++
+			if !strings.Contains(j, "--uid-owner "+cfg.GCSFuseUID) {
+				t.Errorf("ACCEPT to %s is not uid-scoped to the gcs-fuse uid: %s", cidr, j)
+			}
+		}
+		if found != 1 {
+			t.Errorf("want exactly one ACCEPT for %s, got %d", cidr, found)
+		}
+	}
+
+	// The runner uid must have NO ACCEPT rule whatsoever — its only fate is the
+	// final default REJECT, so it reaches none of the exempted destinations.
+	for _, r := range rules {
+		j := strings.Join(r, " ")
+		if strings.Contains(j, "--uid-owner "+runnerUID) {
+			t.Errorf("runner uid %s appears in an OUTPUT rule — it must never be exempted: %s", runnerUID, j)
+		}
+	}
+	if last := rules[len(rules)-1]; !contains(last, "REJECT") {
+		t.Errorf("final rule must be REJECT (default-deny for the runner), got %v", last)
+	}
+	// Ordering: every exemption ACCEPT precedes the REJECT.
+	rejectIdx := len(rules) - 1
+	for i, r := range rules {
+		if strings.Contains(strings.Join(r, " "), "--uid-owner "+cfg.GCSFuseUID) && i >= rejectIdx {
+			t.Errorf("exemption at index %d is not before the REJECT at %d", i, rejectIdx)
+		}
+	}
+}
+
+// TestGCSFuseExemptionIPv4Only: the exemption destinations are IPv4 literals, so
+// they must never be emitted into the ip6tables chain — a v6 rule with a v4 -d
+// would be rejected and leave the v6 OUTPUT chain unprogrammed (an escape).
+func TestGCSFuseExemptionIPv4Only(t *testing.T) {
+	cfg := gcsFuseTestCfg()
+	v6 := iptablesRules(cfg, rejectIPv6)
+	for _, r := range v6 {
+		j := strings.Join(r, " ")
+		if strings.Contains(j, "199.36.153.4") || strings.Contains(j, "169.254.169.254") {
+			t.Errorf("IPv4 exemption CIDR leaked into the ip6tables chain: %s", j)
+		}
+	}
+	// And the v6 chain still ends in a REJECT.
+	if last := v6[len(v6)-1]; !contains(last, "REJECT") {
+		t.Errorf("v6 final rule must be REJECT, got %v", last)
+	}
+}
+
+// TestNoGCSFuseExemptionWhenUnset: with no sidecar uid configured (the common
+// case — no GCS mount), the rule set is exactly the original WS-1 lockdown.
+func TestNoGCSFuseExemptionWhenUnset(t *testing.T) {
+	base := LockdownConfig{EgressPort: "8099", ProxyUID: "65533"}
+	rules := iptablesRules(base, rejectIPv4)
+	if len(rules) != 5 {
+		t.Fatalf("unconfigured lockdown should have 5 rules, got %d", len(rules))
+	}
+	for _, r := range rules {
+		if strings.Contains(strings.Join(r, " "), "-d ") {
+			t.Errorf("unexpected destination-scoped rule with no GCS mount: %v", r)
+		}
+	}
+}
+
+func TestDefaultLockdownConfigGCSFuse(t *testing.T) {
+	t.Setenv(envGCSFuseUID, "65534")
+	t.Setenv(envGCSFuseCIDRs, "199.36.153.4/30, 169.254.169.254/32,")
+	cfg := DefaultLockdownConfig()
+	if cfg.GCSFuseUID != "65534" {
+		t.Errorf("GCSFuseUID = %q, want 65534", cfg.GCSFuseUID)
+	}
+	// Blanks and surrounding whitespace are dropped.
+	want := []string{"199.36.153.4/30", "169.254.169.254/32"}
+	if len(cfg.GCSFuseCIDRs) != len(want) {
+		t.Fatalf("GCSFuseCIDRs = %v, want %v", cfg.GCSFuseCIDRs, want)
+	}
+	for i, w := range want {
+		if cfg.GCSFuseCIDRs[i] != w {
+			t.Errorf("GCSFuseCIDRs[%d] = %q, want %q", i, cfg.GCSFuseCIDRs[i], w)
+		}
+	}
+}
+
 func TestDefaultLockdownConfigDefaults(t *testing.T) {
 	t.Setenv(envEgressPort, "")
 	t.Setenv(envProxyUID, "")

@@ -179,7 +179,7 @@ install` already wrote — no extra credential needed). Codex/opencode are
 construction, event parsing, credential wiring) versus what still needs a
 live-key smoke run.
 
-## Experimental: GCS checkpoint mount (WS-18)
+## Experimental: GCS checkpoint mount (WS-18, WS-19)
 
 Off by default and independent of the core task→PR loop. This mounts a run's
 checkpoint bucket into the **checkpointer container only** (never the untrusted
@@ -249,6 +249,30 @@ checkpointer sidecar only. The harness — which runs untrusted model-generated
 code — never gets the volume mount (pinned in the pod builder and asserted by
 `TestBuildAgentPod_GCSMount_HarnessNeverMounts`), the same trust-tier split as
 the egress-proxy/runner uid boundary.
+
+**Egress enforcement (WS-19):** the mount now works under the **default**
+`--egress-enforcement=iptables` — `off` is no longer required. The GKE-injected
+`gke-gcsfuse-sidecar` runs as its own uid (65534 on GKE 1.35 / CSI driver
+v1.22.16) and talks directly to Cloud Storage + the metadata server, so the WS-1
+lockdown (which otherwise rejects all egress but the proxy's uid) would block it.
+It cannot be routed through the egress-proxy — the CSI injection webhook discards
+any env/args set on a user-declared sidecar container. So the pod instead pins
+`storage.googleapis.com` to the **restricted Google APIs VIP** (`199.36.153.4/30`)
+and `metadata.google.internal` to `169.254.169.254` via `hostAliases`, and the
+lockdown grants a narrow exemption scoped to **both** the sidecar's uid **and**
+those two fixed CIDRs — never the runner's uid, so the untrusted harness still
+cannot reach them. This requires **Private Google Access** on the node subnet
+(so the VIP routes):
+
+```sh
+# One-time, on the cluster's node subnet (usually already on for GKE Standard):
+gcloud compute networks subnets update <subnet> --region <region> \
+  --project $PROJECT --enable-private-ip-google-access
+```
+
+Without it the VIP is unreachable and the mount fails closed (the self-check logs
+a failure, non-fatally). Runs that do not use the mount are entirely unaffected —
+no `hostAliases`, no exemption.
 
 ## Uninstall
 

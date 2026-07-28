@@ -24,8 +24,10 @@ import (
 
 // Env the operator sets for the lockdown role.
 const (
-	envEgressPort = "WREN_EGRESS_PORT" // proxy's localhost port (accept lo→port)
-	envProxyUID   = "WREN_PROXY_UID"   // uid the egress-proxy runs as (accept uid-owner)
+	envEgressPort   = "WREN_EGRESS_PORT"       // proxy's localhost port (accept lo→port)
+	envProxyUID     = "WREN_PROXY_UID"         // uid the egress-proxy runs as (accept uid-owner)
+	envGCSFuseUID   = "WREN_GCSFUSE_UID"       // uid the GKE gcs-fuse sidecar runs as ("" = no exemption)
+	envGCSFuseCIDRs = "WREN_GCSFUSE_DST_CIDRS" // comma-separated IPv4 CIDRs that uid may reach
 )
 
 // LockdownConfig is the resolved input for the iptables program.
@@ -33,6 +35,17 @@ type LockdownConfig struct {
 	EgressPort string // e.g. "8099"
 	ProxyUID   string // e.g. "65533"
 	IPv6       bool   // also lock down ip6tables if the stack is present
+
+	// GCS-FUSE checkpoint mount exemption (WS-19). When a run mounts a GCS
+	// bucket, the GKE-injected gke-gcsfuse-sidecar runs as GCSFuseUID (its own
+	// uid, distinct from the runner and proxy) and must reach Cloud Storage + the
+	// GCE metadata server directly — it cannot be routed through the egress-proxy
+	// because the injected sidecar's env/args are not user-configurable. The hole
+	// is narrowed to BOTH that uid AND the fixed GCSFuseCIDRs (the restricted
+	// Google APIs VIP that storage.googleapis.com is pinned to, plus the metadata
+	// server). Empty GCSFuseUID means no exemption — the default lockdown.
+	GCSFuseUID   string   // e.g. "65534"; "" disables the exemption
+	GCSFuseCIDRs []string // IPv4 destination CIDRs the sidecar uid may reach
 }
 
 // DefaultLockdownConfig reads the config from the environment the operator sets.
@@ -45,30 +58,65 @@ func DefaultLockdownConfig() LockdownConfig {
 	if uid == "" {
 		uid = "65533"
 	}
-	return LockdownConfig{EgressPort: port, ProxyUID: uid, IPv6: true}
+	return LockdownConfig{
+		EgressPort:   port,
+		ProxyUID:     uid,
+		IPv6:         true,
+		GCSFuseUID:   os.Getenv(envGCSFuseUID),
+		GCSFuseCIDRs: splitCIDRs(os.Getenv(envGCSFuseCIDRs)),
+	}
+}
+
+// splitCIDRs parses the comma-separated GCS-FUSE destination CIDR list, dropping
+// blanks so a trailing comma or an unset value yields no rules.
+func splitCIDRs(s string) []string {
+	var out []string
+	for _, c := range strings.Split(s, ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // iptablesRules returns the OUTPUT chain rules, in application order, for the
 // given config. Ordering is load-bearing: ACCEPT rules must precede the final
 // REJECT. Each entry is the argument list appended after the binary name.
 //
-//  1. loopback to the proxy port      → ACCEPT (runner reaches the proxy)
-//  2. loopback generally              → ACCEPT (kubelet probes, ipc)
-//  3. established/related             → ACCEPT (return traffic for the above)
-//  4. owner uid == proxy uid          → ACCEPT (the proxy reaches the world)
-//  5. everything else (DNS included)  → REJECT (runner resolves/reaches nothing)
+//  1. loopback to the proxy port          → ACCEPT (runner reaches the proxy)
+//  2. loopback generally                  → ACCEPT (kubelet probes, ipc)
+//  3. established/related                 → ACCEPT (return traffic for the above)
+//  4. owner uid == proxy uid              → ACCEPT (the proxy reaches the world)
+//  5. owner uid == gcs-fuse uid, dst ∈ … → ACCEPT (the mount reaches Storage +
+//     metadata, and nothing else — WS-19; only when GCSFuseUID is set)
+//  6. everything else (DNS included)      → REJECT (runner resolves/reaches nothing)
+//
+// Rule 4a is the WS-19 GCS-FUSE exemption: present only when a run mounts a GCS
+// bucket (GCSFuseUID set). It is scoped by BOTH the sidecar's uid AND a fixed
+// destination set — the runner uid can never match it, so the harness cannot
+// reach these destinations even though the rule exists. It is IPv4-only: both
+// destinations (the restricted Google APIs VIP and the metadata server) are IPv4
+// literals, so it is never emitted into the ip6tables chain (a v6 -d with a v4
+// CIDR would be rejected, leaving the v6 chain unprogrammed).
 //
 // rejectWith differs by family: IPv4 uses icmp-port-unreachable, IPv6 uses
 // icmp6-port-unreachable. Passing the right one matters — a rejected REJECT rule
 // would leave that family's OUTPUT at its default-ACCEPT policy (a bypass).
 func iptablesRules(cfg LockdownConfig, rejectWith string) [][]string {
-	return [][]string{
+	rules := [][]string{
 		{"-A", "OUTPUT", "-o", "lo", "-p", "tcp", "--dport", cfg.EgressPort, "-j", "ACCEPT"},
 		{"-A", "OUTPUT", "-o", "lo", "-j", "ACCEPT"},
 		{"-A", "OUTPUT", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"},
 		{"-A", "OUTPUT", "-m", "owner", "--uid-owner", cfg.ProxyUID, "-j", "ACCEPT"},
-		{"-A", "OUTPUT", "-j", "REJECT", "--reject-with", rejectWith},
 	}
+	if rejectWith == rejectIPv4 && cfg.GCSFuseUID != "" {
+		for _, cidr := range cfg.GCSFuseCIDRs {
+			rules = append(rules, []string{"-A", "OUTPUT",
+				"-m", "owner", "--uid-owner", cfg.GCSFuseUID,
+				"-d", cidr, "-j", "ACCEPT"})
+		}
+	}
+	return append(rules, []string{"-A", "OUTPUT", "-j", "REJECT", "--reject-with", rejectWith})
 }
 
 const (
