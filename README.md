@@ -132,7 +132,7 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Area | M0 (as built) | Target |
 |---|---|---|
 | Task → PR (Journey A) | ✅ real Claude agent → PR, on kind **and** GKE | same |
-| Onboarding | ✅ one command (`wren install --kind`/`--registry`) builds+delivers all 6 images, deploys the control plane, and hands off a **minimal** `wren project create`/`wren run create` — install-configured namespace closes a silent credential footgun; a stuck image pull gets diagnosed with the exact fix, not a dead end; zero placeholder CLI commands ([SETUP.md](SETUP.md)) | `--create-cluster` opt-in GKE provisioning (in progress) |
+| Onboarding | ✅ one command (`wren install --kind`/`--registry`/`--create-cluster`) builds+delivers all 6 images, optionally provisions the GKE Standard cluster itself, deploys the control plane, and hands off a **minimal** `wren project create`/`wren run create` — install-configured namespace closes a silent credential footgun; a stuck image pull gets diagnosed with the exact fix, not a dead end; zero placeholder CLI commands ([SETUP.md](SETUP.md)) | same |
 | Harnesses | ✅ `claude-code` (proven e2e) + `mock` (keyless gate); `codex` + `opencode` adapters, images, and the `/openai/` egress route built — **not yet run against live providers** ([docs/harnesses.md](docs/harnesses.md)) | + BYO conformance suite |
 | Crash-resume | ✅ infra crashes (OOM/eviction) resume via PVC reattach + resume-mode; deterministic failures fail fast; a disk-destroying node/zone loss = clean `Failed` (deterministically, not by accident — reconciler distinguishes first-provision from a PVC that vanished later) | + object-store checkpoints (`workspace.checkpoint.*` accepted, **no-op** until the checkpointer lands post-launch; `internal/blob.Store` is the socket) |
 | Egress-proxy | ✅ injects creds (github.com, api.github.com, api.anthropic.com, api.openai.com) + allowlist; runner holds no secret; **bypass enforced** (iptables uid-lockdown + per-run canary; `--egress-enforcement=off` escape hatch with `config/netpol/` FQDN policies) + a DNS-rebinding-closed CONNECT path — **verified on real GKE Standard**, not just kind | — |
@@ -143,10 +143,8 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Auth | `X-Wren-User` header | OIDC / SSO |
 | Isolation | hardened `runc` pods | + gVisor/Kata (deferred, M4) |
 
-Next up: per-run **GitHub App** tokens (the minter is built; wiring is next),
-`wren install --create-cluster` (a bounded, opt-in path to skip standing up the
-GKE cluster by hand, in progress), and the object-store checkpointer behind
-`internal/blob.Store` (post-launch).
+Next up: per-run **GitHub App** tokens (the minter is built; wiring is next)
+and the object-store checkpointer behind `internal/blob.Store` (post-launch).
 
 ## Repository layout
 

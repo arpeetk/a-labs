@@ -85,7 +85,7 @@ func TestInstallCreateClusterHappyPath(t *testing.T) {
 	// Provisioning sequence, in the exact command shapes the brief specifies.
 	for _, want := range []string{
 		"gcloud services enable container.googleapis.com artifactregistry.googleapis.com --project wren-proj",
-		"gcloud container clusters create wren --zone us-central1-a --project wren-proj --num-nodes 1 --machine-type e2-standard-2",
+		"gcloud container clusters create wren --zone us-central1-a --project wren-proj --num-nodes 1 --machine-type e2-standard-4",
 		"gcloud container clusters get-credentials wren --zone us-central1-a --project wren-proj",
 		"gcloud auth configure-docker us-central1-docker.pkg.dev --quiet",
 		"gcloud projects add-iam-policy-binding wren-proj --member=serviceAccount:123456789-compute@developer.gserviceaccount.com --role=roles/artifactregistry.reader",

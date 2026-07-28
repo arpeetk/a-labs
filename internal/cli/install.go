@@ -60,7 +60,7 @@ func newInstallCmd() *cobra.Command {
 	f.StringVar(&opts.GCPProject, "gcp-project", "", "GCP project to create the cluster in (required with --create-cluster)")
 	f.StringVar(&opts.GCPZone, "gcp-zone", "us-central1-a", "zone for the --create-cluster GKE cluster")
 	f.StringVar(&opts.GCPClusterName, "gcp-cluster-name", "wren", "name for the --create-cluster GKE cluster")
-	f.StringVar(&opts.GCPMachineType, "gcp-machine-type", "e2-standard-2", "node machine type for the --create-cluster GKE cluster")
+	f.StringVar(&opts.GCPMachineType, "gcp-machine-type", "e2-standard-4", "node machine type for the --create-cluster GKE cluster (e2-standard-2 doesn't leave enough allocatable CPU past GKE's own system pods for even one default 2-CPU run to schedule)")
 	f.IntVar(&opts.GCPNumNodes, "gcp-num-nodes", 1, "node count for the --create-cluster GKE cluster")
 	f.StringVar(&opts.ImageTag, "tag", "", "image tag for --registry pushes (default: source tree's short git SHA, else \"dev\")")
 	f.StringVar(&opts.HarnessImages, "harness-images", "", "comma list of harness images to build/deliver: claude-code,codex,opencode (default: all three; \"none\" skips harness images entirely)")

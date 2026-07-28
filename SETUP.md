@@ -96,8 +96,11 @@ GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
 
 This enables the `container` + `artifactregistry` APIs, creates a **GKE
 Standard** cluster (defaults: zone `us-central1-a`, name `wren`, one
-`e2-standard-2` node — override with `--gcp-zone`/`--gcp-cluster-name`/
-`--gcp-machine-type`/`--gcp-num-nodes`), fetches its credentials, wires docker
+`e2-standard-4` node — override with `--gcp-zone`/`--gcp-cluster-name`/
+`--gcp-machine-type`/`--gcp-num-nodes`; `e2-standard-2` looks like the cheaper
+eval choice but doesn't leave enough allocatable CPU past GKE's own system
+pods for even one default 2-CPU run to schedule — found live, not guessed),
+fetches its credentials, wires docker
 → Artifact Registry auth, and grants the node service account
 `roles/artifactregistry.reader` — so the `ImagePullBackOff` gap the GKE note
 above warns about simply can't happen. It then runs the normal install into

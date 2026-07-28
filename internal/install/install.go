@@ -69,7 +69,12 @@ type Options struct {
 	// GCPProject is the target GCP project (required with CreateCluster).
 	GCPProject string
 	// GCPZone / GCPClusterName / GCPMachineType / GCPNumNodes size the created
-	// cluster (defaults: us-central1-a, wren, e2-standard-2, 1).
+	// cluster (defaults: us-central1-a, wren, e2-standard-4, 1 — e2-standard-2
+	// was tried first and found live-broken: at ~1930m allocatable, GKE's own
+	// system pods already leave too little headroom for even one default
+	// project's 2-CPU run request, so a fresh --create-cluster install with
+	// zero flags couldn't schedule its own first real run. e2-standard-4
+	// leaves comfortable headroom above a single 2-CPU run).
 	GCPZone        string
 	GCPClusterName string
 	GCPMachineType string
@@ -129,7 +134,7 @@ func (o *Options) defaults() {
 			o.GCPClusterName = "wren"
 		}
 		if o.GCPMachineType == "" {
-			o.GCPMachineType = "e2-standard-2"
+			o.GCPMachineType = "e2-standard-4"
 		}
 		if o.GCPNumNodes <= 0 {
 			o.GCPNumNodes = 1
