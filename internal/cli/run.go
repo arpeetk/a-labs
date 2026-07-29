@@ -117,23 +117,19 @@ func newRunRmCmd() *cobra.Command {
 }
 
 func newRunListCmd() *cobra.Command {
-	var scope string
+	var opts fleetOptions
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List agent runs",
+		Short: "List agent runs (table by default; --watch to keep it live)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := clientFromFlags(cmd)
 			if err != nil {
 				return err
 			}
-			runs, err := c.ListRuns(context.Background(), scope)
-			if err != nil {
-				return err
-			}
-			return emit(cmd, runs)
+			return runFleetView(cmd, c, opts)
 		},
 	}
-	cmd.Flags().StringVar(&scope, "scope", "mine", "which runs to show: mine|team|all")
+	addFleetFlags(cmd.Flags(), &opts, "mine")
 	return cmd
 }
 

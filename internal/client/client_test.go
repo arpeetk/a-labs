@@ -55,12 +55,11 @@ func TestCreateRunSendsRequest(t *testing.T) {
 }
 
 func TestListAndGetRun(t *testing.T) {
+	var gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v1/runs":
-			if r.URL.Query().Get("scope") != "mine" {
-				t.Errorf("scope = %q", r.URL.Query().Get("scope"))
-			}
+			gotQuery = r.URL.RawQuery
 			_ = json.NewEncoder(w).Encode([]Run{{ID: "r-1"}, {ID: "r-2"}})
 		case strings.HasPrefix(r.URL.Path, "/v1/runs/"):
 			_ = json.NewEncoder(w).Encode(Run{ID: "r-9", Phase: "Running"})
@@ -69,10 +68,22 @@ func TestListAndGetRun(t *testing.T) {
 	defer srv.Close()
 
 	c := New(&config.Context{Server: srv.URL})
-	runs, err := c.ListRuns(context.Background(), "mine")
+	runs, err := c.ListRuns(context.Background(), "mine", "payments-api")
 	if err != nil || len(runs) != 2 {
 		t.Fatalf("ListRuns = %v, %v", runs, err)
 	}
+	if !strings.Contains(gotQuery, "scope=mine") || !strings.Contains(gotQuery, "project=payments-api") {
+		t.Errorf("query = %q, want scope=mine and project=payments-api", gotQuery)
+	}
+
+	// project="" must omit the query param entirely, not send an empty value.
+	if _, err := c.ListRuns(context.Background(), "all", ""); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(gotQuery, "project") {
+		t.Errorf("empty project leaked into the query string: %q", gotQuery)
+	}
+
 	run, err := c.GetRun(context.Background(), "r-9")
 	if err != nil || run.Phase != "Running" {
 		t.Fatalf("GetRun = %+v, %v", run, err)
@@ -165,7 +176,7 @@ func TestErrorResponseParsed(t *testing.T) {
 func TestConnectionErrorSurfaced(t *testing.T) {
 	// Nothing listening on this port.
 	c := New(&config.Context{Server: "127.0.0.1:1"})
-	if _, err := c.ListRuns(context.Background(), "mine"); err == nil {
+	if _, err := c.ListRuns(context.Background(), "mine", ""); err == nil {
 		t.Fatal("expected connection error")
 	}
 }

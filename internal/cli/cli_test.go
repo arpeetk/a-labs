@@ -115,15 +115,29 @@ func TestLoginRequiresServer(t *testing.T) {
 }
 
 // TestNoNotImplementedCommands guards WS-15 Part C: the CLI ships no command
-// that exists only to error with "not implemented yet". Removed roadmap
-// commands (fleet, mcp, usage) are simply absent, so cobra reports them as
-// unknown rather than running a placeholder.
+// that exists only to error with "not implemented yet". Roadmap commands
+// still not built (mcp, usage) are simply absent, so cobra reports them as
+// unknown rather than running a placeholder. `fleet` was in this list until
+// WS-20 made it real — see TestFleetCommandIsReal below instead.
 func TestNoNotImplementedCommands(t *testing.T) {
-	for _, name := range []string{"fleet", "usage"} {
+	for _, name := range []string{"usage"} {
 		_, err := run(t, name)
 		if err == nil || !strings.Contains(err.Error(), "unknown command") {
 			t.Errorf("`wren %s` should be an unknown command, got %v", name, err)
 		}
+	}
+}
+
+// TestFleetCommandIsReal is the flip side of TestNoNotImplementedCommands:
+// `wren fleet` must be a real, known command (WS-20) — the earlier assertion
+// that it was intentionally absent is now stale, and this pins the correction
+// so it can't silently regress back to a stub.
+func TestFleetCommandIsReal(t *testing.T) {
+	_, err := run(t, "fleet")
+	// No control plane configured in this test harness, so the command still
+	// fails — but on "no control plane configured", never "unknown command".
+	if err == nil || strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("`wren fleet` should be a real command, got %v", err)
 	}
 }
 
