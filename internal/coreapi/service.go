@@ -263,10 +263,24 @@ func (s *Service) StopRun(ctx context.Context, id string) error {
 	return s.launcher.RequestCancel(ctx, rec.Namespace, id)
 }
 
-// ListRuns returns runs for a scope. scope "mine" filters to user; "all"/"team"
-// return everything (team RBAC narrowing lands in M1).
-func (s *Service) ListRuns(ctx context.Context, scope, user string) ([]*store.Run, error) {
-	f := store.RunFilter{}
+// ListRuns returns runs for a scope, optionally narrowed to one project.
+// scope "mine" filters to user; "all"/"team" return everything (team RBAC
+// narrowing lands in M1).
+//
+// Before reading, it syncs the store from the live AgentRun CRs via
+// ReconcileFromCluster (WS-20) — the same merge ReconcileFromCluster already
+// does once at apiserver boot (WS-3), just re-run on every list instead of
+// only at startup. This is one bulk List of CRs, not a per-run read, so it
+// doesn't turn into N+1: reusing that path is what fixes fleet-visibility
+// staleness without adding a new read pattern. Best-effort: a sync error
+// doesn't fail the list — callers get the store's last-known state rather
+// than an error for what is fundamentally a read endpoint.
+func (s *Service) ListRuns(ctx context.Context, scope, user, project string) ([]*store.Run, error) {
+	// Best-effort sync: a transient cluster-read error here shouldn't fail a
+	// list request, it should just leave the store's last-known state as the
+	// answer (same tolerance ReconcileFromCluster's boot-time caller applies).
+	_, _ = s.ReconcileFromCluster(ctx)
+	f := store.RunFilter{Project: project}
 	if scope == "" || scope == "mine" {
 		f.User = user
 	}

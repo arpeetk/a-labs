@@ -326,11 +326,12 @@ instead of building locally.
   attach` / `wren run steer` (interactive steering), `wren run resume` (manual
   re-run of a terminally-Failed run — the operator already auto-resumes
   *infrastructure* crashes; a manual trigger that resets the retry budget and
-  clears the leftover Failed pod is a real feature, deferred), `wren fleet`
-  (cross-run dashboard), `wren usage` (token/cost/compute reporting), `wren mcp
-  add|list|test` (per-project MCP servers), `wren project config` (editing
-  defaults/rubric/egress in place). Each is trivial to re-add once its server
-  side lands.
+  clears the leftover Failed pod is a real feature, deferred), `wren usage`
+  (token/cost/compute reporting), `wren mcp add|list|test` (per-project MCP
+  servers), `wren project config` (editing defaults/rubric/egress in place).
+  Each is trivial to re-add once its server side lands. (`wren fleet` — a
+  cross-run dashboard — shipped for real in WS-20: `run list`/`fleet` render a
+  table with `--project`/`--phase` filters and `--watch` for a live view.)
 - **Sandbox runtimes** `gvisor` / `kata` for `wren run create --runtime`: wired
   end-to-end in the operator but not provisioned by any v1 cluster, so the CLI
   rejects them today (only `runc` works) until M4.

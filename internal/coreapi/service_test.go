@@ -374,13 +374,49 @@ func TestListRunsScope(t *testing.T) {
 	svc.idgen = func() string { return "r-b" }
 	_, _ = svc.CreateRun(ctx, CreateRunRequest{Project: "p", User: "bob@x", Prompt: "2"})
 
-	mine, _ := svc.ListRuns(ctx, "mine", "alice@x")
+	mine, _ := svc.ListRuns(ctx, "mine", "alice@x", "")
 	if len(mine) != 1 || mine[0].User != "alice@x" {
 		t.Fatalf("scope mine = %+v", mine)
 	}
-	all, _ := svc.ListRuns(ctx, "all", "alice@x")
+	all, _ := svc.ListRuns(ctx, "all", "alice@x", "")
 	if len(all) != 2 {
 		t.Fatalf("scope all = %d, want 2", len(all))
+	}
+}
+
+// TestListRunsProjectFilter proves --project is wired all the way to the
+// store filter (WS-20) — RunFilter.Project existed before this workstream but
+// nothing ever set it, so a query naming a project silently returned every
+// project's runs. Two projects, two runs, filtering to one must exclude the
+// other.
+func TestListRunsProjectFilter(t *testing.T) {
+	svc, _, _ := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "p1", Repo: "x/y"})
+	seedProject(t, svc, &store.Project{Name: "p2", Repo: "x/z"})
+	svc.idgen = func() string { return "r-a" }
+	if _, err := svc.CreateRun(ctx, CreateRunRequest{Project: "p1", User: "alice@x", Prompt: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	svc.idgen = func() string { return "r-b" }
+	if _, err := svc.CreateRun(ctx, CreateRunRequest{Project: "p2", User: "alice@x", Prompt: "2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	p1Runs, err := svc.ListRuns(ctx, "all", "alice@x", "p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p1Runs) != 1 || p1Runs[0].Project != "p1" {
+		t.Fatalf("project=p1 = %+v, want exactly the p1 run", p1Runs)
+	}
+
+	everything, err := svc.ListRuns(ctx, "all", "alice@x", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(everything) != 2 {
+		t.Fatalf("project=\"\" = %d runs, want 2 (no project filter)", len(everything))
 	}
 }
 

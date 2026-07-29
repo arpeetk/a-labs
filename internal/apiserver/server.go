@@ -98,7 +98,8 @@ func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listRuns(w http.ResponseWriter, r *http.Request) {
 	scope := r.URL.Query().Get("scope")
-	runs, err := s.svc.ListRuns(r.Context(), scope, userOf(r))
+	project := r.URL.Query().Get("project")
+	runs, err := s.svc.ListRuns(r.Context(), scope, userOf(r), project)
 	if err != nil {
 		writeServiceErr(w, err)
 		return

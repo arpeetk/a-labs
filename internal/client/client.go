@@ -60,14 +60,15 @@ type RunCreateOptions struct {
 
 // Run is a summary view of an agent run.
 type Run struct {
-	ID           string `json:"id"`
-	Project      string `json:"project"`
-	User         string `json:"user,omitempty"`
-	Phase        string `json:"phase"`
-	Harness      string `json:"harness,omitempty"`
-	Namespace    string `json:"namespace,omitempty"`
-	PRURL        string `json:"prUrl,omitempty"`
-	RestartCount int32  `json:"restartCount,omitempty"`
+	ID           string    `json:"id"`
+	Project      string    `json:"project"`
+	User         string    `json:"user,omitempty"`
+	Phase        string    `json:"phase"`
+	Harness      string    `json:"harness,omitempty"`
+	Namespace    string    `json:"namespace,omitempty"`
+	PRURL        string    `json:"prUrl,omitempty"`
+	RestartCount int32     `json:"restartCount,omitempty"`
+	CreatedAt    time.Time `json:"createdAt,omitempty"`
 }
 
 // CreateRun submits a task to a new agent run.
@@ -79,12 +80,20 @@ func (c *Client) CreateRun(ctx context.Context, opts RunCreateOptions) (*Run, er
 	return &run, nil
 }
 
-// ListRuns returns runs visible to the caller. Scope is one of mine|team|all.
-func (c *Client) ListRuns(ctx context.Context, scope string) ([]Run, error) {
+// ListRuns returns runs visible to the caller. Scope is one of mine|team|all;
+// project narrows to one project (empty means every project in scope).
+func (c *Client) ListRuns(ctx context.Context, scope, project string) ([]Run, error) {
 	var runs []Run
-	path := "/v1/runs"
+	q := url.Values{}
 	if scope != "" {
-		path += "?scope=" + scope
+		q.Set("scope", scope)
+	}
+	if project != "" {
+		q.Set("project", project)
+	}
+	path := "/v1/runs"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
 	}
 	if err := c.do(ctx, http.MethodGet, path, nil, &runs); err != nil {
 		return nil, err

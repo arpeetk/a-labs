@@ -29,6 +29,7 @@ func NewRootCommand() *cobra.Command {
 		newUninstallCmd(),
 		newRunCmd(),
 		newProjectCmd(),
+		newFleetCmd(),
 	)
 	return root
 }

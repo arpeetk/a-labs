@@ -64,16 +64,17 @@ threat model in the [spec](docs/technical-spec.md#25-end-to-end-workflow-journey
 wren login --control-plane wren.corp.internal --user you   # SSO lands in M1
 wren run create --project payments-api --task "Fix the flaky retry in checkout"
 wren run get    r-9d4c09a          # phase, PR url, restart count (token/cost usage reporting is roadmap, M1)
-wren run list   --scope mine
+wren run list   --scope mine        # table by default; --project/--phase filter, --watch keeps it live
 wren run logs   r-9d4c09a -f        # tail the agent's live logs (--container to pick a sidecar)
 wren run stop   r-9d4c09a          # cancel a run (no auto-resume) and delete its pod
 wren run rm     r-9d4c09a          # delete a run and its cluster resources
+wren fleet                          # every run across every project, at a glance
 ```
 
 Each run is attributable, resumable, and produces a reviewable PR — not a mystery
-diff. Interactive steering, a fleet dashboard, and token/cost usage reporting
-are roadmap items (M1–M2) — the CLI doesn't ship them as stub commands in the
-meantime, see [`SETUP.md`](SETUP.md#later-milestones-not-yet-built).
+diff. Interactive steering and token/cost usage reporting are roadmap items
+(M1–M2) — the CLI doesn't ship them as stub commands in the meantime, see
+[`SETUP.md`](SETUP.md#later-milestones-not-yet-built).
 
 ## Installing Wren (admin / handover)
 
