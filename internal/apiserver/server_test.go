@@ -132,6 +132,30 @@ func TestCreateRunFlow(t *testing.T) {
 	}
 }
 
+// TestListRunsProjectQueryParam proves the ?project= query param (WS-20)
+// actually reaches coreapi.ListRuns and narrows the result -- the apiserver
+// handler previously never read it at all, so it was silently ignored no
+// matter what a caller passed.
+func TestListRunsProjectQueryParam(t *testing.T) {
+	h, _ := newTestServer(t)
+	do(t, h, "POST", "/v1/projects", "u@x", `{"name":"p1","repo":"x/y"}`)
+	do(t, h, "POST", "/v1/projects", "u@x", `{"name":"p2","repo":"x/z"}`)
+	do(t, h, "POST", "/v1/runs", "u@x", `{"project":"p1","task":"a"}`)
+	do(t, h, "POST", "/v1/runs", "u@x", `{"project":"p2","task":"b"}`)
+
+	w := do(t, h, "GET", "/v1/runs?scope=all&project=p1", "u@x", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("list code = %d, body=%s", w.Code, w.Body.String())
+	}
+	var runs []store.Run
+	if err := json.Unmarshal(w.Body.Bytes(), &runs); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Project != "p1" {
+		t.Fatalf("project=p1 = %+v, want exactly the p1 run", runs)
+	}
+}
+
 // TestDeleteAndStopRun covers the WS-15 Part C endpoints.
 func TestDeleteAndStopRun(t *testing.T) {
 	h, lc, _ := newTestServerWithLauncher(t)
