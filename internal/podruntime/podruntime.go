@@ -3,16 +3,18 @@
 // (egress-proxy, checkpointer, agent-gateway). Roles are functions here so they
 // are unit-testable; cmd/wren-runtime is a thin dispatcher.
 //
-// The egress-proxy is real (spec §5.6). The checkpointer and agent-gateway
-// sidecars are M0 stand-ins (they keep the pod's native-sidecar shape valid
-// and log liveness): the checkpointer is EXPERIMENTAL — v0.1 takes no
-// snapshots, so workspace.checkpoint.* is a no-op and crash-resume is PVC
-// reattach + resume-mode only (spec §5.5 v0.1 status); real checkpointing
-// plugs into internal/blob.Store post-launch. Stream bridging lands with
-// interactive steering (M2).
+// The egress-proxy is real (spec §5.6). The agent-gateway sidecar is still an
+// M0 stand-in (it keeps the pod's native-sidecar shape valid and logs
+// liveness only). The checkpointer is real as of WS-21 when a GCS checkpoint
+// mount is configured: it takes periodic workspace snapshots (checkpointLoop)
+// against internal/blob.Store, and hydrate restores the latest one on a
+// confirmed workspace loss (RunHydrate, RestoreRequired). Without the mount
+// configured, checkpointer behaves exactly like the plain liveness stub.
+// Stream bridging lands with interactive steering (M2).
 package podruntime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -22,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -395,25 +398,90 @@ func RunSidecar(ctx context.Context, out io.Writer, name string) error {
 // the operator sets the mount-path env only when --checkpoint-gcs-mount added
 // the CSI volume), it first runs a one-shot mount self-check: a Put+Get+List
 // round-trip against a small object, proving the mount is live and writable.
-// It then falls through to the shared sidecar liveness loop.
-//
-// This is NOT the checkpoint feature (interval snapshots + restore-on-resume
-// stay deferred — WS-8); it is WS-18's "prove the mount end to end" hook. With
-// no mount configured the behavior is identical to the plain sidecar stub, so
-// runs without the feature are completely unaffected. The self-check is
-// deliberately non-fatal: this is an experimental liveness sidecar, and
-// crash-looping it would abort the whole pod — so a failure is logged loudly
-// and the sidecar continues as a stub (spec §5.5).
+// It then runs the real periodic-snapshot loop (checkpointLoop) instead of
+// falling through to the generic sidecar stub. With no mount configured,
+// behavior is unchanged: the plain sidecar liveness loop, so runs without the
+// feature are completely unaffected.
 func RunCheckpointer(ctx context.Context, out io.Writer, role string) error {
 	bucket := os.Getenv("WREN_CHECKPOINT_BUCKET")
 	mountPath := os.Getenv("WREN_CHECKPOINT_MOUNT_PATH")
-	if bucket != "" && mountPath != "" {
-		em := harness.NewEmitter(out)
-		if err := mountSelfCheck(ctx, em, mountPath, bucket, os.Getenv("WREN_RUN_ID")); err != nil {
-			em.Message(fmt.Sprintf("%s: mount self-check FAILED at %s: %v", role, mountPath, err))
+	if bucket == "" || mountPath == "" {
+		return RunSidecar(ctx, out, role)
+	}
+	em := harness.NewEmitter(out)
+	runID := os.Getenv("WREN_RUN_ID")
+	if err := mountSelfCheck(ctx, em, mountPath, bucket, runID); err != nil {
+		em.Message(fmt.Sprintf("%s: mount self-check FAILED at %s: %v", role, mountPath, err))
+	}
+	return checkpointLoop(ctx, em, role, blob.NewMountStore(mountPath, blob.RunPrefix(bucket, runID)))
+}
+
+// defaultCheckpointIntervalSeconds mirrors the controller's own default
+// (checkpointInterval / defaultCheckpointInterval = 120) for the case the env
+// var is absent or unparseable — belt-and-suspenders only, since the operator
+// always sets WREN_CHECKPOINT_INTERVAL whenever the mount is configured.
+const defaultCheckpointIntervalSeconds = 120
+
+// checkpointTickUnit is the unit WREN_CHECKPOINT_INTERVAL is measured in.
+// Production always uses whole seconds (matching the operator-set env var,
+// itself seconds — spec §5.5); a package var, same seam pattern as
+// proxyWaitTimeout, so tests can shrink it to milliseconds and observe several
+// real ticks quickly instead of waiting on production-scale intervals.
+var checkpointTickUnit = time.Second
+
+// checkpointInterval parses WREN_CHECKPOINT_INTERVAL (seconds) into a ticker
+// duration, falling back to the default on anything unparseable or <= 0.
+func checkpointInterval() time.Duration {
+	n, err := strconv.Atoi(os.Getenv("WREN_CHECKPOINT_INTERVAL"))
+	if err != nil || n <= 0 {
+		n = defaultCheckpointIntervalSeconds
+	}
+	return time.Duration(n) * checkpointTickUnit
+}
+
+// checkpointLoop ticks every WREN_CHECKPOINT_INTERVAL, archiving the workspace
+// and Putting it to store as a new checkpoint object, until ctx is canceled. A
+// failed snapshot attempt logs loudly and the loop continues to the next tick
+// — crash-looping this sidecar over a transient GCS blip would kill the whole
+// pod for no benefit (same non-fatal posture as the mount self-check).
+func checkpointLoop(ctx context.Context, em *harness.Emitter, role string, store blob.Store) error {
+	ticker := time.NewTicker(checkpointInterval())
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			em.Message(role + ": stopping")
+			return nil
+		case <-ticker.C:
+			takeCheckpoint(ctx, em, role, store)
 		}
 	}
-	return RunSidecar(ctx, out, role)
+}
+
+// checkpointWorkspacePath is where the checkpointer container archives from.
+// It's always runspec.WorkspacePath in production (the container's read-only
+// workspace mount, pod.go); a package var only so tests can point it at a
+// temp dir instead of the real "/workspace", same seam pattern as
+// proxyWaitTimeout / checkpointTickUnit.
+var checkpointWorkspacePath = runspec.WorkspacePath
+
+// takeCheckpoint archives the workspace directory and Puts it as one new
+// checkpoint object, logging a PASSED line (key + byte size) on success — the
+// hook the live-verification proof asserts on, same pattern as the self-check's
+// PASSED line — or a loud FAILED line on any error.
+func takeCheckpoint(ctx context.Context, em *harness.Emitter, role string, store blob.Store) {
+	var buf bytes.Buffer
+	if err := blob.Archive(&buf, checkpointWorkspacePath); err != nil {
+		em.Message(fmt.Sprintf("%s: checkpoint snapshot FAILED: archive %s: %v", role, checkpointWorkspacePath, err))
+		return
+	}
+	key := "checkpoints/ck-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".tar.gz"
+	size := buf.Len()
+	if err := store.Put(ctx, key, &buf); err != nil {
+		em.Message(fmt.Sprintf("%s: checkpoint snapshot FAILED: put %s: %v", role, key, err))
+		return
+	}
+	em.Message(fmt.Sprintf("%s: checkpoint snapshot PASSED — wrote %s (%d bytes)", role, key, size))
 }
 
 // mountSelfCheck writes, reads back, and lists a small self-check object through
