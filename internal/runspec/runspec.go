@@ -55,6 +55,14 @@ type RunSpec struct {
 	// CheckpointBucket is the object-store prefix the checkpointer sidecar
 	// snapshots the workspace and mirrors the session transcript to.
 	CheckpointBucket string `json:"checkpointBucket,omitempty"`
+	// RestoreRequired is true only when Mode is ModeResume AND the workspace
+	// PVC was just recreated after a confirmed loss (the controller's
+	// WorkspaceRestorePending condition) — i.e. the disk is genuinely empty
+	// and hydrate MUST restore the latest checkpoint before the harness starts,
+	// as opposed to an ordinary crash-resume where the PVC survived and
+	// restoring would overwrite live, still-present work. False (the default)
+	// is every ModeResume case today.
+	RestoreRequired bool `json:"restoreRequired,omitempty"`
 	// BranchPrefix is the git branch namespace for the PR the harness opens.
 	BranchPrefix string `json:"branchPrefix,omitempty"`
 }

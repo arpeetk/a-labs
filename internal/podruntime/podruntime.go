@@ -229,8 +229,14 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 	return nil
 }
 
-// RunHydrate runs the hydrate init container. M0: it confirms the workspace is
-// present. Real clone / checkpoint-restore lands with the checkpointer work.
+// RunHydrate runs the hydrate init container: it prepares the workspace before
+// the harness starts.
+//   - Mode == ModeResume, RestoreRequired: a freshly-recreated, empty PVC after
+//     a confirmed workspace loss — restore is mandatory (restoreFromCheckpoint).
+//   - Mode == ModeResume, !RestoreRequired: an ordinary crash-resume where the
+//     PVC survived (today's only ModeResume case pre-WS-21) — a no-op, the
+//     workspace files are already there.
+//   - Otherwise (a fresh start): clone the repo when configured, else no-op.
 func RunHydrate(ctx context.Context, out io.Writer, specPath string) error {
 	if specPath == "" {
 		specPath = DefaultRunSpecPath
@@ -241,11 +247,19 @@ func RunHydrate(ctx context.Context, out io.Writer, specPath string) error {
 		em.Errorf("load runspec: " + err.Error())
 		return err
 	}
-	// When a repo + GitHub auth are configured, do a real clone so the harness
-	// works in a git checkout and finalize can push a branch. The clone routes
-	// through the egress-proxy when present (no token in the runner).
-	// Checkpoint-restore on resume lands with the checkpointer work.
-	if url, token, ok := gitCloneURL(spec); ok && spec.Mode != runspec.ModeResume {
+
+	if spec.Mode == runspec.ModeResume {
+		if !spec.RestoreRequired {
+			em.Message("hydrate: workspace ready (resume; PVC survived, no restore needed)")
+			return nil
+		}
+		return restoreFromCheckpoint(ctx, em, spec)
+	}
+
+	// Fresh start: when a repo + GitHub auth are configured, do a real clone so
+	// the harness works in a git checkout and finalize can push a branch. The
+	// clone routes through the egress-proxy when present (no token in the runner).
+	if url, token, ok := gitCloneURL(spec); ok {
 		if !waitForProxy(ctx, em) {
 			return fmt.Errorf("%w: egress-proxy unreachable", ErrRetryable)
 		}
@@ -261,11 +275,56 @@ func RunHydrate(ctx context.Context, out io.Writer, specPath string) error {
 		return nil
 	}
 
-	mode := "fresh clone"
-	if spec.Mode == runspec.ModeResume {
-		mode = "restore-from-checkpoint"
+	em.Message("hydrate: workspace ready (fresh clone skipped; no repo/token — M0)")
+	return nil
+}
+
+// restoreFromCheckpoint runs only when the controller has confirmed the
+// workspace PVC was recreated after a genuine loss (spec.RestoreRequired):
+// restore is mandatory here, not best-effort. No checkpoint to restore is NOT
+// a silent empty-workspace resume — it's a deterministic, non-retryable
+// failure: this plain (non-ErrRetryable) error flows through
+// cmd/wren-runtime -> runspec.ExitError -> classifyTermination -> PhaseFailed,
+// with zero new controller code (mirrors WS-16's existing invariant).
+func restoreFromCheckpoint(ctx context.Context, em *harness.Emitter, spec runspec.RunSpec) error {
+	mountPath := os.Getenv("WREN_CHECKPOINT_MOUNT_PATH")
+	if mountPath == "" {
+		err := fmt.Errorf("hydrate: workspace restore required but no checkpoint mount is configured")
+		em.Errorf(err.Error())
+		return err
 	}
-	em.Message("hydrate: workspace ready (" + mode + " skipped; no repo/token — M0)")
+	store := blob.NewMountStore(mountPath, blob.RunPrefix(spec.CheckpointBucket, spec.RunID))
+	objs, err := store.List(ctx, "checkpoints/")
+	if err != nil {
+		werr := fmt.Errorf("hydrate: list checkpoints: %w", err)
+		em.Errorf(werr.Error())
+		return werr
+	}
+	if len(objs) == 0 {
+		err := fmt.Errorf("hydrate: workspace restore required but no checkpoint exists for run %s — cannot resume", spec.RunID)
+		em.Errorf(err.Error())
+		return err
+	}
+	latest := objs[0]
+	for _, o := range objs[1:] {
+		if o.Modified.After(latest.Modified) {
+			latest = o
+		}
+	}
+	rc, err := store.Get(ctx, latest.Key)
+	if err != nil {
+		werr := fmt.Errorf("hydrate: get checkpoint %s: %w", latest.Key, err)
+		em.Errorf(werr.Error())
+		return werr
+	}
+	defer rc.Close()
+	if err := blob.Unarchive(rc, spec.WorkspacePath); err != nil {
+		werr := fmt.Errorf("hydrate: restore checkpoint %s: %w", latest.Key, err)
+		em.Errorf(werr.Error())
+		return werr
+	}
+	em.Message(fmt.Sprintf("hydrate: restore-from-checkpoint PASSED — restored %s (%d bytes) into %s",
+		latest.Key, latest.Size, spec.WorkspacePath))
 	return nil
 }
 

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/summiteight/wren/internal/blob"
 	"github.com/summiteight/wren/internal/runspec"
 )
 
@@ -71,6 +73,102 @@ func TestRunHydrate(t *testing.T) {
 		if !strings.Contains(buf.String(), "hydrate") {
 			t.Errorf("hydrate output = %q", buf.String())
 		}
+	}
+}
+
+// TestRunHydrate_RestoreRequired_NoCheckpoints: a freshly-recreated, empty PVC
+// with no checkpoint ever taken must fail deterministically — not retryable,
+// not a silent empty-workspace resume.
+func TestRunHydrate_RestoreRequired_NoCheckpoints(t *testing.T) {
+	mount := t.TempDir()
+	t.Setenv("WREN_CHECKPOINT_MOUNT_PATH", mount)
+	ws := t.TempDir()
+
+	specPath := writeRunSpec(t, t.TempDir(), runspec.RunSpec{
+		RunID: "r-norestore", Mode: runspec.ModeResume, RestoreRequired: true,
+		CheckpointBucket: "gs://some-bucket", WorkspacePath: ws,
+	})
+	var buf bytes.Buffer
+	err := RunHydrate(context.Background(), &buf, specPath)
+	if err == nil {
+		t.Fatal("expected an error when restore is required but no checkpoint exists")
+	}
+	if errors.Is(err, ErrRetryable) {
+		t.Fatalf("expected a plain (non-retryable) error, got ErrRetryable-wrapped: %v", err)
+	}
+}
+
+// TestRunHydrate_RestoreRequired_PicksLatest: with multiple checkpoints
+// present, hydrate restores the one with the latest Modified time, not
+// necessarily the lexicographically-last key.
+func TestRunHydrate_RestoreRequired_PicksLatest(t *testing.T) {
+	mount := t.TempDir()
+	bucket := "gs://some-bucket"
+	runID := "r-restore"
+	store := blob.NewMountStore(mount, blob.RunPrefix(bucket, runID))
+
+	// Archive two tiny source trees and Put them under checkpoints/, forcing
+	// distinct mtimes so "latest" is unambiguous.
+	putCheckpoint := func(t *testing.T, key, marker string, mtime time.Time) {
+		t.Helper()
+		src := t.TempDir()
+		if err := os.WriteFile(filepath.Join(src, "marker.txt"), []byte(marker), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if err := blob.Archive(&buf, src); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Put(context.Background(), key, &buf); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(mount, "runs", runID, key), mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := time.Now().Add(-time.Hour)
+	putCheckpoint(t, "checkpoints/ck-000001.tar.gz", "old\n", base)
+	putCheckpoint(t, "checkpoints/ck-000002.tar.gz", "newest\n", base.Add(30*time.Minute))
+
+	t.Setenv("WREN_CHECKPOINT_MOUNT_PATH", mount)
+	ws := t.TempDir()
+	specPath := writeRunSpec(t, t.TempDir(), runspec.RunSpec{
+		RunID: runID, Mode: runspec.ModeResume, RestoreRequired: true,
+		CheckpointBucket: bucket, WorkspacePath: ws,
+	})
+
+	var buf bytes.Buffer
+	if err := RunHydrate(context.Background(), &buf, specPath); err != nil {
+		t.Fatalf("RunHydrate: %v (log: %s)", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "restore-from-checkpoint PASSED") {
+		t.Errorf("expected PASSED restore log line, got: %s", buf.String())
+	}
+	got, err := os.ReadFile(filepath.Join(ws, "marker.txt"))
+	if err != nil {
+		t.Fatalf("read restored marker: %v", err)
+	}
+	if string(got) != "newest\n" {
+		t.Errorf("restored wrong checkpoint: got marker %q, want %q", got, "newest\n")
+	}
+}
+
+// TestRunHydrate_ResumeNoRestore_Unchanged: the ordinary (pre-WS-21)
+// crash-resume path where the PVC survived stays a no-op, even with a
+// checkpoint mount configured — restoring into a non-empty workspace would be
+// wrong (it's not what RestoreRequired=false means).
+func TestRunHydrate_ResumeNoRestore_Unchanged(t *testing.T) {
+	t.Setenv("WREN_CHECKPOINT_MOUNT_PATH", t.TempDir())
+	specPath := writeRunSpec(t, t.TempDir(), runspec.RunSpec{
+		RunID: "r-plain-resume", Mode: runspec.ModeResume, RestoreRequired: false,
+		CheckpointBucket: "gs://some-bucket",
+	})
+	var buf bytes.Buffer
+	if err := RunHydrate(context.Background(), &buf, specPath); err != nil {
+		t.Fatalf("RunHydrate: %v", err)
+	}
+	if !strings.Contains(buf.String(), "no restore needed") {
+		t.Errorf("expected no-op resume message, got: %s", buf.String())
 	}
 }
 
