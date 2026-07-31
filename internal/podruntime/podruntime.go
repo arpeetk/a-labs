@@ -409,7 +409,7 @@ func RunCheckpointer(ctx context.Context, out io.Writer, role string) error {
 	mountPath := os.Getenv("WREN_CHECKPOINT_MOUNT_PATH")
 	if bucket != "" && mountPath != "" {
 		em := harness.NewEmitter(out)
-		if err := mountSelfCheck(ctx, em, mountPath, os.Getenv("WREN_RUN_ID")); err != nil {
+		if err := mountSelfCheck(ctx, em, mountPath, bucket, os.Getenv("WREN_RUN_ID")); err != nil {
 			em.Message(fmt.Sprintf("%s: mount self-check FAILED at %s: %v", role, mountPath, err))
 		}
 	}
@@ -419,12 +419,14 @@ func RunCheckpointer(ctx context.Context, out io.Writer, role string) error {
 // mountSelfCheck writes, reads back, and lists a small self-check object through
 // the mounted store, returning an error on any step or a read-back mismatch. On
 // success it logs a clear PASSED line naming the object and mount path — the
-// hook the WS-18 live proof asserts on (and cross-checks with gcloud).
-func mountSelfCheck(ctx context.Context, em *harness.Emitter, mountPath, runID string) error {
+// hook the WS-18 live proof asserts on (and cross-checks with gcloud). The
+// store is scoped to this run's own prefix (blob.RunPrefix) so the self-check
+// never lists another run's objects sharing the same bucket.
+func mountSelfCheck(ctx context.Context, em *harness.Emitter, mountPath, bucket, runID string) error {
 	if runID == "" {
 		runID = "unknown"
 	}
-	store := blob.NewMountStore(mountPath, "")
+	store := blob.NewMountStore(mountPath, blob.RunPrefix(bucket, runID))
 	key := "_wren-mount-check/" + runID + ".txt"
 	payload := fmt.Sprintf("wren mount self-check run=%s at=%s\n", runID, time.Now().UTC().Format(time.RFC3339Nano))
 
