@@ -228,8 +228,8 @@ func TestReconcileWorkspaceRestore_FullFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconcile: %v", err)
 	}
-	if !res.Requeue {
-		t.Errorf("Result = %+v, want Requeue=true", res)
+	if res != (ctrl.Result{Requeue: true}) {
+		t.Errorf("Result = %+v, want {Requeue: true}", res)
 	}
 	got := getRun(t, c, run)
 	if got.Status.Phase != wrenv1.PhaseInterrupted {
