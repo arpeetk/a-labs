@@ -355,6 +355,10 @@ func TestBuildAgentPod_GCSMount_DisabledByDefault(t *testing.T) {
 	if volumeMount(*ck, VolumeCheckpoints) != nil {
 		t.Error("checkpointer has the checkpoints mount with the flag off")
 	}
+	hy := containerByName(pod.Spec.InitContainers, InitHydrate)
+	if volumeMount(*hy, VolumeCheckpoints) != nil {
+		t.Error("hydrate has the checkpoints mount with the flag off")
+	}
 }
 
 // TestBuildAgentPod_GCSMount_Enabled: flag on + a bucket set adds the CSI volume
@@ -397,8 +401,28 @@ func TestBuildAgentPod_GCSMount_Enabled(t *testing.T) {
 	if vm.MountPath != MountCheckpoints {
 		t.Errorf("checkpointer mount path = %q, want %q", vm.MountPath, MountCheckpoints)
 	}
+	if vm.ReadOnly {
+		t.Error("checkpointer mount is read-only; it must be able to Put new snapshots")
+	}
 	if !hasEnv(ck.Env, "WREN_CHECKPOINT_MOUNT_PATH", MountCheckpoints) {
 		t.Errorf("checkpointer missing WREN_CHECKPOINT_MOUNT_PATH=%s env", MountCheckpoints)
+	}
+
+	// hydrate gets the same mount, but read-only: it only ever restores FROM
+	// the store on a confirmed workspace loss, never writes to it.
+	hy := containerByName(pod.Spec.InitContainers, InitHydrate)
+	hyVM := volumeMount(*hy, VolumeCheckpoints)
+	if hyVM == nil {
+		t.Fatal("hydrate missing the checkpoints mount")
+	}
+	if hyVM.MountPath != MountCheckpoints {
+		t.Errorf("hydrate mount path = %q, want %q", hyVM.MountPath, MountCheckpoints)
+	}
+	if !hyVM.ReadOnly {
+		t.Error("hydrate checkpoints mount must be read-only")
+	}
+	if !hasEnv(hy.Env, "WREN_CHECKPOINT_MOUNT_PATH", MountCheckpoints) {
+		t.Errorf("hydrate missing WREN_CHECKPOINT_MOUNT_PATH=%s env", MountCheckpoints)
 	}
 }
 
