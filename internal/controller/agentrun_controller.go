@@ -95,6 +95,13 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			return r.setPhase(ctx, &run, wrenv1.PhaseFailed, "WorkspaceLost",
 				"workspace PVC is gone after the run had already progressed past Pending — the disk (and any in-progress work) was destroyed; this run cannot resume and will not be retried")
 		}
+		if errors.Is(err, errWorkspaceRestoring) {
+			// Recoverable: this run opted into checkpointing, so the PVC is
+			// being recreated for hydrate to restore into (WS-21). Not a
+			// failure, not a no-op — requeue so the follow-up reconcile
+			// actually creates the fresh PVC.
+			return ctrl.Result{Requeue: true}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("ensure workspace pvc: %w", err)
 	}
 	if err := r.ensureRunSpec(ctx, &run); err != nil {
@@ -162,12 +169,31 @@ func findCondition(run *wrenv1.AgentRun, condType string) *metav1.Condition {
 	return nil
 }
 
-// errWorkspaceLost is ensurePVC's sentinel for a disk-destroying loss: the
-// workspace PVC is NotFound on a run that has already progressed past
-// Pending, i.e. this is not the PVC's first-ever creation. Mapped to
-// PhaseFailed at the Reconcile call site (code standards rule #4: sentinels,
-// mapped deliberately at the boundary).
+// errWorkspaceLost is ensurePVC's sentinel for a disk-destroying loss on a run
+// that has NOT opted into checkpointing: the workspace PVC is NotFound on a
+// run that has already progressed past Pending, i.e. this is not the PVC's
+// first-ever creation. Mapped to PhaseFailed at the Reconcile call site (code
+// standards rule #4: sentinels, mapped deliberately at the boundary).
 var errWorkspaceLost = errors.New("workspace PVC lost after provisioning")
+
+// errWorkspaceRestoring is ensurePVC's sentinel for the same disk-destroying
+// loss, but on a run that HAS opted into checkpointing (WS-21): unlike
+// errWorkspaceLost this is recoverable — the PVC is being recreated so hydrate
+// can restore the latest checkpoint into it before the harness starts. Mapped
+// to a requeue (not a failure) at the Reconcile call site.
+var errWorkspaceRestoring = errors.New("workspace PVC lost; recreating for checkpoint-restore")
+
+// workspaceRestoreConditionType marks a run whose workspace PVC was lost and
+// is being recreated for checkpoint-restore (WS-21). It is set True the
+// reconcile the loss is first observed, stays True across the requeued
+// reconcile that actually creates the fresh PVC (buildRunSpec reads it to set
+// RestoreRequired=true for the pod about to be built), and is cleared only
+// once that pod reaches Running (reconcilePodState) — proof hydrate
+// completed, whether or not this particular run ever needed a restore. That
+// stops it from lingering True into this run's later, ordinary crash-resumes,
+// where the PVC will have survived and a restore must NOT be re-attempted
+// into a non-empty workspace.
+const workspaceRestoreConditionType = "WorkspaceRestorePending"
 
 // ensurePVC creates the workspace PVC if it does not already exist. The PVC
 // name is stable across restarts so a surviving disk is reattached on resume
@@ -183,10 +209,21 @@ var errWorkspaceLost = errors.New("workspace PVC lost after provisioning")
 // call). So a NotFound PVC on any LATER reconcile (Phase already
 // Provisioning/Running/Interrupted/...) means a PVC that definitely existed
 // is now gone — a real disk-destroying loss (node/zone loss, manual
-// deletion), not first-time provisioning. Silently creating a fresh, empty
-// PVC in that case would resume the harness into a workspace with no signal
-// that everything on disk was lost (WS-8 truthing pass; WS-16 A.4) — so this
-// case returns errWorkspaceLost instead of recreating.
+// deletion), not first-time provisioning.
+//
+// For a run that has NOT opted into checkpointing (no bucket, or the
+// operator's --checkpoint-gcs-mount flag off), silently creating a fresh,
+// empty PVC would resume the harness into a workspace with no signal that
+// everything on disk was lost (WS-8 truthing pass; WS-16 A.4) — so that case
+// still returns errWorkspaceLost, unchanged from before WS-21.
+//
+// For a run that HAS opted in (restoreEligible), the loss is recoverable: the
+// dead pod (if any) is deleted, RestartCount bumped, and
+// workspaceRestoreConditionType set True — but the PVC is NOT created in this
+// same call (errWorkspaceRestoring instead), so the just-deleted pod can't
+// race a same-generation PVC. The requeued follow-up reconcile calls ensurePVC
+// again, finds the condition already True, and creates the PVC then; hydrate
+// (told via RestoreRequired, §7) restores the latest checkpoint into it.
 func (r *AgentRunReconciler) ensurePVC(ctx context.Context, run *wrenv1.AgentRun) error {
 	var existing corev1.PersistentVolumeClaim
 	err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: pvcName(run)}, &existing)
@@ -196,14 +233,74 @@ func (r *AgentRunReconciler) ensurePVC(ctx context.Context, run *wrenv1.AgentRun
 	if !apierrors.IsNotFound(err) {
 		return err
 	}
-	if run.Status.Phase != wrenv1.PhasePending {
+	if run.Status.Phase == wrenv1.PhasePending {
+		return r.createWorkspacePVC(ctx, run)
+	}
+
+	restoreEligible := r.PodConfig.CheckpointGCSMount && run.Spec.Workspace.Checkpoint.Bucket != ""
+	if !restoreEligible {
 		return errWorkspaceLost
 	}
+
+	if pending := findCondition(run, workspaceRestoreConditionType); pending != nil && pending.Status == metav1.ConditionTrue {
+		// The requeued follow-up reconcile: the loss was already recorded, so
+		// this NotFound is the fresh PVC not existing yet — create it now.
+		return r.createWorkspacePVC(ctx, run)
+	}
+
+	// First time this loss is observed for this run: delete the dead pod
+	// (mirrors cancel()'s Get-then-Delete-ignoring-NotFound pattern) BEFORE
+	// bumping RestartCount, using today's stable podName(run).
+	var pod corev1.Pod
+	getErr := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: podName(run)}, &pod)
+	switch {
+	case getErr == nil:
+		if delErr := r.Delete(ctx, &pod, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
+			return fmt.Errorf("delete pod before workspace restore: %w", delErr)
+		}
+	case !apierrors.IsNotFound(getErr):
+		return getErr
+	}
+
+	run.Status.RestartCount++
+	run.Status.Phase = wrenv1.PhaseInterrupted
+	setCondition(run, metav1.Condition{
+		Type:    workspaceRestoreConditionType,
+		Status:  metav1.ConditionTrue,
+		Reason:  "WorkspaceLost",
+		Message: "workspace PVC lost after provisioning; recreating and restoring from the latest checkpoint",
+	})
+	if err := r.Status().Update(ctx, run); err != nil {
+		return err
+	}
+	return errWorkspaceRestoring
+}
+
+// createWorkspacePVC builds and creates the workspace PVC, owned by run.
+func (r *AgentRunReconciler) createWorkspacePVC(ctx context.Context, run *wrenv1.AgentRun) error {
 	pvc := buildWorkspacePVC(run)
 	if err := controllerutil.SetControllerReference(run, pvc, r.Scheme); err != nil {
 		return err
 	}
 	return r.Create(ctx, pvc)
+}
+
+// clearWorkspaceRestoreCondition clears WorkspaceRestorePending=True once a
+// new pod is confirmed Running. A no-op (no Status().Update) when the
+// condition is absent or already False, so ordinary reconciles of an
+// already-running pod don't churn status every loop.
+func (r *AgentRunReconciler) clearWorkspaceRestoreCondition(ctx context.Context, run *wrenv1.AgentRun) error {
+	existing := findCondition(run, workspaceRestoreConditionType)
+	if existing == nil || existing.Status != metav1.ConditionTrue {
+		return nil
+	}
+	setCondition(run, metav1.Condition{
+		Type:    workspaceRestoreConditionType,
+		Status:  metav1.ConditionFalse,
+		Reason:  "PodRunning",
+		Message: "workspace restore (if any) completed; hydrate succeeded and the pod is running",
+	})
+	return r.Status().Update(ctx, run)
 }
 
 // ensureRunSpec writes/updates the per-run RunSpec ConfigMap the harness reads.
@@ -228,6 +325,7 @@ func (r *AgentRunReconciler) ensureRunSpec(ctx context.Context, run *wrenv1.Agen
 }
 
 func (r *AgentRunReconciler) buildRunSpec(run *wrenv1.AgentRun) runspec.RunSpec {
+	restoreCond := findCondition(run, workspaceRestoreConditionType)
 	rs := runspec.RunSpec{
 		RunID:            run.Name,
 		Project:          run.Spec.Project,
@@ -242,6 +340,7 @@ func (r *AgentRunReconciler) buildRunSpec(run *wrenv1.AgentRun) runspec.RunSpec 
 		Mode:             mode(run.Status.RestartCount > 0),
 		Interactive:      run.Spec.Interactive,
 		CheckpointBucket: run.Spec.Workspace.Checkpoint.Bucket,
+		RestoreRequired:  restoreCond != nil && restoreCond.Status == metav1.ConditionTrue,
 		BranchPrefix:     fmt.Sprintf("%s/%s", branchPrefix, sanitizeRef(run.Spec.User)),
 	}
 	if run.Spec.MCP.ConfigRef != "" {
@@ -284,6 +383,12 @@ func (r *AgentRunReconciler) reconcilePodState(ctx context.Context, run *wrenv1.
 	case corev1.PodPending:
 		return r.setPhaseIfChanged(ctx, run, wrenv1.PhaseProvisioning, "PodPending", "pod scheduling")
 	case corev1.PodRunning:
+		// Proof hydrate completed successfully (it blocks the harness from
+		// starting): clear any pending workspace-restore condition so a later,
+		// ordinary crash-resume of this same run does not re-trigger a restore.
+		if err := r.clearWorkspaceRestoreCondition(ctx, run); err != nil {
+			return ctrl.Result{}, fmt.Errorf("clear workspace-restore condition: %w", err)
+		}
 		return r.setPhaseIfChanged(ctx, run, wrenv1.PhaseRunning, "PodRunning", "harness running")
 	case corev1.PodSucceeded:
 		// Harness exited 0: the PR is opened by the harness/control plane; the
