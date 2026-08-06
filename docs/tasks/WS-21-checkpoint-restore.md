@@ -1,10 +1,16 @@
 # WS-21: real checkpointing — periodic snapshots + restore-from-checkpoint on workspace loss
 
 **Branch:** `ws21-checkpoint-restore` · **Worktree:** `../wren-ws21` · **Size:** L
-**State:** READY. **Human review gate required before merge** — unlike WS-20,
-this workstream touches the reconciler's failure/retry semantics and the
-checkpointer/hydrate trust boundary. Stop at "PR opened, fully validated,
-live-verified" and wait for review. See "Execution rules" at the bottom.
+**State:** MERGED
+([#33](https://github.com/arpeetk/a-labs/pull/33)). Every Definition of Done
+item live-verified on real GKE (twice — once by hand, once again via the
+`hack/e2e-gke-checkpoint.sh` gate added in the same PR), infra torn down both
+times; see `docs/tasks/STATUS.md`'s WS-21 row for the full write-up. This
+workstream's own default was a human review gate (it touches the
+reconciler's failure/retry semantics and the checkpointer/hydrate trust
+boundary) — merged instead per the owner's explicit instruction after
+end-to-end tests were added and everything passed, overriding that default
+for this PR.
 
 *Context: WS-18/19 built the GCS FUSE mount plumbing (a bucket surfaced as a
 POSIX path inside the checkpointer sidecar, working under default egress

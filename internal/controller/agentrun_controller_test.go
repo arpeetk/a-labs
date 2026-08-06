@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -17,7 +18,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
+	"github.com/summiteight/wren/internal/runspec"
 )
+
+// runSpecFor reads and parses the run's RunSpec ConfigMap.
+func runSpecFor(t *testing.T, c client.Client, run *wrenv1.AgentRun) runspec.RunSpec {
+	t.Helper()
+	var cm corev1.ConfigMap
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: run.Name + "-runspec"}, &cm); err != nil {
+		t.Fatalf("get runspec configmap: %v", err)
+	}
+	var rs runspec.RunSpec
+	if err := json.Unmarshal([]byte(cm.Data["runspec.json"]), &rs); err != nil {
+		t.Fatalf("parse runspec.json: %v", err)
+	}
+	return rs
+}
 
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -173,6 +189,147 @@ func TestReconcileWorkspacePVCLostFailsDeterministically(t *testing.T) {
 	}
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-workspace"}, &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
 		t.Errorf("expected no PVC recreated after WorkspaceLost, got err=%v", err)
+	}
+}
+
+// TestReconcileWorkspaceRestore_FullFlow is the WS-21 recovery path: a run
+// that HAS opted into checkpointing (CheckpointGCSMount + a bucket) survives a
+// lost workspace PVC by recreating it and telling hydrate to restore, instead
+// of failing outright like TestReconcileWorkspacePVCLostFailsDeterministically.
+// Exercises DoD items (b)-(e) as one continuous flow.
+func TestReconcileWorkspaceRestore_FullFlow(t *testing.T) {
+	run := testRun() // bucket already set (gs://wren-ckpt)
+	r, c := newReconciler(t, run)
+	r.PodConfig.CheckpointGCSMount = true
+
+	reconcile(t, r, run) // Pending
+	reconcile(t, r, run) // create PVC + pod r-abc-0
+
+	var pvc corev1.PersistentVolumeClaim
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-workspace"}, &pvc); err != nil {
+		t.Fatalf("expected workspace PVC: %v", err)
+	}
+	setPodPhase(t, c, run.Namespace, "r-abc-0", corev1.PodRunning, nil)
+	reconcile(t, r, run)
+	if got := getRun(t, c, run); got.Status.Phase != wrenv1.PhaseRunning {
+		t.Fatalf("phase = %q, want Running", got.Status.Phase)
+	}
+
+	// The disk-destroying loss: the PVC disappears out from under the run.
+	if err := c.Delete(context.Background(), &pvc); err != nil {
+		t.Fatalf("delete pvc: %v", err)
+	}
+
+	// (b) First reconcile after the loss: old pod deleted, RestartCount
+	// bumped, WorkspaceRestorePending set True, requeue (not a failure).
+	res, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: run.Namespace, Name: run.Name},
+	})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if res != (ctrl.Result{Requeue: true}) {
+		t.Errorf("Result = %+v, want {Requeue: true}", res)
+	}
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseInterrupted {
+		t.Fatalf("phase = %q, want Interrupted", got.Status.Phase)
+	}
+	if got.Status.RestartCount != 1 {
+		t.Fatalf("restartCount = %d, want 1", got.Status.RestartCount)
+	}
+	cond := findCondition(got, workspaceRestoreConditionType)
+	if cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("WorkspaceRestorePending = %+v, want True", cond)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-0"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected old pod r-abc-0 deleted, got err=%v", err)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-workspace"}, &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
+		t.Errorf("PVC must NOT be recreated in the same call that observed the loss, got err=%v", err)
+	}
+
+	// (c) The requeued follow-up reconcile creates the fresh PVC and proceeds
+	// to build the resume pod r-abc-1.
+	reconcile(t, r, got)
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-workspace"}, &corev1.PersistentVolumeClaim{}); err != nil {
+		t.Fatalf("expected fresh workspace PVC after follow-up reconcile: %v", err)
+	}
+	var resumePod corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-1"}, &resumePod); err != nil {
+		t.Fatalf("expected resume pod r-abc-1: %v", err)
+	}
+
+	// (d) buildRunSpec sets RestoreRequired=true for this pod.
+	rs := runSpecFor(t, c, run)
+	if !rs.RestoreRequired {
+		t.Errorf("RunSpec.RestoreRequired = false, want true for the just-recreated PVC")
+	}
+	if rs.Mode != runspec.ModeResume {
+		t.Errorf("RunSpec.Mode = %q, want resume", rs.Mode)
+	}
+
+	// (e) Once the resume pod reaches Running, the condition clears.
+	setPodPhase(t, c, run.Namespace, "r-abc-1", corev1.PodRunning, nil)
+	reconcile(t, r, getRun(t, c, run))
+	got = getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseRunning {
+		t.Fatalf("phase = %q, want Running", got.Status.Phase)
+	}
+	cond = findCondition(got, workspaceRestoreConditionType)
+	if cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("WorkspaceRestorePending = %+v, want False once the pod is Running", cond)
+	}
+}
+
+// TestReconcileOrdinaryCrashResume_DoesNotReTriggerRestore is DoD item (f): a
+// later, ordinary pod crash (the PVC stays intact — a harness OOM, say) on a
+// checkpointing-enabled run must resume exactly like any other crash, WITHOUT
+// re-triggering a checkpoint restore into a workspace that's still there.
+func TestReconcileOrdinaryCrashResume_DoesNotReTriggerRestore(t *testing.T) {
+	run := testRun()
+	r, c := newReconciler(t, run)
+	r.PodConfig.CheckpointGCSMount = true
+
+	reconcile(t, r, run) // Pending
+	reconcile(t, r, run) // create PVC + pod r-abc-0
+	setPodPhase(t, c, run.Namespace, "r-abc-0", corev1.PodRunning, nil)
+	reconcile(t, r, run) // Running
+
+	// An ordinary crash: OOMKilled, PVC untouched.
+	setPodPhase(t, c, run.Namespace, "r-abc-0", corev1.PodFailed, func(p *corev1.Pod) {
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: ContainerHarness,
+			State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{
+				ExitCode: 137, Reason: "OOMKilled",
+			}},
+		}}
+	})
+	reconcile(t, r, run)
+
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseInterrupted {
+		t.Fatalf("phase = %q, want Interrupted", got.Status.Phase)
+	}
+	if got.Status.RestartCount != 1 {
+		t.Fatalf("restartCount = %d, want 1", got.Status.RestartCount)
+	}
+	// The PVC survived this whole time — ensurePVC's Get succeeds, so the
+	// restore machinery (and its condition) is never touched.
+	if cond := findCondition(got, workspaceRestoreConditionType); cond != nil {
+		t.Errorf("WorkspaceRestorePending = %+v, want absent for an ordinary crash-resume", cond)
+	}
+
+	reconcile(t, r, got) // create resume pod r-abc-1
+	rs := runSpecFor(t, c, run)
+	if rs.RestoreRequired {
+		t.Errorf("RunSpec.RestoreRequired = true, want false — the PVC was never lost")
+	}
+	if rs.Mode != runspec.ModeResume {
+		t.Errorf("RunSpec.Mode = %q, want resume", rs.Mode)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-1"}, &corev1.Pod{}); err != nil {
+		t.Fatalf("expected resume pod r-abc-1: %v", err)
 	}
 }
 

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/summiteight/wren/internal/blob"
 	"github.com/summiteight/wren/internal/runspec"
 )
 
@@ -71,6 +73,102 @@ func TestRunHydrate(t *testing.T) {
 		if !strings.Contains(buf.String(), "hydrate") {
 			t.Errorf("hydrate output = %q", buf.String())
 		}
+	}
+}
+
+// TestRunHydrate_RestoreRequired_NoCheckpoints: a freshly-recreated, empty PVC
+// with no checkpoint ever taken must fail deterministically — not retryable,
+// not a silent empty-workspace resume.
+func TestRunHydrate_RestoreRequired_NoCheckpoints(t *testing.T) {
+	mount := t.TempDir()
+	t.Setenv("WREN_CHECKPOINT_MOUNT_PATH", mount)
+	ws := t.TempDir()
+
+	specPath := writeRunSpec(t, t.TempDir(), runspec.RunSpec{
+		RunID: "r-norestore", Mode: runspec.ModeResume, RestoreRequired: true,
+		CheckpointBucket: "gs://some-bucket", WorkspacePath: ws,
+	})
+	var buf bytes.Buffer
+	err := RunHydrate(context.Background(), &buf, specPath)
+	if err == nil {
+		t.Fatal("expected an error when restore is required but no checkpoint exists")
+	}
+	if errors.Is(err, ErrRetryable) {
+		t.Fatalf("expected a plain (non-retryable) error, got ErrRetryable-wrapped: %v", err)
+	}
+}
+
+// TestRunHydrate_RestoreRequired_PicksLatest: with multiple checkpoints
+// present, hydrate restores the one with the latest Modified time, not
+// necessarily the lexicographically-last key.
+func TestRunHydrate_RestoreRequired_PicksLatest(t *testing.T) {
+	mount := t.TempDir()
+	bucket := "gs://some-bucket"
+	runID := "r-restore"
+	store := blob.NewMountStore(mount, blob.RunPrefix(bucket, runID))
+
+	// Archive two tiny source trees and Put them under checkpoints/, forcing
+	// distinct mtimes so "latest" is unambiguous.
+	putCheckpoint := func(t *testing.T, key, marker string, mtime time.Time) {
+		t.Helper()
+		src := t.TempDir()
+		if err := os.WriteFile(filepath.Join(src, "marker.txt"), []byte(marker), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var buf bytes.Buffer
+		if err := blob.Archive(&buf, src); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Put(context.Background(), key, &buf); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(filepath.Join(mount, "runs", runID, key), mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := time.Now().Add(-time.Hour)
+	putCheckpoint(t, "checkpoints/ck-000001.tar.gz", "old\n", base)
+	putCheckpoint(t, "checkpoints/ck-000002.tar.gz", "newest\n", base.Add(30*time.Minute))
+
+	t.Setenv("WREN_CHECKPOINT_MOUNT_PATH", mount)
+	ws := t.TempDir()
+	specPath := writeRunSpec(t, t.TempDir(), runspec.RunSpec{
+		RunID: runID, Mode: runspec.ModeResume, RestoreRequired: true,
+		CheckpointBucket: bucket, WorkspacePath: ws,
+	})
+
+	var buf bytes.Buffer
+	if err := RunHydrate(context.Background(), &buf, specPath); err != nil {
+		t.Fatalf("RunHydrate: %v (log: %s)", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "restore-from-checkpoint PASSED") {
+		t.Errorf("expected PASSED restore log line, got: %s", buf.String())
+	}
+	got, err := os.ReadFile(filepath.Join(ws, "marker.txt"))
+	if err != nil {
+		t.Fatalf("read restored marker: %v", err)
+	}
+	if string(got) != "newest\n" {
+		t.Errorf("restored wrong checkpoint: got marker %q, want %q", got, "newest\n")
+	}
+}
+
+// TestRunHydrate_ResumeNoRestore_Unchanged: the ordinary (pre-WS-21)
+// crash-resume path where the PVC survived stays a no-op, even with a
+// checkpoint mount configured — restoring into a non-empty workspace would be
+// wrong (it's not what RestoreRequired=false means).
+func TestRunHydrate_ResumeNoRestore_Unchanged(t *testing.T) {
+	t.Setenv("WREN_CHECKPOINT_MOUNT_PATH", t.TempDir())
+	specPath := writeRunSpec(t, t.TempDir(), runspec.RunSpec{
+		RunID: "r-plain-resume", Mode: runspec.ModeResume, RestoreRequired: false,
+		CheckpointBucket: "gs://some-bucket",
+	})
+	var buf bytes.Buffer
+	if err := RunHydrate(context.Background(), &buf, specPath); err != nil {
+		t.Fatalf("RunHydrate: %v", err)
+	}
+	if !strings.Contains(buf.String(), "no restore needed") {
+		t.Errorf("expected no-op resume message, got: %s", buf.String())
 	}
 }
 
@@ -137,8 +235,10 @@ func TestRunCheckpointer_SelfCheckPasses(t *testing.T) {
 	if !strings.Contains(logf(), "mount self-check PASSED") {
 		t.Errorf("expected PASSED self-check, got log:\n%s", logf())
 	}
-	if _, err := os.Stat(filepath.Join(mount, "_wren-mount-check", "r-selfcheck.txt")); err != nil {
-		t.Errorf("self-check object not written to the mount: %v", err)
+	// Scoped under the run's own prefix (blob.RunPrefix) — not directly under
+	// the mount root — so two runs sharing a bucket can't see each other's keys.
+	if _, err := os.Stat(filepath.Join(mount, "runs", "r-selfcheck", "_wren-mount-check", "r-selfcheck.txt")); err != nil {
+		t.Errorf("self-check object not written to the run-scoped mount path: %v", err)
 	}
 }
 
@@ -174,6 +274,112 @@ func TestRunCheckpointer_SelfCheckFailsNonFatal(t *testing.T) {
 	logf := runCheckpointerUntil(t)
 	if !strings.Contains(logf(), "mount self-check FAILED") {
 		t.Errorf("expected FAILED self-check, got: %s", logf())
+	}
+}
+
+// TestRunCheckpointer_PeriodicSnapshots: with a short tick interval, the
+// checkpointer takes multiple real snapshots of the workspace and Puts each
+// one to the mount as a distinct object — not just the WS-18 self-check.
+func TestRunCheckpointer_PeriodicSnapshots(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "marker.txt"), []byte("hello workspace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	origWorkspace := checkpointWorkspacePath
+	checkpointWorkspacePath = ws
+	t.Cleanup(func() { checkpointWorkspacePath = origWorkspace })
+
+	origUnit := checkpointTickUnit
+	checkpointTickUnit = time.Millisecond
+	t.Cleanup(func() { checkpointTickUnit = origUnit })
+
+	mount := t.TempDir()
+	t.Setenv("WREN_CHECKPOINT_BUCKET", "gs://some-bucket")
+	t.Setenv("WREN_CHECKPOINT_MOUNT_PATH", mount)
+	t.Setenv("WREN_CHECKPOINT_INTERVAL", "5") // 5ms with the millisecond unit above
+	t.Setenv("WREN_RUN_ID", "r-periodic")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var buf bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- RunCheckpointer(ctx, &buf, "checkpointer") }()
+
+	ckptDir := filepath.Join(mount, "runs", "r-periodic", "checkpoints")
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		entries, _ := os.ReadDir(ckptDir)
+		if len(entries) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("expected at least 2 checkpoint objects, found %d under %s (log:\n%s)", len(entries), ckptDir, buf.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunCheckpointer returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkpointer did not stop on cancel")
+	}
+
+	entries, err := os.ReadDir(ckptDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) < 2 {
+		t.Fatalf("expected at least 2 checkpoint objects, found %d", len(entries))
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".tar.gz") {
+			t.Errorf("checkpoint object %q does not have .tar.gz suffix", e.Name())
+		}
+	}
+	logSoFar := buf.String()
+	if !strings.Contains(logSoFar, "checkpoint snapshot PASSED") {
+		t.Errorf("expected PASSED snapshot log line, got:\n%s", logSoFar)
+	}
+}
+
+// TestRunCheckpointer_SnapshotFailureNonFatal: when Archive fails (workspace
+// path missing), the loop logs FAILED and keeps ticking rather than crashing
+// the sidecar — mirroring the self-check's non-fatal posture.
+func TestRunCheckpointer_SnapshotFailureNonFatal(t *testing.T) {
+	origWorkspace := checkpointWorkspacePath
+	checkpointWorkspacePath = filepath.Join(t.TempDir(), "does-not-exist")
+	t.Cleanup(func() { checkpointWorkspacePath = origWorkspace })
+
+	origUnit := checkpointTickUnit
+	checkpointTickUnit = time.Millisecond
+	t.Cleanup(func() { checkpointTickUnit = origUnit })
+
+	mount := t.TempDir()
+	t.Setenv("WREN_CHECKPOINT_BUCKET", "gs://some-bucket")
+	t.Setenv("WREN_CHECKPOINT_MOUNT_PATH", mount)
+	t.Setenv("WREN_CHECKPOINT_INTERVAL", "5")
+	t.Setenv("WREN_RUN_ID", "r-snapfail")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var buf bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- RunCheckpointer(ctx, &buf, "checkpointer") }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunCheckpointer returned error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkpointer did not stop on cancel")
+	}
+	if !strings.Contains(buf.String(), "checkpoint snapshot FAILED") {
+		t.Errorf("expected FAILED snapshot log line, got:\n%s", buf.String())
 	}
 }
 

@@ -9,7 +9,7 @@ LDFLAGS := -X $(PKG)/internal/cli.Version=$(VERSION) \
 
 CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@latest
 
-.PHONY: build build-operator generate manifests deploy deploy-manifests assets check-assets e2e e2e-gke docker-push-gke test vet fmt tidy clean
+.PHONY: build build-operator generate manifests deploy deploy-manifests assets check-assets e2e e2e-gke e2e-gke-checkpoint docker-push-gke test vet fmt tidy clean
 
 build: ## Build the wren CLI into ./bin
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/wren
@@ -68,6 +68,9 @@ e2e: ## Keyless end-to-end test on kind (the WS-0 merge gate); E2E_KEEP=1 keeps 
 
 e2e-gke: ## Egress-enforcement e2e on a GKE Standard cluster (existing cluster; push images first with docker-push-gke)
 	./hack/e2e-gke.sh
+
+e2e-gke-checkpoint: ## Checkpoint/restore (WS-21) e2e on a GKE Standard cluster (existing cluster; push images first with docker-push-gke)
+	./hack/e2e-gke-checkpoint.sh
 
 cover: ## Run tests and print per-package coverage
 	go test -cover ./...

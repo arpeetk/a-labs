@@ -55,7 +55,7 @@ func ExampleStore() {
 	ctx := context.Background()
 	var s blob.Store = newExampleStore() // scoped to "runs/r-8f3a2c/" by the impl
 
-	_ = s.Put(ctx, "checkpoints/ck-000042.bundle", strings.NewReader("git bundle bytes"))
+	_ = s.Put(ctx, "checkpoints/ck-000042.tar.gz", strings.NewReader("tar.gz bytes"))
 
 	cks, _ := s.List(ctx, "checkpoints/")
 	latest := cks[len(cks)-1]
@@ -68,5 +68,5 @@ func ExampleStore() {
 	restored, _ := io.ReadAll(rc)
 
 	fmt.Printf("restored %s (%d bytes): %s\n", latest.Key, latest.Size, restored)
-	// Output: restored checkpoints/ck-000042.bundle (16 bytes): git bundle bytes
+	// Output: restored checkpoints/ck-000042.tar.gz (12 bytes): tar.gz bytes
 }

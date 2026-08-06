@@ -481,11 +481,18 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 				},
 			},
 		})
-		// Mount into the checkpointer sidecar only — never the harness. (checkpointer
-		// is passed by value into initContainers below, so mutate it here first.)
+		// Mount into the checkpointer sidecar (read-write, so it can Put new
+		// snapshots) and hydrate (read-only — it only ever restores FROM the
+		// store, never writes to it, least privilege even though it's already a
+		// trusted init container). NEVER the harness. (checkpointer/hydrate are
+		// passed by value into initContainers below, so mutate them here first.)
 		checkpointer.VolumeMounts = append(checkpointer.VolumeMounts,
 			corev1.VolumeMount{Name: VolumeCheckpoints, MountPath: MountCheckpoints})
 		checkpointer.Env = append(checkpointer.Env,
+			corev1.EnvVar{Name: "WREN_CHECKPOINT_MOUNT_PATH", Value: MountCheckpoints})
+		hydrate.VolumeMounts = append(hydrate.VolumeMounts,
+			corev1.VolumeMount{Name: VolumeCheckpoints, MountPath: MountCheckpoints, ReadOnly: true})
+		hydrate.Env = append(hydrate.Env,
 			corev1.EnvVar{Name: "WREN_CHECKPOINT_MOUNT_PATH", Value: MountCheckpoints})
 		// The CSI sidecar-injection webhook only runs when this annotation is present.
 		podAnnotations = map[string]string{gcsFuseVolumeAnnotation: "true"}

@@ -3,24 +3,48 @@
 //
 // A Store is scoped to one run's prefix (e.g. "runs/r-8f3a2c/"); every key is
 // relative to that prefix, so a run can never read or overwrite another run's
-// objects. The checkpointer sidecar Puts git-aware checkpoint bundles under
-// "checkpoints/" and transcript fragments under "transcript/"; hydrate's
-// checkpoint-restore path Lists "checkpoints/" and Gets the latest bundle.
+// objects. RunPrefix derives that per-run prefix from a run's checkpoint
+// bucket value. The checkpointer sidecar Puts tar.gz snapshots of the
+// workspace tree under "checkpoints/" (e.g. "checkpoints/ck-000042.tar.gz" —
+// a tar.gz of the workspace directory, including ".git" and any uncommitted
+// edits; NOT a git bundle, which would only capture committed refs) and
+// transcript fragments under "transcript/"; hydrate's checkpoint-restore path
+// Lists "checkpoints/" and Gets the latest one.
 //
-// This package is the socket only: v0.1 ships no implementation and takes no
-// checkpoints (the workspace.checkpoint.* CRD fields are accepted but no-op,
-// and crash-resume is PVC reattach + resume-mode — spec §5.5 v0.1 status).
-// Intended implementations: S3-compatible object storage and GCS, both behind
-// this one contract, with MinIO standing in for e2e so the checkpoint path can
-// be exercised in-cluster without cloud credentials.
+// GCS is the real, live-proven implementation (MountStore, backed by the GCS
+// FUSE CSI driver — spec §5.5, WS-18/19/21): periodic snapshots and
+// restore-from-checkpoint both ship as of WS-21. Transcript mirroring
+// ("transcript/") is not yet implemented — only the checkpoints/ half exists.
+// Checkpoint retention/pruning is bucket policy (spec §6), not part of this
+// contract.
 package blob
 
 import (
 	"context"
 	"errors"
 	"io"
+	"path"
+	"strings"
 	"time"
 )
+
+// RunPrefix derives the per-run object-key prefix for a checkpoint bucket
+// value. bucket is "gs://<bucket-name>[/<base-prefix>]" or bare
+// "<bucket-name>[/<base-prefix>]" (the scheme, if any, and the bucket name
+// itself are not part of the returned prefix — only the base-prefix path
+// segment, if present, matters here; the bucket name is handled separately by
+// whatever mounts/addresses the bucket). The result is
+// path.Join(basePrefix, "runs", runID), so two runs sharing the same bucket
+// (the default: every run's checkpoint bucket defaults to the same
+// "gs://wren-ckpt" unless overridden) never see each other's objects.
+func RunPrefix(bucket, runID string) string {
+	b := strings.TrimPrefix(bucket, "gs://")
+	basePrefix := ""
+	if i := strings.IndexByte(b, '/'); i >= 0 {
+		basePrefix = b[i+1:]
+	}
+	return path.Join(basePrefix, "runs", runID)
+}
 
 // ErrNotFound is returned by Get when no object exists at the key.
 var ErrNotFound = errors.New("blob: object not found")
@@ -28,7 +52,7 @@ var ErrNotFound = errors.New("blob: object not found")
 // Object is one entry under the run's prefix, as returned by List.
 type Object struct {
 	// Key is the object key, relative to the run's prefix (e.g.
-	// "checkpoints/ck-000042.bundle").
+	// "checkpoints/ck-000042.tar.gz").
 	Key string
 	// Size is the object length in bytes.
 	Size int64

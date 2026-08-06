@@ -20,6 +20,7 @@ func TestRunSpecJSONRoundTrip(t *testing.T) {
 		Mode:             ModeResume,
 		Interactive:      true,
 		CheckpointBucket: "gs://wren-ckpt",
+		RestoreRequired:  true,
 		BranchPrefix:     "wren/arpeet",
 	}
 	b, err := json.Marshal(in)
