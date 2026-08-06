@@ -73,7 +73,8 @@ config/                kustomize manifests (crd, rbac, manager) + samples
 build/                 Dockerfile.runtime + per-harness images (claude-code, codex, opencode) + generic gobin
 hack/                  dev/test tooling ONLY (e2e gates) — onboarding/install is
                        product surface and lives in the CLI (code standards rule 8)
-                       hack/lib/e2e-common.sh holds logic shared by e2e.sh/e2e-gke.sh
+                       hack/lib/e2e-common.sh holds logic shared by e2e.sh/
+                       e2e-gke.sh/e2e-gke-checkpoint.sh
 docs/technical-spec.md the living design spec (Draft v0.5 — keep this in sync
                        when you bump it; it drifts if only one of the two gets updated)
 ```
