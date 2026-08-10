@@ -407,6 +407,137 @@ func TestReconcileResumesOnFailure(t *testing.T) {
 	}
 }
 
+// TestReconcileManualResume covers `wren run resume`: a terminally-Failed run
+// (retry budget exhausted, pod left behind for diagnosis) gets a fresh
+// attempt once the resume annotation is set — leftover pod deleted, retry
+// budget reset, trigger annotation cleared so a later unrelated failure can't
+// be silently auto-resumed by a stale annotation.
+func TestReconcileManualResume(t *testing.T) {
+	run := testRun()
+	run.Spec.Retry.MaxRestarts = 1
+	run.Status.Phase = wrenv1.PhaseRunning
+	run.Status.RestartCount = 1 // already at budget
+	r, c := newReconciler(t, run)
+
+	// The test jumps straight to Running/Failed, skipping the normal
+	// Pending->Provisioning flow that would otherwise create this — without
+	// it, the post-resume reconcile's ensurePVC sees a NotFound PVC on a
+	// non-Pending phase and (correctly, per its own Phase-disambiguation
+	// contract) treats that as errWorkspaceLost instead of first-time
+	// creation, so no pod is ever created.
+	if err := c.Create(context.Background(), buildWorkspacePVC(run)); err != nil {
+		t.Fatal(err)
+	}
+
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
+	if err := c.Create(context.Background(), pod); err != nil {
+		t.Fatal(err)
+	}
+	setPodPhase(t, c, run.Namespace, pod.Name, corev1.PodFailed, nil)
+	reconcile(t, r, run)
+
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseFailed {
+		t.Fatalf("phase = %q, want Failed", got.Status.Phase)
+	}
+	// The exhausted-budget pod is left for diagnosis.
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: pod.Name}, &corev1.Pod{}); err != nil {
+		t.Fatalf("expected leftover pod for diagnosis: %v", err)
+	}
+
+	// `wren run resume` → the resume annotation is set on the CR.
+	got.Annotations = map[string]string{wrenv1.ResumeAnnotation: "true"}
+	if err := c.Update(context.Background(), got); err != nil {
+		t.Fatalf("annotate: %v", err)
+	}
+	reconcile(t, r, got)
+
+	resumed := getRun(t, c, run)
+	if resumed.Status.Phase != wrenv1.PhaseInterrupted {
+		t.Fatalf("phase = %q, want Interrupted", resumed.Status.Phase)
+	}
+	if resumed.Status.RestartCount != 0 {
+		t.Fatalf("restartCount = %d, want 0 (fresh retry budget)", resumed.Status.RestartCount)
+	}
+	if resumed.Annotations[wrenv1.ResumeAnnotation] != "" {
+		t.Error("resume annotation should be cleared so a later failure can't stale-auto-resume")
+	}
+	cond := findCondition(resumed, "Resumed")
+	if cond == nil || cond.Reason != "ManualResume" {
+		t.Fatalf("Resumed condition = %+v, want reason ManualResume", cond)
+	}
+	// The leftover pod from the exhausted attempt is deleted.
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: pod.Name}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Errorf("leftover pod after resume = %v, want NotFound", err)
+	}
+
+	// The next reconcile gives the run a real fresh attempt: a new pod at
+	// generation 0 (no collision — the old r-abc-0 was already deleted above).
+	reconcile(t, r, resumed)
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-0"}, &corev1.Pod{}); err != nil {
+		t.Fatalf("expected fresh pod r-abc-0 after resume: %v", err)
+	}
+}
+
+// TestReconcileManualResumeWorkspaceLostFailsAgain is the invariant regression
+// this feature must never weaken: resuming a run that is Failed/WorkspaceLost
+// (its PVC was genuinely destroyed, no checkpoint restore configured) must hit
+// ensurePVC's same NotFound check on the very next reconcile and fail
+// WorkspaceLost again — never silently succeed by creating a fresh, empty PVC
+// and hiding that the prior work is gone.
+func TestReconcileManualResumeWorkspaceLostFailsAgain(t *testing.T) {
+	run := testRun()
+	r, c := newReconciler(t, run)
+	reconcile(t, r, run) // Pending
+	reconcile(t, r, run) // create PVC + pod r-abc-0
+
+	setPodPhase(t, c, run.Namespace, "r-abc-0", corev1.PodRunning, nil)
+	reconcile(t, r, run) // Running
+
+	// The workspace PVC is genuinely destroyed (node/zone loss, manual delete).
+	if err := c.Delete(context.Background(), &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: run.Namespace, Name: "r-abc-workspace"},
+	}); err != nil {
+		t.Fatalf("delete pvc: %v", err)
+	}
+	reconcile(t, r, run)
+
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseFailed {
+		t.Fatalf("phase = %q, want Failed", got.Status.Phase)
+	}
+	if cond := findCondition(got, "Ready"); cond == nil || cond.Reason != "WorkspaceLost" {
+		t.Fatalf("Ready condition = %+v, want reason WorkspaceLost", cond)
+	}
+
+	// `wren run resume` — must not paper over the destroyed workspace.
+	got.Annotations = map[string]string{wrenv1.ResumeAnnotation: "true"}
+	if err := c.Update(context.Background(), got); err != nil {
+		t.Fatalf("annotate: %v", err)
+	}
+	reconcile(t, r, got) // clears the trigger, resets budget, drops to Interrupted
+
+	interrupted := getRun(t, c, run)
+	if interrupted.Status.Phase != wrenv1.PhaseInterrupted {
+		t.Fatalf("phase after resume = %q, want Interrupted", interrupted.Status.Phase)
+	}
+
+	// The follow-up reconcile hits ensurePVC's NotFound check again: still no
+	// checkpoint bucket configured, so it must fail WorkspaceLost again.
+	reconcile(t, r, interrupted)
+
+	final := getRun(t, c, run)
+	if final.Status.Phase != wrenv1.PhaseFailed {
+		t.Fatalf("phase = %q, want Failed again — resume must not silently succeed on a destroyed workspace", final.Status.Phase)
+	}
+	if cond := findCondition(final, "Ready"); cond == nil || cond.Reason != "WorkspaceLost" {
+		t.Fatalf("Ready condition = %+v, want reason WorkspaceLost again", cond)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-workspace"}, &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected no PVC recreated after re-failing WorkspaceLost, got err=%v", err)
+	}
+}
+
 func TestReconcileDeterministicFailureDoesNotRetry(t *testing.T) {
 	run := testRun()
 	r, c := newReconciler(t, run)
