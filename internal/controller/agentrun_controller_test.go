@@ -419,6 +419,16 @@ func TestReconcileManualResume(t *testing.T) {
 	run.Status.RestartCount = 1 // already at budget
 	r, c := newReconciler(t, run)
 
+	// The test jumps straight to Running/Failed, skipping the normal
+	// Pending->Provisioning flow that would otherwise create this — without
+	// it, the post-resume reconcile's ensurePVC sees a NotFound PVC on a
+	// non-Pending phase and (correctly, per its own Phase-disambiguation
+	// contract) treats that as errWorkspaceLost instead of first-time
+	// creation, so no pod is ever created.
+	if err := c.Create(context.Background(), buildWorkspacePVC(run)); err != nil {
+		t.Fatal(err)
+	}
+
 	pod := buildAgentPod(run, PodConfig{Images: testImages})
 	if err := c.Create(context.Background(), pod); err != nil {
 		t.Fatal(err)
