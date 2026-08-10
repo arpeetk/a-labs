@@ -121,6 +121,13 @@ func (c *Client) StopRun(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/v1/runs/"+id+"/stop", nil, nil)
 }
 
+// ResumeRun manually restarts a terminally-Failed run (POST
+// /v1/runs/{id}/resume): the control plane resets the retry budget, clears
+// any leftover pod, and gives the run a fresh attempt.
+func (c *Client) ResumeRun(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/runs/"+id+"/resume", nil, nil)
+}
+
 // Project is a registered repository and its run defaults (mirror of
 // store.Project's JSON; the apiserver rejects unknown fields).
 type Project struct {

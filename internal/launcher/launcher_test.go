@@ -301,6 +301,83 @@ func TestK8sRequestCancelSurvivesConcurrentStatusWrite(t *testing.T) {
 	}
 }
 
+// TestK8sRequestResume mirrors TestK8sRequestCancel: it must set
+// ResumeAnnotation, be idempotent once already set, and surface NotFound for a
+// missing run untouched (the apiserver maps that to 404).
+func TestK8sRequestResume(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := sampleRun("ns", "r-1")
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(run).Build()
+	k := &K8s{c: c}
+
+	if err := k.RequestResume(ctx, "ns", "r-1"); err != nil {
+		t.Fatalf("RequestResume: %v", err)
+	}
+	got, err := k.GetRun(ctx, "ns", "r-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[wrenv1.ResumeAnnotation] != "true" {
+		t.Errorf("annotations = %v, want %s=true", got.Annotations, wrenv1.ResumeAnnotation)
+	}
+
+	// Idempotent: a second call on an already-requested resume is a no-op
+	// that still returns nil.
+	if err := k.RequestResume(ctx, "ns", "r-1"); err != nil {
+		t.Errorf("second RequestResume = %v, want nil (already requested)", err)
+	}
+
+	// Missing run surfaces NotFound so the apiserver can map it to 404.
+	if err := k.RequestResume(ctx, "ns", "missing"); !apierrors.IsNotFound(err) {
+		t.Errorf("RequestResume on missing run = %v, want NotFound", err)
+	}
+}
+
+// TestK8sRequestResumeSurvivesConcurrentStatusWrite mirrors
+// TestK8sRequestCancelSurvivesConcurrentStatusWrite: RequestResume must use a
+// merge Patch (client.MergeFrom), not a read-modify-write Update, so a
+// concurrent operator status write between its internal Get and Patch is
+// neither lost nor clobbered.
+func TestK8sRequestResumeSurvivesConcurrentStatusWrite(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := sampleRun("ns", "r-1")
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(run).WithStatusSubresource(&wrenv1.AgentRun{}).Build()
+	k := &K8s{c: c}
+
+	// Simulate the operator concurrently advancing status — this bumps the
+	// object's resourceVersion, exactly like a live cluster under contention.
+	live, err := k.GetRun(ctx, "ns", "r-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.Status.Phase = wrenv1.PhaseFailed
+	if err := c.Status().Update(ctx, live); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := k.RequestResume(ctx, "ns", "r-1"); err != nil {
+		t.Fatalf("RequestResume after concurrent status write: %v", err)
+	}
+	got, err := k.GetRun(ctx, "ns", "r-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[wrenv1.ResumeAnnotation] != "true" {
+		t.Errorf("annotation not applied: %v", got.Annotations)
+	}
+	if got.Status.Phase != wrenv1.PhaseFailed {
+		t.Errorf("concurrent status write was clobbered: phase = %q", got.Status.Phase)
+	}
+}
+
 // TestK8sSecretHasKey covers all three branches SecretHasKey's contract
 // promises callers (coreapi.checkCredentials treats it as best-effort, never
 // an error, for a missing Secret or namespace): key present (via Data, the

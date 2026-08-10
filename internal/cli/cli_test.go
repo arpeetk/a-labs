@@ -259,6 +259,32 @@ func TestRunStopAndRm(t *testing.T) {
 	}
 }
 
+// TestRunResume covers `wren run resume`: it must POST /v1/runs/{id}/resume.
+func TestRunResume(t *testing.T) {
+	var resumeHit bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/r-1/resume":
+			resumeHit = true
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	if _, err := execIn(t, dir, "login", "--control-plane", srv.URL, "--user", "me"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := execIn(t, dir, "run", "resume", "r-1"); err != nil || !strings.Contains(out, "resuming") {
+		t.Fatalf("run resume = %q, %v", out, err)
+	}
+	if !resumeHit {
+		t.Error("run resume did not POST /resume")
+	}
+}
+
 // TestRunCreateRejectsNonRuncRuntime is WS-15 Part C: --runtime gvisor|kata is
 // rejected client-side with an M4 pointer instead of a confusing pod-admission
 // failure downstream.

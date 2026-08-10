@@ -10,6 +10,15 @@ import (
 // auto-resumed, unlike a crash). `wren run stop` sets it (WS-15 Part C).
 const CancelAnnotation = "wren.dev/cancel"
 
+// ResumeAnnotation, set on an AgentRun, asks the operator to manually resume a
+// terminally-Failed run: reset the retry budget, clear any leftover pod, and
+// give the reconciler a fresh attempt. Unlike CancelAnnotation, the operator
+// clears this annotation itself once processed (the run leaves Failed for a
+// non-terminal phase), so a stale "true" can never trigger an unrequested
+// second auto-resume the next time the run fails — resume is a one-shot,
+// explicit decision, not a standing policy. `wren run resume` sets it.
+const ResumeAnnotation = "wren.dev/resume"
+
 // HarnessKind identifies which agent harness runs the task.
 type HarnessKind string
 
@@ -40,7 +49,7 @@ const (
 	PhaseInterrupted  RunPhase = "Interrupted" // transient: operator will resume
 	PhaseFinalizing   RunPhase = "Finalizing"
 	PhaseSucceeded    RunPhase = "Succeeded"
-	PhaseFailed       RunPhase = "Failed"
+	PhaseFailed       RunPhase = "Failed" // terminal, unless a human/automation issues `wren run resume`
 	PhaseCanceled     RunPhase = "Canceled"
 )
 

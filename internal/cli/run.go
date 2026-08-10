@@ -21,6 +21,7 @@ func newRunCmd() *cobra.Command {
 		newRunGetCmd(),
 		newRunLogsCmd(),
 		newRunStopCmd(),
+		newRunResumeCmd(),
 		newRunRmCmd(),
 	)
 	return cmd
@@ -92,6 +93,25 @@ func newRunStopCmd() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "run %s stopping (will reach Canceled)\n", args[0])
+			return nil
+		},
+	}
+}
+
+func newRunResumeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "resume <run-id>",
+		Short: "Resume a Failed run: reset its retry budget and give it a fresh attempt",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := clientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+			if err := c.ResumeRun(context.Background(), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "run %s resuming (retry budget reset)\n", args[0])
 			return nil
 		},
 	}

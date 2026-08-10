@@ -195,6 +195,39 @@ func TestDeleteAndStopRun(t *testing.T) {
 	}
 }
 
+// TestResumeRun covers the resume endpoint: 400 while a run isn't Failed,
+// 202 + resume annotation once it is, and 404 for an unknown run.
+func TestResumeRun(t *testing.T) {
+	h, lc, _ := newTestServerWithLauncher(t)
+	do(t, h, "POST", "/v1/projects", "u@x", `{"name":"p","repo":"x/y"}`)
+	w := do(t, h, "POST", "/v1/runs", "u@x", `{"project":"p","task":"do it"}`)
+	var run store.Run
+	if err := json.Unmarshal(w.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh run isn't Failed yet → 400, not a silent no-op.
+	w = do(t, h, "POST", "/v1/runs/"+run.ID+"/resume", "u@x", "")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("resume of non-Failed run code = %d, body=%s", w.Code, w.Body.String())
+	}
+
+	// Once the CR reports Failed, resume → 202 and the resume annotation is set.
+	lc.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseFailed})
+	w = do(t, h, "POST", "/v1/runs/"+run.ID+"/resume", "u@x", "")
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("resume code = %d, body=%s", w.Code, w.Body.String())
+	}
+	if cr := lc.Runs[run.Namespace+"/"+run.ID]; cr == nil || cr.Annotations[wrenv1.ResumeAnnotation] != "true" {
+		t.Errorf("resume did not set resume annotation: %+v", cr)
+	}
+
+	// Resume of an unknown run → 404.
+	if w = do(t, h, "POST", "/v1/runs/ghost/resume", "u@x", ""); w.Code != http.StatusNotFound {
+		t.Errorf("resume missing code = %d, want 404", w.Code)
+	}
+}
+
 func TestCreateRunValidation(t *testing.T) {
 	h, _ := newTestServer(t)
 	// Missing task → 400 from service validation.

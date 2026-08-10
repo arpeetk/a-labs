@@ -61,6 +61,14 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 		return ctrl.Result{}, nil // owned children are garbage-collected
 	}
 	if isTerminal(run.Status.Phase) {
+		// Manual resume (wren run resume) is the one exception to "terminal
+		// means done": an explicit human/automated decision to give a Failed
+		// run another attempt. Gated on Phase == Failed specifically (not
+		// just isTerminal) so a stray annotation can never resurrect a
+		// Succeeded or Canceled run.
+		if run.Status.Phase == wrenv1.PhaseFailed && run.Annotations[wrenv1.ResumeAnnotation] == "true" {
+			return r.resume(ctx, &run)
+		}
 		return ctrl.Result{}, nil
 	}
 
@@ -465,6 +473,54 @@ func (r *AgentRunReconciler) cancel(ctx context.Context, run *wrenv1.AgentRun) (
 		return ctrl.Result{}, err
 	}
 	return r.setPhase(ctx, run, wrenv1.PhaseCanceled, "Canceled", "run canceled by user (wren run stop)")
+}
+
+// resume manually restarts a terminally-Failed run at the user's request
+// (wren run resume): it deletes any leftover pod from the failed attempt,
+// resets the retry budget, and drops the run back to Interrupted — the exact
+// non-terminal phase handlePodFailure uses for an ordinary crash-resume, so
+// the very next reconcile takes that same, already-tested path (ensurePVC's
+// checks, ensurePod recreating the pod at generation 0). This is deliberate:
+// resume gives the reconciler another real attempt, it does not paper over
+// whatever made the run fail — a run that failed WorkspaceLost because its
+// PVC is genuinely gone will hit ensurePVC's same NotFound check on the very
+// next reconcile and fail WorkspaceLost again, truthfully.
+func (r *AgentRunReconciler) resume(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, error) {
+	// podName is keyed off the CURRENT RestartCount — resolve and delete the
+	// leftover pod (if handlePodFailure left one for diagnosis, e.g.
+	// RetryBudgetExhausted/HarnessError) BEFORE that count is reset below.
+	var pod corev1.Pod
+	err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: podName(run)}, &pod)
+	switch {
+	case err == nil:
+		if delErr := r.Delete(ctx, &pod, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
+			return ctrl.Result{}, fmt.Errorf("delete leftover pod on resume: %w", delErr)
+		}
+	case !apierrors.IsNotFound(err):
+		return ctrl.Result{}, err
+	}
+
+	// Clear the trigger annotation via a metadata-only Update BEFORE the
+	// Status().Update below (the status subresource means the two are
+	// separate writes to the API server) — see ResumeAnnotation's doc comment
+	// for why this must happen unconditionally, not just on the happy path.
+	delete(run.Annotations, wrenv1.ResumeAnnotation)
+	if err := r.Update(ctx, run); err != nil {
+		return ctrl.Result{}, fmt.Errorf("clear resume annotation: %w", err)
+	}
+
+	run.Status.RestartCount = 0 // a fresh Spec.Retry.MaxRestarts worth of attempts
+	run.Status.Phase = wrenv1.PhaseInterrupted
+	setCondition(run, metav1.Condition{
+		Type:    "Resumed",
+		Status:  metav1.ConditionTrue,
+		Reason:  "ManualResume",
+		Message: "manually resumed via `wren run resume`; retry budget reset for a fresh attempt",
+	})
+	if err := r.Status().Update(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // setPhase unconditionally sets the phase + a condition and persists status.

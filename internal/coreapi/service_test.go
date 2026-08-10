@@ -186,6 +186,56 @@ func TestStopRun(t *testing.T) {
 	}
 }
 
+// TestResumeRunRejectsNonFailed proves resuming a run that isn't Failed is a
+// clean, clear rejection — never a silent no-op and never a crash.
+func TestResumeRunRejectsNonFailed(t *testing.T) {
+	svc, _, fl := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning})
+
+	err = svc.ResumeRun(ctx, run.ID)
+	if !errors.Is(err, ErrValidation) {
+		t.Fatalf("resume of a Running run = %v, want ErrValidation", err)
+	}
+	if !strings.Contains(err.Error(), "Running") || !strings.Contains(err.Error(), "not Failed") {
+		t.Errorf("error should explain the current phase, got: %v", err)
+	}
+	// Rejected: no resume annotation was set.
+	if cr := fl.Runs[run.Namespace+"/"+run.ID]; cr.Annotations[wrenv1.ResumeAnnotation] == "true" {
+		t.Error("resume annotation set despite rejection")
+	}
+
+	if err := svc.ResumeRun(ctx, "ghost"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("resume missing = %v, want ErrNotFound", err)
+	}
+}
+
+// TestResumeRunSetsAnnotation is the happy path: a Failed run's resume
+// annotation gets set so the operator picks it up.
+func TestResumeRunSetsAnnotation(t *testing.T) {
+	svc, _, fl := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseFailed})
+
+	if err := svc.ResumeRun(ctx, run.ID); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	cr := fl.Runs[run.Namespace+"/"+run.ID]
+	if cr == nil || cr.Annotations[wrenv1.ResumeAnnotation] != "true" {
+		t.Errorf("resume annotation not set: %+v", cr)
+	}
+}
+
 func TestCreateRunValidation(t *testing.T) {
 	svc, _, _ := newService(t)
 	ctx := context.Background()

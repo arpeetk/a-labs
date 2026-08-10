@@ -263,6 +263,34 @@ func (s *Service) StopRun(ctx context.Context, id string) error {
 	return s.launcher.RequestCancel(ctx, rec.Namespace, id)
 }
 
+// ResumeRun manually restarts a terminally-Failed run: it asks the operator
+// (via the resume annotation) to reset the retry budget, clear any leftover
+// pod, and give the reconciler a fresh attempt at the run — a deliberate
+// human/automated decision distinct from the operator's own crash-resume.
+// Only a run whose CR currently reports PhaseFailed is eligible; the CR (not
+// the possibly-stale store record) is authoritative here so a request racing
+// a phase transition sees the true current state. Anything else — Running,
+// Pending, Succeeded, Canceled, or an already-resumed run that has moved past
+// Failed — is a validation error: resuming a run that isn't stuck is not a
+// silent no-op, it's a clear rejection (spec deferred "run resume" note).
+func (s *Service) ResumeRun(ctx context.Context, id string) error {
+	rec, err := s.store.GetRun(ctx, id)
+	if err != nil {
+		return err
+	}
+	cr, err := s.launcher.GetRun(ctx, rec.Namespace, id)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: run %q has no AgentRun to resume (already deleted?)", ErrNotFound, id)
+		}
+		return fmt.Errorf("get AgentRun: %w", err)
+	}
+	if cr.Status.Phase != wrenv1.PhaseFailed {
+		return fmt.Errorf("%w: run %q is %s, not Failed; nothing to resume", ErrValidation, id, cr.Status.Phase)
+	}
+	return s.launcher.RequestResume(ctx, rec.Namespace, id)
+}
+
 // ListRuns returns runs for a scope, optionally narrowed to one project.
 // scope "mine" filters to user; "all"/"team" return everything (team RBAC
 // narrowing lands in M1).

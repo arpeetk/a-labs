@@ -63,6 +63,13 @@ type Launcher interface {
 	// drives the run to Canceled (terminal — no auto-resume). Distinct from
 	// DeleteRun, which removes the run entirely (`wren run stop`, WS-15 Part C).
 	RequestCancel(ctx context.Context, ns, name string) error
+	// RequestResume marks a terminally-Failed run for a fresh attempt by
+	// setting the resume annotation; the operator observes it, resets the
+	// retry budget, clears any leftover pod, and drops the run back to a
+	// resumable phase (`wren run resume`). Callers are expected to have
+	// already verified the run is Failed (coreapi.Service.ResumeRun) — this
+	// method itself does not gate on phase, matching RequestCancel's shape.
+	RequestResume(ctx context.Context, ns, name string) error
 	// SecretHasKey reports whether Secret `name` in namespace `ns` exists and
 	// carries a non-empty value for `key`. It backs the control plane's
 	// pre-flight credential check (coreapi, WS-15 Part A): a run whose namespace
@@ -166,6 +173,25 @@ func (k *K8s) RequestCancel(ctx context.Context, ns, name string) error {
 		run.Annotations = map[string]string{}
 	}
 	run.Annotations[wrenv1.CancelAnnotation] = "true"
+	return k.c.Patch(ctx, &run, client.MergeFrom(base))
+}
+
+func (k *K8s) RequestResume(ctx context.Context, ns, name string) error {
+	var run wrenv1.AgentRun
+	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &run); err != nil {
+		return err // NotFound → 404 at the transport
+	}
+	if run.Annotations[wrenv1.ResumeAnnotation] == "true" {
+		return nil // already requested
+	}
+	// Merge patch, no resourceVersion — same race the RequestCancel comment
+	// above documents: the operator writes run status concurrently, so a
+	// read-modify-write Update here would lose that race.
+	base := run.DeepCopy()
+	if run.Annotations == nil {
+		run.Annotations = map[string]string{}
+	}
+	run.Annotations[wrenv1.ResumeAnnotation] = "true"
 	return k.c.Patch(ctx, &run, client.MergeFrom(base))
 }
 
