@@ -120,6 +120,13 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 			// deterministically rather than requeue-and-hang (code standards
 			// rule #2) or silently resume into an empty workspace (WS-8
 			// truthing pass; WS-16 A.4).
+			// A pod-disappearance event can advance the attempt before the PVC
+			// deletion event arrives. Remove that unschedulable replacement before
+			// making the run terminal; terminal reconciliation intentionally does
+			// not revisit owned children.
+			if err := r.deleteCurrentPod(ctx, &run); err != nil {
+				return ctrl.Result{}, fmt.Errorf("delete pod after workspace loss: %w", err)
+			}
 			return r.setPhase(ctx, &run, wrenv1.PhaseFailed, "WorkspaceLost",
 				"workspace PVC is gone after the run had already progressed past Pending — the disk (and any in-progress work) was destroyed; this run cannot resume and will not be retried")
 		}
@@ -597,17 +604,24 @@ func (r *AgentRunReconciler) handlePodFailure(ctx context.Context, run *wrenv1.A
 // deletion is best-effort: a run canceled before any pod exists just
 // transitions to Canceled.
 func (r *AgentRunReconciler) cancel(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, error) {
+	if err := r.deleteCurrentPod(ctx, run); err != nil {
+		return ctrl.Result{}, fmt.Errorf("delete pod on cancel: %w", err)
+	}
+	return r.setPhase(ctx, run, wrenv1.PhaseCanceled, "Canceled", "run canceled by user (wren run stop)")
+}
+
+func (r *AgentRunReconciler) deleteCurrentPod(ctx context.Context, run *wrenv1.AgentRun) error {
 	var pod corev1.Pod
 	err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: podName(run)}, &pod)
 	switch {
 	case err == nil:
 		if delErr := r.Delete(ctx, &pod, client.PropagationPolicy(metav1.DeletePropagationBackground)); delErr != nil && !apierrors.IsNotFound(delErr) {
-			return ctrl.Result{}, fmt.Errorf("delete pod on cancel: %w", delErr)
+			return delErr
 		}
 	case !apierrors.IsNotFound(err):
-		return ctrl.Result{}, err
+		return err
 	}
-	return r.setPhase(ctx, run, wrenv1.PhaseCanceled, "Canceled", "run canceled by user (wren run stop)")
+	return nil
 }
 
 const pauseCheckpointConditionType = "PauseCheckpointReady"

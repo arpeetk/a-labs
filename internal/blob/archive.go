@@ -41,6 +41,14 @@ func Archive(dst io.Writer, srcDir string) error {
 			if err != nil {
 				return fmt.Errorf("blob: archive read symlink %q: %w", rel, err)
 			}
+			// Archive and Unarchive must accept the same link set. Tooling such as
+			// Codex creates disposable absolute links to binaries outside the
+			// workspace; retaining one makes an otherwise valid checkpoint
+			// impossible to restore, while following it would cross the trust
+			// boundary described above.
+			if err := validateArchiveSymlink(rel, target); err != nil {
+				return nil
+			}
 			hdr, err := tar.FileInfoHeader(info, target)
 			if err != nil {
 				return fmt.Errorf("blob: archive symlink header for %q: %w", rel, err)
