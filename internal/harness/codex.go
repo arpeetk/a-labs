@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/summiteight/wren/internal/runspec"
 )
@@ -12,7 +14,8 @@ import (
 // non-interactive mode) inside the workspace and streams its --json JSONL
 // events onto the Wren event bus (spec §5.4). Model calls go to
 // OPENAI_BASE_URL — the operator points it at the egress-proxy's /openai/
-// route, which injects the real key as a Bearer token; the runner holds no
+// route. The adapter selects a Responses-over-HTTP/SSE provider for that
+// route; the proxy injects the real Bearer token, so the runner holds no
 // credential (spec §5.6).
 type Codex struct{}
 
@@ -21,19 +24,21 @@ func (Codex) Name() string { return "codex" }
 
 // Run implements Harness.
 func (Codex) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (Result, error) {
+	baseURL := os.Getenv("OPENAI_BASE_URL")
 	return runAgentCLI(ctx, spec, em, agentCLI{
 		adapter:   "codex",
 		bin:       "codex",
-		args:      codexArgs(spec),
-		env:       codexEnv(),
+		args:      codexArgs(spec, baseURL),
+		env:       codexEnv(baseURL),
 		parseLine: parseCodexLine,
 	})
 }
 
-// codexArgs builds the headless invocation. Verified against the Codex
-// non-interactive docs (developers.openai.com/codex/noninteractive):
-// `codex exec` prints JSONL events on stdout with --json.
-func codexArgs(spec runspec.RunSpec) []string {
+// codexArgs builds the headless invocation. When the operator supplies its
+// proxy route, an ephemeral provider config keeps all traffic on the supported
+// Responses HTTP/SSE path. A local invocation without the route retains the
+// user's normal Codex provider configuration.
+func codexArgs(spec runspec.RunSpec, baseURL string) []string {
 	args := []string{
 		"exec",
 		"--json",
@@ -47,23 +52,35 @@ func codexArgs(spec runspec.RunSpec) []string {
 		// is what makes the workspace safe.
 		"--skip-git-repo-check",
 	}
+	if baseURL != "" {
+		baseURL = strings.TrimRight(baseURL, "/")
+		if !strings.HasSuffix(baseURL, "/v1") {
+			baseURL += "/v1"
+		}
+		args = append(args,
+			"--config", `model_provider="wren"`,
+			"--config", `model_providers.wren.name="Wren egress proxy"`,
+			"--config", "model_providers.wren.base_url="+strconv.Quote(baseURL),
+			"--config", `model_providers.wren.env_key="OPENAI_API_KEY"`,
+			"--config", `model_providers.wren.wire_api="responses"`,
+			"--config", "model_providers.wren.supports_websockets=false",
+		)
+	}
 	if spec.Model != "" {
 		args = append(args, "--model", spec.Model)
 	}
 	return append(args, spec.Prompt)
 }
 
-// codexEnv provides the subprocess environment. It ensures the API-key env
-// vars hold placeholders so the CLI starts in API-key mode even though the
-// real key is injected by the egress-proxy (which overwrites the
-// Authorization header on the /openai/ route). Both vars are set: the Codex
-// non-interactive docs make CODEX_API_KEY the supported key for `codex exec`
-// automation, with OPENAI_API_KEY the fallback — which one wins is the CLI's
-// choice, and irrelevant here because the proxy owns the credential either
-// way. OPENAI_BASE_URL itself is wired by the operator and simply passed
-// through.
-func codexEnv() []string {
-	env := ensureEnv(os.Environ(), "CODEX_API_KEY", "injected-by-egress-proxy")
+// codexEnv adds placeholder keys only in proxy mode. The CLI needs an API key
+// to start, but the egress proxy replaces it at the trust boundary. Direct
+// invocations retain their ambient environment unchanged.
+func codexEnv(baseURL string) []string {
+	env := os.Environ()
+	if baseURL == "" {
+		return env
+	}
+	env = ensureEnv(env, "CODEX_API_KEY", "injected-by-egress-proxy")
 	return ensureEnv(env, "OPENAI_API_KEY", "injected-by-egress-proxy")
 }
 

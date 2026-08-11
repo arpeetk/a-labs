@@ -17,6 +17,7 @@ func TestCodexArgs(t *testing.T) {
 	cases := []struct {
 		name string
 		spec runspec.RunSpec
+		base string
 		want []string
 	}{
 		{
@@ -31,10 +32,36 @@ func TestCodexArgs(t *testing.T) {
 			want: []string{"exec", "--json", "--sandbox", "danger-full-access",
 				"--skip-git-repo-check", "--model", "gpt-5.2-codex", "p"},
 		},
+		{
+			name: "proxy config selects responses SSE provider",
+			spec: runspec.RunSpec{Prompt: "p"},
+			base: "http://127.0.0.1:8099/openai/",
+			want: []string{"exec", "--json", "--sandbox", "danger-full-access",
+				"--skip-git-repo-check",
+				"--config", `model_provider="wren"`,
+				"--config", `model_providers.wren.name="Wren egress proxy"`,
+				"--config", `model_providers.wren.base_url="http://127.0.0.1:8099/openai/v1"`,
+				"--config", `model_providers.wren.env_key="OPENAI_API_KEY"`,
+				"--config", `model_providers.wren.wire_api="responses"`,
+				"--config", "model_providers.wren.supports_websockets=false", "p"},
+		},
+		{
+			name: "existing v1 suffix is preserved",
+			spec: runspec.RunSpec{Prompt: "p"},
+			base: "http://proxy/openai/v1",
+			want: append([]string{"exec", "--json", "--sandbox", "danger-full-access",
+				"--skip-git-repo-check",
+				"--config", `model_provider="wren"`,
+				"--config", `model_providers.wren.name="Wren egress proxy"`,
+				"--config", `model_providers.wren.base_url="http://proxy/openai/v1"`,
+				"--config", `model_providers.wren.env_key="OPENAI_API_KEY"`,
+				"--config", `model_providers.wren.wire_api="responses"`,
+				"--config", "model_providers.wren.supports_websockets=false"}, "p"),
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := codexArgs(tc.spec)
+			got := codexArgs(tc.spec, tc.base)
 			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
 				t.Errorf("codexArgs = %v, want %v", got, tc.want)
 			}
@@ -135,7 +162,7 @@ func TestCodexMissingBinary(t *testing.T) {
 func TestCodexEnvPlaceholderKey(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
-	env := codexEnv()
+	env := codexEnv("http://proxy/openai")
 	if !hasEnv(env, "CODEX_API_KEY=injected-by-egress-proxy") {
 		t.Error("expected placeholder CODEX_API_KEY when unset")
 	}
@@ -144,10 +171,20 @@ func TestCodexEnvPlaceholderKey(t *testing.T) {
 	}
 	t.Setenv("CODEX_API_KEY", "real-key-from-somewhere")
 	t.Setenv("OPENAI_API_KEY", "real-key-from-somewhere")
-	env = codexEnv()
+	env = codexEnv("http://proxy/openai")
 	if hasEnv(env, "CODEX_API_KEY=injected-by-egress-proxy") ||
 		hasEnv(env, "OPENAI_API_KEY=injected-by-egress-proxy") {
 		t.Error("placeholder must not override an existing key")
+	}
+}
+
+func TestCodexEnvDirectMode(t *testing.T) {
+	t.Setenv("CODEX_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	env := codexEnv("")
+	if hasEnv(env, "CODEX_API_KEY=injected-by-egress-proxy") ||
+		hasEnv(env, "OPENAI_API_KEY=injected-by-egress-proxy") {
+		t.Error("direct mode must not receive proxy placeholder credentials")
 	}
 }
 

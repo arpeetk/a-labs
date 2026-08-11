@@ -251,9 +251,10 @@ real PR without touching github.com.
 - **Harness:** the **mock** adapter (deterministic, no key) is the default; the
   real Claude Code adapter needs `ANTHROPIC_API_KEY` + the egress path. The
   **codex** and **opencode** adapters (WS-12) are built — adapters, images,
-  the `/openai/` egress route, `--openai-key-secret` — but **not yet validated
-  against the live providers** (no keys in CI; see docs/harnesses.md for the
-  live-smoke recipe).
+  the `/openai/` egress route, `--openai-key-secret`. Codex's Responses
+  HTTP/SSE path through secure egress is live-canary validated; **opencode is
+  not yet validated against the live provider** (no key in CI; see
+  docs/harnesses.md for the live-smoke recipe).
 - **Egress-proxy:** real — enforces the allowlist and injects github/anthropic/
   openai credentials (`internal/egress`); the runner holds no token. Bypass is
   **enforced** (WS-1): an `egress-lockdown` init container iptables-rejects all
