@@ -1,0 +1,2 @@
+before crash.
+after resume.
