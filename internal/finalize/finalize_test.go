@@ -39,6 +39,7 @@ func makeOrigin(t *testing.T) string {
 	}
 	head, _ := repo.Head()
 	_ = repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), head.Hash()))
+	_ = repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main")))
 
 	bare := t.TempDir()
 	if _, err := git.PlainClone(bare, true, &git.CloneOptions{URL: seed}); err != nil {
@@ -50,7 +51,7 @@ func makeOrigin(t *testing.T) string {
 func cloneInto(t *testing.T, origin string) string {
 	t.Helper()
 	ws := t.TempDir()
-	if _, err := git.PlainClone(ws, false, &git.CloneOptions{URL: "file://" + origin}); err != nil {
+	if _, err := gitwork.Clone("file://"+origin, "main", ws, ""); err != nil {
 		t.Fatal(err)
 	}
 	return ws

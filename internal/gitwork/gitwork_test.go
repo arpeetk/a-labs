@@ -39,6 +39,9 @@ func makeOrigin(t *testing.T) string {
 	if err := repo.Storer.SetReference(ref); err != nil {
 		t.Fatal(err)
 	}
+	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, ref.Name())); err != nil {
+		t.Fatal(err)
+	}
 
 	bare := t.TempDir()
 	if _, err := git.PlainClone(bare, true, &git.CloneOptions{URL: seed}); err != nil {
@@ -54,6 +57,17 @@ func TestCloneCommitPush(t *testing.T) {
 	repo, err := Clone("file://"+origin, "", ws, "")
 	if err != nil {
 		t.Fatalf("clone: %v", err)
+	}
+	base, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", "main"), true)
+	if err != nil {
+		t.Fatalf("hydrated base ref: %v", err)
+	}
+	head, err := repo.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base.Hash() != head.Hash() {
+		t.Fatalf("hydrated base = %s, HEAD = %s", base.Hash(), head.Hash())
 	}
 	// Harness makes a change.
 	if err := os.WriteFile(filepath.Join(ws, "WREN.md"), []byte("work\n"), 0o644); err != nil {
