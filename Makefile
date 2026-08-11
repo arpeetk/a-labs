@@ -9,7 +9,7 @@ LDFLAGS := -X $(PKG)/internal/cli.Version=$(VERSION) \
 
 CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@latest
 
-.PHONY: build build-operator generate manifests deploy deploy-manifests assets check-assets e2e e2e-gke e2e-gke-checkpoint docker-push-gke test vet fmt tidy clean
+.PHONY: build build-desktop desktop-dev build-operator generate manifests deploy deploy-manifests assets check-assets e2e e2e-gke e2e-gke-checkpoint docker-push-gke test vet fmt tidy clean
 
 build: ## Build the wren CLI into ./bin
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/wren
@@ -22,6 +22,12 @@ build-apiserver: ## Build the wren-apiserver (control plane) into ./bin
 
 build-runtime: ## Build the wren-runtime (in-pod harness/sidecars) into ./bin
 	go build -o bin/wren-runtime ./cmd/wren-runtime
+
+build-desktop: ## Build the Wren native desktop app (requires Wails v2 + npm)
+	cd cmd/wren-desktop && wails build
+
+desktop-dev: ## Run the Wren desktop app with frontend hot reload
+	cd cmd/wren-desktop && wails dev
 
 RUNTIME_IMAGE   ?= wren/runtime:dev
 OPERATOR_IMAGE  ?= wren/operator:dev

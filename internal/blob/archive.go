@@ -13,10 +13,11 @@ import (
 
 // Archive walks srcDir and writes a gzip-compressed tar stream of its full
 // tree (including dotfiles like ".git") to dst, preserving relative paths,
-// regular files, and directories. Symlinks are followed: a broken symlink
-// (its target does not resolve) is silently skipped rather than failing the
-// whole archive — the workspace is agent-written repo content, not a place
-// symlink edge cases need special handling.
+// regular files, directories, and safe relative symlinks. Symlinks are archived
+// as links and never followed: the workspace is controlled by the untrusted
+// harness, while the checkpointer can see mounts the harness cannot. Following
+// a workspace link here would let the harness make the trusted checkpointer
+// copy data from those mounts into its own checkpoint.
 func Archive(dst io.Writer, srcDir string) error {
 	gz := gzip.NewWriter(dst)
 	tw := tar.NewWriter(gz)
@@ -37,11 +38,19 @@ func Archive(dst io.Writer, srcDir string) error {
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			resolved, statErr := os.Stat(p) // follows the link
-			if statErr != nil {
-				return nil // broken symlink: skip
+			target, err := os.Readlink(p)
+			if err != nil {
+				return fmt.Errorf("blob: archive read symlink %q: %w", rel, err)
 			}
-			info = resolved
+			hdr, err := tar.FileInfoHeader(info, target)
+			if err != nil {
+				return fmt.Errorf("blob: archive symlink header for %q: %w", rel, err)
+			}
+			hdr.Name = filepath.ToSlash(rel)
+			if err := tw.WriteHeader(hdr); err != nil {
+				return fmt.Errorf("blob: archive write symlink header for %q: %w", rel, err)
+			}
+			return nil
 		}
 		hdr, err := tar.FileInfoHeader(info, "")
 		if err != nil {
@@ -61,9 +70,12 @@ func Archive(dst io.Writer, srcDir string) error {
 		if err != nil {
 			return fmt.Errorf("blob: archive open %q: %w", rel, err)
 		}
-		defer f.Close()
 		if _, err := io.Copy(tw, f); err != nil {
+			_ = f.Close()
 			return fmt.Errorf("blob: archive copy %q: %w", rel, err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("blob: archive close %q: %w", rel, err)
 		}
 		return nil
 	})
@@ -115,11 +127,37 @@ func Unarchive(src io.Reader, destDir string) error {
 			if err := writeArchiveFile(target, hdr, tr); err != nil {
 				return err
 			}
+		case tar.TypeSymlink:
+			linkTarget, err := resolveArchiveSymlink(destDir, target, hdr.Linkname)
+			if err != nil {
+				return fmt.Errorf("blob: unarchive symlink %q: %w", hdr.Name, err)
+			}
+			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return fmt.Errorf("blob: unarchive mkdir parent of symlink %q: %w", hdr.Name, err)
+			}
+			if err := os.Symlink(linkTarget, target); err != nil {
+				return fmt.Errorf("blob: unarchive create symlink %q: %w", hdr.Name, err)
+			}
 		default:
-			// Anything else (symlinks, devices, ...) is not expected in a
+			// Anything else (hard links, devices, ...) is not expected in a
 			// workspace archive; skip rather than fail the whole restore.
 		}
 	}
+}
+
+// resolveArchiveSymlink accepts only relative links whose cleaned destination
+// remains under destDir. Returning the original relative target preserves the
+// workspace layout while preventing an archive from planting a link to another
+// mount (or using a later entry beneath that link to write outside destDir).
+func resolveArchiveSymlink(destDir, linkPath, linkTarget string) (string, error) {
+	if filepath.IsAbs(linkTarget) {
+		return "", fmt.Errorf("absolute target %q is not allowed", linkTarget)
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(linkPath), filepath.FromSlash(linkTarget)))
+	if resolved != destDir && !strings.HasPrefix(resolved, destDir+string(os.PathSeparator)) {
+		return "", fmt.Errorf("target %q escapes destination", linkTarget)
+	}
+	return linkTarget, nil
 }
 
 func writeArchiveFile(target string, hdr *tar.Header, r io.Reader) error {

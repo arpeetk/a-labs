@@ -68,13 +68,18 @@ func runAgentCLI(ctx context.Context, spec runspec.RunSpec, em *Emitter, cli age
 		return Result{}, err
 	}
 
-	in, out, isErr := streamCLI(stdout, em, cli.parseLine)
+	in, out, isErr, streamErr := streamCLI(stdout, em, cli.parseLine)
 	waitErr := cmd.Wait()
 
 	branch := branchFor(spec)
 	if waitErr != nil {
 		em.Errorf(cli.bin + " exited with error: " + waitErr.Error())
 		return Result{Branch: branch, InputTokens: in, OutputTokens: out}, waitErr
+	}
+	if streamErr != nil {
+		em.Errorf(cli.bin + " output stream failed: " + streamErr.Error())
+		return Result{Branch: branch, InputTokens: in, OutputTokens: out},
+			fmt.Errorf("%s harness: read output stream: %w", cli.adapter, streamErr)
 	}
 	if isErr {
 		return Result{Branch: branch, InputTokens: in, OutputTokens: out},
@@ -89,7 +94,7 @@ func runAgentCLI(ctx context.Context, spec runspec.RunSpec, em *Emitter, cli age
 // the run errored. token_usage is emitted as an event (not just returned)
 // because the operator reads run results from the harness's log stream — a
 // count that never becomes an event never reaches status.
-func streamCLI(r io.Reader, em *Emitter, parse func([]byte) []cliEvent) (inTokens, outTokens int64, isErr bool) {
+func streamCLI(r io.Reader, em *Emitter, parse func([]byte) []cliEvent) (inTokens, outTokens int64, isErr bool, err error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024) // agent messages can be large
 	for sc.Scan() {
@@ -113,7 +118,7 @@ func streamCLI(r io.Reader, em *Emitter, parse func([]byte) []cliEvent) (inToken
 			}
 		}
 	}
-	return inTokens, outTokens, isErr
+	return inTokens, outTokens, isErr, sc.Err()
 }
 
 // branchFor computes the run's PR branch (shared by every adapter).

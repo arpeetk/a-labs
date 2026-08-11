@@ -104,7 +104,7 @@ func (c *Client) ListRuns(ctx context.Context, scope, project string) ([]Run, er
 // GetRun returns a single run by ID.
 func (c *Client) GetRun(ctx context.Context, id string) (*Run, error) {
 	var run Run
-	if err := c.do(ctx, http.MethodGet, "/v1/runs/"+id, nil, &run); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/v1/runs/"+url.PathEscape(id), nil, &run); err != nil {
 		return nil, err
 	}
 	return &run, nil
@@ -112,20 +112,20 @@ func (c *Client) GetRun(ctx context.Context, id string) (*Run, error) {
 
 // DeleteRun removes a run and its cluster resources (DELETE /v1/runs/{id}).
 func (c *Client) DeleteRun(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodDelete, "/v1/runs/"+id, nil, nil)
+	return c.do(ctx, http.MethodDelete, "/v1/runs/"+url.PathEscape(id), nil, nil)
 }
 
 // StopRun cancels a run without deleting it (POST /v1/runs/{id}/stop): the
 // control plane halts the pod and drives the run to Canceled (no auto-resume).
 func (c *Client) StopRun(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodPost, "/v1/runs/"+id+"/stop", nil, nil)
+	return c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(id)+"/stop", nil, nil)
 }
 
 // ResumeRun manually restarts a terminally-Failed run (POST
 // /v1/runs/{id}/resume): the control plane resets the retry budget, clears
 // any leftover pod, and gives the run a fresh attempt.
 func (c *Client) ResumeRun(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodPost, "/v1/runs/"+id+"/resume", nil, nil)
+	return c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(id)+"/resume", nil, nil)
 }
 
 // Project is a registered repository and its run defaults (mirror of
@@ -157,7 +157,7 @@ func (c *Client) CreateProject(ctx context.Context, p Project) (*Project, error)
 // GetProject returns a single project by name (GET /v1/projects/{name}).
 func (c *Client) GetProject(ctx context.Context, name string) (*Project, error) {
 	var out Project
-	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+name, nil, &out); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/v1/projects/"+url.PathEscape(name), nil, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -189,7 +189,7 @@ func (c *Client) StreamLogs(ctx context.Context, id string, opts LogsOptions, w 
 	if opts.Container != "" {
 		q.Set("container", opts.Container)
 	}
-	path := "/v1/runs/" + id + "/logs"
+	path := "/v1/runs/" + url.PathEscape(id) + "/logs"
 	if enc := q.Encode(); enc != "" {
 		path += "?" + enc
 	}
