@@ -2,7 +2,8 @@
 # Usage: docker build --build-arg BIN=wren-operator -f build/Dockerfile.gobin -t wren/operator:dev .
 # Build on host platform, cross-compile for TARGETPLATFORM (no qemu emulation needed).
 FROM --platform=$BUILDPLATFORM golang:1.26 AS build
-ARG TARGETOS=linux TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN CGO_ENABLED=0 go mod download

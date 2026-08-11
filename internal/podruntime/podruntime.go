@@ -5,11 +5,12 @@
 //
 // The egress-proxy is real (spec §5.6). The agent-gateway sidecar is still an
 // M0 stand-in (it keeps the pod's native-sidecar shape valid and logs
-// liveness only). The checkpointer is real as of WS-21 when a GCS checkpoint
+// liveness only). The checkpointer is real as of WS-21 when a checkpoint
 // mount is configured: it takes periodic workspace snapshots (checkpointLoop)
 // against internal/blob.Store, and hydrate restores the latest one on a
 // confirmed workspace loss (RunHydrate, RestoreRequired). Without the mount
-// configured, checkpointer behaves exactly like the plain liveness stub.
+// configured, checkpointer behaves exactly like the plain liveness stub. GCS
+// is the production-shaped mount; local hostPath exists only for kind/dev E2E.
 // Stream bridging lands with interactive steering (M2).
 package podruntime
 
@@ -250,10 +251,21 @@ func RunHydrate(ctx context.Context, out io.Writer, specPath string) error {
 
 	if spec.Mode == runspec.ModeResume {
 		if !spec.RestoreRequired {
+			if err := prepareHarnessState(spec); err != nil {
+				em.Errorf("hydrate harness state: " + err.Error())
+				return err
+			}
 			em.Message("hydrate: workspace ready (resume; PVC survived, no restore needed)")
 			return nil
 		}
-		return restoreFromCheckpoint(ctx, em, spec)
+		if err := restoreFromCheckpoint(ctx, em, spec); err != nil {
+			return err
+		}
+		if err := prepareHarnessState(spec); err != nil {
+			em.Errorf("hydrate harness state: " + err.Error())
+			return err
+		}
+		return nil
 	}
 
 	// Fresh start: when a repo + GitHub auth are configured, do a real clone so
@@ -267,6 +279,10 @@ func RunHydrate(ctx context.Context, out io.Writer, specPath string) error {
 			em.Errorf("hydrate clone: " + err.Error())
 			return err
 		}
+		if err := prepareHarnessState(spec); err != nil {
+			em.Errorf("hydrate harness state: " + err.Error())
+			return err
+		}
 		via := "direct"
 		if egressProxyBase() != "" {
 			via = "egress-proxy"
@@ -275,7 +291,22 @@ func RunHydrate(ctx context.Context, out io.Writer, specPath string) error {
 		return nil
 	}
 
+	if err := prepareHarnessState(spec); err != nil {
+		em.Errorf("hydrate harness state: " + err.Error())
+		return err
+	}
 	em.Message("hydrate: workspace ready (fresh clone skipped; no repo/token — M0)")
+	return nil
+}
+
+func prepareHarnessState(spec runspec.RunSpec) error {
+	if spec.Harness != "codex" {
+		return nil
+	}
+	path := runspec.CodexHomePath(spec.WorkspacePath, spec.Repo)
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return fmt.Errorf("create Codex state directory %s: %w", path, err)
+	}
 	return nil
 }
 
@@ -432,10 +463,8 @@ func splitAllowlist(s string) []string {
 
 // RunSidecar runs a long-lived sidecar role: it logs liveness and blocks until
 // the context is canceled (SIGTERM), then exits cleanly so the pod can complete.
-// It backs the checkpointer and agent-gateway roles. The checkpointer is
-// EXPERIMENTAL (spec §5.5): a liveness stub keeping the pod shape stable — it
-// takes no snapshots in v0.1; real checkpointing plugs into internal/blob.Store
-// post-launch.
+// It backs sidecars without a configured active implementation (currently the
+// agent-gateway, plus checkpointer when no checkpoint mount is enabled).
 func RunSidecar(ctx context.Context, out io.Writer, name string) error {
 	em := harness.NewEmitter(out)
 	em.Message(name + ": started (M0 stand-in)")
@@ -587,7 +616,7 @@ const (
 	RoleHydrate        = "hydrate"
 	RoleEgressProxy    = "egress-proxy"
 	RoleEgressLockdown = "egress-lockdown"
-	RoleCheckpointer   = "checkpointer" // experimental: liveness stub, no snapshots (spec §5.5)
+	RoleCheckpointer   = "checkpointer"
 	RoleGateway        = "agent-gateway"
 )
 

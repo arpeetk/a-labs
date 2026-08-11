@@ -8,7 +8,8 @@
 # for TARGETPLATFORM. CGO_ENABLED=0 means no C toolchain is needed for the target,
 # so this works without qemu emulation regardless of host/target arch mismatch.
 FROM --platform=$BUILDPLATFORM golang:1.26 AS build
-ARG TARGETOS=linux TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN CGO_ENABLED=0 go mod download

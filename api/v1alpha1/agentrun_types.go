@@ -153,14 +153,18 @@ type UsageStatus struct {
 
 // AgentRunStatus is the observed state of an agent run.
 type AgentRunStatus struct {
-	Phase          RunPhase           `json:"phase,omitempty"`
-	PodName        string             `json:"podName,omitempty"`
-	RestartCount   int32              `json:"restartCount,omitempty"`
-	LastCheckpoint *CheckpointRef     `json:"lastCheckpoint,omitempty"`
-	SessionID      string             `json:"sessionId,omitempty"`
-	PR             PRStatus           `json:"pr,omitempty"`
-	Usage          UsageStatus        `json:"usage,omitempty"`
-	Conditions     []metav1.Condition `json:"conditions,omitempty"`
+	Phase   RunPhase `json:"phase,omitempty"`
+	PodName string   `json:"podName,omitempty"`
+	// AttemptGeneration monotonically identifies pod attempts for this run.
+	// Unlike RestartCount it is never reset by a manual resume, so pod names
+	// and RunSpec.mode cannot accidentally move backwards to a fresh start.
+	AttemptGeneration int32              `json:"attemptGeneration,omitempty"`
+	RestartCount      int32              `json:"restartCount,omitempty"`
+	LastCheckpoint    *CheckpointRef     `json:"lastCheckpoint,omitempty"`
+	SessionID         string             `json:"sessionId,omitempty"`
+	PR                PRStatus           `json:"pr,omitempty"`
+	Usage             UsageStatus        `json:"usage,omitempty"`
+	Conditions        []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // AgentRun is one task executed by one harness in one sandbox against a project.

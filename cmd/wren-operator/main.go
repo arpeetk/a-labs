@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -47,10 +48,16 @@ func main() {
 		"experimental (WS-18): mount the run's checkpoint bucket into the checkpointer container via the GKE Cloud Storage FUSE CSI driver; requires the GcsFuseCsiDriver addon + a Workload Identity binding on --checkpoint-ksa")
 	flag.StringVar(&podCfg.CheckpointKSA, "checkpoint-ksa", controller.DefaultCheckpointKSA,
 		"Kubernetes ServiceAccount (Workload-Identity-bound to a GCP SA with objectAdmin on the checkpoint bucket) applied to pods with --checkpoint-gcs-mount enabled")
+	flag.StringVar(&podCfg.CheckpointLocalPath, "checkpoint-local-path", "",
+		"development/test only: existing absolute node directory mounted into trusted checkpoint containers (single-node kind; not node-durable)")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
+	if podCfg.CheckpointLocalPath != "" && (!filepath.IsAbs(podCfg.CheckpointLocalPath) || filepath.Clean(podCfg.CheckpointLocalPath) == string(filepath.Separator)) {
+		fmt.Fprintf(os.Stderr, "wren-operator: invalid --checkpoint-local-path %q (want a non-root absolute path)\n", podCfg.CheckpointLocalPath)
+		os.Exit(1)
+	}
 
 	switch controller.EgressEnforcement(egressEnforcement) {
 	case controller.EgressEnforcementIptables, controller.EgressEnforcementOff:

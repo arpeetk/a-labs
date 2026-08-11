@@ -417,6 +417,7 @@ func TestReconcileManualResume(t *testing.T) {
 	run.Spec.Retry.MaxRestarts = 1
 	run.Status.Phase = wrenv1.PhaseRunning
 	run.Status.RestartCount = 1 // already at budget
+	run.Status.PodName = "r-abc-1"
 	r, c := newReconciler(t, run)
 
 	// The test jumps straight to Running/Failed, skipping the normal
@@ -459,6 +460,9 @@ func TestReconcileManualResume(t *testing.T) {
 	if resumed.Status.RestartCount != 0 {
 		t.Fatalf("restartCount = %d, want 0 (fresh retry budget)", resumed.Status.RestartCount)
 	}
+	if resumed.Status.AttemptGeneration != 2 {
+		t.Fatalf("attemptGeneration = %d, want 2 (monotonic across manual resume)", resumed.Status.AttemptGeneration)
+	}
 	if resumed.Annotations[wrenv1.ResumeAnnotation] != "" {
 		t.Error("resume annotation should be cleared so a later failure can't stale-auto-resume")
 	}
@@ -471,11 +475,128 @@ func TestReconcileManualResume(t *testing.T) {
 		t.Errorf("leftover pod after resume = %v, want NotFound", err)
 	}
 
-	// The next reconcile gives the run a real fresh attempt: a new pod at
-	// generation 0 (no collision — the old r-abc-0 was already deleted above).
+	// The next reconcile gives the run a real fresh retry budget while keeping
+	// the pod generation monotonic, so a terminating old pod can never collide.
 	reconcile(t, r, resumed)
-	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-0"}, &corev1.Pod{}); err != nil {
-		t.Fatalf("expected fresh pod r-abc-0 after resume: %v", err)
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-2"}, &corev1.Pod{}); err != nil {
+		t.Fatalf("expected fresh pod r-abc-2 after resume: %v", err)
+	}
+	if rs := runSpecFor(t, c, run); rs.Mode != runspec.ModeResume {
+		t.Fatalf("manual-resume RunSpec mode = %q, want resume", rs.Mode)
+	}
+}
+
+func TestReconcileMissingRecordedPodResumes(t *testing.T) {
+	run := testRun()
+	r, c := newReconciler(t, run)
+	reconcile(t, r, run) // Pending
+	reconcile(t, r, run) // create pod and record status.podName
+
+	setPodPhase(t, c, run.Namespace, "r-abc-0", corev1.PodRunning, nil)
+	reconcile(t, r, run)
+	running := getRun(t, c, run)
+	if running.Status.PodName != "r-abc-0" || running.Status.Phase != wrenv1.PhaseRunning {
+		t.Fatalf("running status = %+v", running.Status)
+	}
+
+	var pod corev1.Pod
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-0"}, &pod); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Delete(context.Background(), &pod); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r, run)
+
+	interrupted := getRun(t, c, run)
+	if interrupted.Status.Phase != wrenv1.PhaseInterrupted || interrupted.Status.RestartCount != 1 || interrupted.Status.AttemptGeneration != 1 {
+		t.Fatalf("interrupted status = %+v", interrupted.Status)
+	}
+	if cond := findCondition(interrupted, "Resuming"); cond == nil || cond.Reason != "PodDisappeared" {
+		t.Fatalf("Resuming condition = %+v", cond)
+	}
+
+	reconcile(t, r, interrupted)
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-1"}, &corev1.Pod{}); err != nil {
+		t.Fatalf("expected resume pod r-abc-1: %v", err)
+	}
+	if rs := runSpecFor(t, c, run); rs.Mode != runspec.ModeResume {
+		t.Fatalf("replacement RunSpec mode = %q, want resume", rs.Mode)
+	}
+	setPodPhase(t, c, run.Namespace, "r-abc-1", corev1.PodRunning, nil)
+	reconcile(t, r, interrupted)
+	if cond := findCondition(getRun(t, c, run), "Resuming"); cond == nil || cond.Status != metav1.ConditionFalse {
+		t.Fatalf("Resuming condition = %+v, want False after replacement is Running", cond)
+	}
+}
+
+func TestReconcileMissingRecordedPodHonorsRetryBudget(t *testing.T) {
+	run := testRun()
+	run.Spec.Retry.MaxRestarts = 1
+	run.Status = wrenv1.AgentRunStatus{
+		Phase: wrenv1.PhaseRunning, PodName: "r-abc-1", RestartCount: 1, AttemptGeneration: 1,
+	}
+	r, c := newReconciler(t, run, buildWorkspacePVC(run))
+	reconcile(t, r, run)
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseFailed {
+		t.Fatalf("phase = %q, want Failed", got.Status.Phase)
+	}
+	if cond := findCondition(got, "Ready"); cond == nil || cond.Reason != "RetryBudgetExhausted" {
+		t.Fatalf("Ready condition = %+v", cond)
+	}
+}
+
+func TestReconcilePodAndWorkspaceLossCountsOneRecoveryIncident(t *testing.T) {
+	run := testRun()
+	run.Status = wrenv1.AgentRunStatus{
+		Phase:   wrenv1.PhaseRunning,
+		PodName: "r-abc-0",
+	}
+	pvc := buildWorkspacePVC(run)
+	r, c := newReconciler(t, run, pvc)
+	r.PodConfig.CheckpointGCSMount = true
+
+	// Kubernetes may report the pod deletion before pvc-protection finishes
+	// deleting the PVC. The first event consumes exactly one retry.
+	reconcile(t, r, run)
+	interrupted := getRun(t, c, run)
+	if interrupted.Status.RestartCount != 1 || interrupted.Status.AttemptGeneration != 1 {
+		t.Fatalf("first recovery status = %+v", interrupted.Status)
+	}
+
+	// A replacement pod can be created and recorded before the delayed PVC
+	// deletion arrives, but it has not reached Running or performed work.
+	reconcile(t, r, interrupted)
+	replacementPending := getRun(t, c, run)
+	if replacementPending.Status.PodName != "r-abc-1" {
+		t.Fatalf("replacement pod name = %q, want r-abc-1", replacementPending.Status.PodName)
+	}
+	if err := c.Delete(context.Background(), pvc); err != nil {
+		t.Fatalf("delete delayed PVC: %v", err)
+	}
+	reconcile(t, r, replacementPending)
+
+	coalesced := getRun(t, c, run)
+	if coalesced.Status.RestartCount != 1 || coalesced.Status.AttemptGeneration != 1 {
+		t.Fatalf("pod+PVC loss counted more than once: %+v", coalesced.Status)
+	}
+	if coalesced.Status.PodName != "" {
+		t.Fatalf("recorded deliberately deleted recovery pod = %q, want empty", coalesced.Status.PodName)
+	}
+	if cond := findCondition(coalesced, workspaceRestoreConditionType); cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("WorkspaceRestorePending = %+v, want True", cond)
+	}
+
+	// The same generation is recreated after the checkpoint-backed PVC. It is
+	// still resume mode, and the retry budget remains charged only once.
+	reconcile(t, r, coalesced)
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-1"}, &corev1.Pod{}); err != nil {
+		t.Fatalf("expected coalesced replacement pod r-abc-1: %v", err)
+	}
+	got := getRun(t, c, run)
+	if got.Status.RestartCount != 1 || got.Status.AttemptGeneration != 1 {
+		t.Fatalf("final recovery status = %+v", got.Status)
 	}
 }
 

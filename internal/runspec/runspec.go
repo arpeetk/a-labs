@@ -4,6 +4,8 @@
 // image (claude-code, codex, byo) reads this file on startup (spec §5.4).
 package runspec
 
+import "path/filepath"
+
 // Harness process exit codes (spec §5.4). The operator reads the exit code to
 // decide whether a failed run may be retried: a clean error is deterministic and
 // must not be retried (it would just repeat and re-spend the agent's tokens),
@@ -13,6 +15,16 @@ const (
 	ExitError     = 1  // deterministic failure — do NOT retry
 	ExitRetryable = 75 // transient failure — the operator may retry (EX_TEMPFAIL)
 )
+
+// CodexHomePath returns the per-run Codex state directory on the durable
+// workspace. Repository-backed runs keep it under .git so finalization cannot
+// stage transcripts; repo-less runs avoid creating a misleading .git tree.
+func CodexHomePath(workspacePath, repo string) string {
+	if repo != "" {
+		return filepath.Join(workspacePath, ".git", "wren", "codex")
+	}
+	return filepath.Join(workspacePath, ".wren", "codex")
+}
 
 const (
 	// MountPath is where the RunSpec ConfigMap is mounted in the pod.

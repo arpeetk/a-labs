@@ -61,7 +61,7 @@ internal/
   launcher/            creates AgentRun CRs (Launcher interface + K8s impl + Fake)
   controller/          AgentRun reconciler + pod builder
   runspec/             the RunSpec contract handed to a harness
-  blob/                object-store contract for checkpoints (interface only — no impls yet)
+  blob/                checkpoint Store + mounted-filesystem impl + safe archive/restore
   harness/             harness adapters (mock, claude-code, codex, opencode) + event protocol
   podruntime/          in-pod role runners (harness/hydrate/sidecars) + dispatch
   egress/              the credential-injecting allowlist proxy (github/anthropic/openai routes)
@@ -251,9 +251,10 @@ real PR without touching github.com.
 - **Harness:** the **mock** adapter (deterministic, no key) is the default; the
   real Claude Code adapter needs `ANTHROPIC_API_KEY` + the egress path. The
   **codex** and **opencode** adapters (WS-12) are built — adapters, images,
-  the `/openai/` egress route, `--openai-key-secret` — but **not yet validated
-  against the live providers** (no keys in CI; see docs/harnesses.md for the
-  live-smoke recipe).
+  the `/openai/` egress route, `--openai-key-secret`. Codex's Responses
+  HTTP/SSE path through secure egress is live-canary validated; **opencode is
+  not yet validated against the live provider** (no key in CI; see
+  docs/harnesses.md for the live-smoke recipe).
 - **Egress-proxy:** real — enforces the allowlist and injects github/anthropic/
   openai credentials (`internal/egress`); the runner holds no token. Bypass is
   **enforced** (WS-1): an `egress-lockdown` init container iptables-rejects all
@@ -262,13 +263,15 @@ real PR without touching github.com.
   the escape hatch for clusters that forbid privileged init containers (e.g.
   GKE Autopilot) — `config/netpol/` has a weaker NetworkPolicy layer for that
   path. Residual: a runc escape to the node (gVisor/Kata, M4).
-  **checkpointer** is an experimental liveness stub (no snapshots; crash-resume
-  is PVC reattach + resume-mode — spec §5.5 v0.1). WS-18 made *one* narrow thing
-  real: an opt-in GCS-FUSE **mount** into the checkpointer container
-  (`--checkpoint-gcs-mount`, default off) backed by `internal/blob.MountStore`,
-  with a startup Put/Get/List self-check proven live on GKE via Workload
-  Identity — but the actual checkpoint feature (interval snapshots + restore)
-  still does not exist. **gateway** is still a
+  **checkpointer** is real when a checkpoint mount is configured: it writes
+  full-workspace tar.gz snapshots on the configured interval and hydrate
+  restores the newest snapshot after confirmed PVC loss. Production uses the
+  opt-in GCS-FUSE mount (`--checkpoint-gcs-mount`) with a dedicated Workload
+  Identity KSA; `--checkpoint-local-path` is a single-node kind/dev test backend
+  and is not node-durable. Without a mount, the checkpointer remains a liveness
+  sidecar and PVC reattach is the only workspace recovery layer. Snapshots are
+  full and interval-only today (no incremental bundles, retention policy,
+  `checkpoint_hint`, or final SIGTERM flush yet). **gateway** is still a
   liveness stand-in (run results reach status via the operator's pods/log
   scrape, WS-11; the event bridge is the v0.2 target).
 - **Transport:** control-plane API is HTTP/JSON (target: gRPC + Connect).

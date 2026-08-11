@@ -39,6 +39,7 @@ func makeOrigin(t *testing.T) string {
 	}
 	head, _ := repo.Head()
 	_ = repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), head.Hash()))
+	_ = repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main")))
 
 	bare := t.TempDir()
 	if _, err := git.PlainClone(bare, true, &git.CloneOptions{URL: seed}); err != nil {
@@ -50,7 +51,7 @@ func makeOrigin(t *testing.T) string {
 func cloneInto(t *testing.T, origin string) string {
 	t.Helper()
 	ws := t.TempDir()
-	if _, err := git.PlainClone(ws, false, &git.CloneOptions{URL: "file://" + origin}); err != nil {
+	if _, err := gitwork.Clone("file://"+origin, "main", ws, ""); err != nil {
 		t.Fatal(err)
 	}
 	return ws
@@ -103,9 +104,68 @@ func TestFinalizeOpensPR(t *testing.T) {
 func TestFinalizeNoChanges(t *testing.T) {
 	origin := makeOrigin(t)
 	ws := cloneInto(t, origin)
-	spec := runspec.RunSpec{RunID: "r-1", Repo: "corp/payments", WorkspacePath: ws, BaseRef: "main"}
-	if _, err := Run(context.Background(), spec, "", &github.Fake{}); !errors.Is(err, ErrNoChanges) {
+	spec := runspec.RunSpec{RunID: "r-1", Repo: "corp/payments", WorkspacePath: ws}
+	fake := &github.Fake{}
+	if _, err := Run(context.Background(), spec, "", fake); !errors.Is(err, ErrNoChanges) {
 		t.Fatalf("err = %v, want ErrNoChanges", err)
+	}
+	if len(fake.PRs) != 0 {
+		t.Fatalf("opened PR for unchanged run: %+v", fake.PRs)
+	}
+	ob, _ := git.PlainOpen(origin)
+	if _, err := ob.Reference(plumbing.NewBranchReferenceName(BranchName(spec)), true); err == nil {
+		t.Fatal("pushed a branch for unchanged run")
+	}
+}
+
+// TestFinalizeHarnessCreatedCommit is the regression for harnesses such as
+// Codex that may commit their work before finalize starts. The local base ref
+// moves with that commit, but origin/base remains the trusted comparison point.
+func TestFinalizeHarnessCreatedCommit(t *testing.T) {
+	origin := makeOrigin(t)
+	ws := cloneInto(t, origin)
+	repo, err := git.PlainOpen(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wt, err := repo.Worktree()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := wt.Checkout(&git.CheckoutOptions{Branch: plumbing.NewBranchReferenceName("main")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "WREN.md"), []byte("committed by harness\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Add("WREN.md"); err != nil {
+		t.Fatal(err)
+	}
+	harnessCommit, err := wt.Commit("harness commit", &git.CommitOptions{
+		Author: &object.Signature{Name: "Codex", Email: "codex@example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	spec := runspec.RunSpec{
+		RunID: "r-committed", Repo: "corp/payments", Prompt: "x", BaseRef: "main",
+		WorkspacePath: ws, BranchPrefix: "wren/me",
+	}
+	fake := &github.Fake{}
+	if _, err := Run(context.Background(), spec, "", fake); err != nil {
+		t.Fatalf("finalize pre-committed work: %v", err)
+	}
+	if len(fake.PRs) != 1 {
+		t.Fatalf("PRs = %+v, want one", fake.PRs)
+	}
+	ob, _ := git.PlainOpen(origin)
+	ref, err := ob.Reference(plumbing.NewBranchReferenceName(BranchName(spec)), true)
+	if err != nil {
+		t.Fatalf("run branch not pushed: %v", err)
+	}
+	if ref.Hash() != harnessCommit {
+		t.Fatalf("pushed head = %s, want harness commit %s", ref.Hash(), harnessCommit)
 	}
 }
 
@@ -172,6 +232,84 @@ func TestFinalizeRunTwice(t *testing.T) {
 	}
 	if pr == nil || pr.URL == "" {
 		t.Fatalf("second finalize returned no PR: %+v", pr)
+	}
+}
+
+func TestFinalizeRejectsRunBranchUnrelatedToBase(t *testing.T) {
+	origin := makeOrigin(t)
+	ws := cloneInto(t, origin)
+	repo, err := git.PlainOpen(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := runspec.RunSpec{
+		RunID: "r-unrelated", Repo: "corp/payments", Prompt: "x", BaseRef: "main",
+		WorkspacePath: ws, BranchPrefix: "wren/me",
+	}
+
+	// Model a hostile/replaced history without invoking a git executable: the
+	// run branch has a valid commit, but no ancestry relationship to origin/main.
+	baseRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", "main"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCommit, err := repo.CommitObject(baseRef.Hash())
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated := &object.Commit{
+		Author:       object.Signature{Name: "harness", Email: "harness@example.com"},
+		Committer:    object.Signature{Name: "harness", Email: "harness@example.com"},
+		Message:      "unrelated root",
+		TreeHash:     baseCommit.TreeHash,
+		ParentHashes: nil,
+	}
+	obj := repo.Storer.NewEncodedObject()
+	if err := unrelated.Encode(obj); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := repo.Storer.SetEncodedObject(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchRef := plumbing.NewBranchReferenceName(BranchName(spec))
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(branchRef, hash)); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, branchRef)); err != nil {
+		t.Fatal(err)
+	}
+
+	fake := &github.Fake{}
+	if _, err := Run(context.Background(), spec, "", fake); err == nil || !strings.Contains(err.Error(), "not descended") {
+		t.Fatalf("err = %v, want unrelated-history rejection", err)
+	}
+	if len(fake.PRs) != 0 {
+		t.Fatalf("opened PR for unrelated history: %+v", fake.PRs)
+	}
+	ob, _ := git.PlainOpen(origin)
+	if _, err := ob.Reference(branchRef, true); err == nil {
+		t.Fatal("pushed unrelated run branch")
+	}
+}
+
+func TestFinalizeMissingRequestedBaseDoesNotPublish(t *testing.T) {
+	origin := makeOrigin(t)
+	ws := cloneInto(t, origin)
+	spec := runspec.RunSpec{
+		RunID: "r-missing-base", Repo: "corp/payments", BaseRef: "release/missing",
+		WorkspacePath: ws,
+	}
+	fake := &github.Fake{}
+	if _, err := Run(context.Background(), spec, "", fake); err == nil || !strings.Contains(err.Error(), "resolve requested base") {
+		t.Fatalf("err = %v, want missing-base error", err)
+	}
+	if len(fake.PRs) != 0 {
+		t.Fatalf("opened PR with missing requested base: %+v", fake.PRs)
+	}
+	ob, _ := git.PlainOpen(origin)
+	if _, err := ob.Reference(plumbing.NewBranchReferenceName(BranchName(spec)), true); err == nil {
+		t.Fatal("pushed branch without resolving requested base")
 	}
 }
 

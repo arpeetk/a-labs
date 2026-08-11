@@ -191,6 +191,13 @@ spec:
           status:
             description: AgentRunStatus is the observed state of an agent run.
             properties:
+              attemptGeneration:
+                description: |-
+                  AttemptGeneration monotonically identifies pod attempts for this run.
+                  Unlike RestartCount it is never reset by a manual resume, so pod names
+                  and RunSpec.mode cannot accidentally move backwards to a fresh start.
+                format: int32
+                type: integer
               conditions:
                 items:
                   description: Condition contains details for one aspect of the current

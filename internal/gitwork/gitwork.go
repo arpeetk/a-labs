@@ -48,6 +48,23 @@ func Clone(repoURL, baseRef, dir, token string) (*git.Repository, error) {
 	if err != nil {
 		return nil, fmt.Errorf("clone %s: %w", repoURL, err)
 	}
+	// PlainClone checks out the requested branch but does not consistently keep
+	// a remote-tracking ref for a local/file remote. Record the exact hydrated
+	// commit before the untrusted harness can move the local branch. Finalize
+	// uses this ref to distinguish a harness-created commit from an empty run
+	// and to reject unrelated replacement history.
+	anchor := baseRef
+	if anchor == "" {
+		anchor = "main"
+	}
+	head, err := repo.Head()
+	if err != nil {
+		return nil, fmt.Errorf("resolve cloned HEAD: %w", err)
+	}
+	remoteRef := plumbing.NewRemoteReferenceName("origin", anchor)
+	if err := repo.Storer.SetReference(plumbing.NewHashReference(remoteRef, head.Hash())); err != nil {
+		return nil, fmt.Errorf("record hydrated base origin/%s: %w", anchor, err)
+	}
 	return repo, nil
 }
 
