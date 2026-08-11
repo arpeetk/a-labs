@@ -217,7 +217,13 @@ spec:
   initContainers:
   - name: seed-workspace
     image: busybox:1.36
-    command: ["sh", "-c", "echo '${marker}' > /workspace/marker.txt"]
+    command:
+    - sh
+    - -c
+    - |
+      echo '${marker}' > /workspace/marker.txt
+      mkdir -p /workspace/.git/wren/codex/tmp/arg0/codex-arg0
+      ln -s /usr/local/lib/node_modules/@openai/codex/vendor/bin/codex /workspace/.git/wren/codex/tmp/arg0/codex-arg0/apply_patch
     securityContext:
       runAsUser: 65532
       runAsNonRoot: true
@@ -335,24 +341,26 @@ count=0
 # object whose key is the bare prefix itself (gcsfuse creates one when it
 # MkdirAlls the directory) — it sorts lexicographically BEFORE any
 # "checkpoints/ck-....tar.gz" key ('/' < alnum in ASCII), so anything
-# selecting "the first entry" must filter to real .tar.gz objects or it grabs
-# an empty placeholder instead of a checkpoint (found live while writing this
-# gate — not a product bug, a listing-format footgun).
+# selecting "the first entry" must use the immutable objects/ prefix or it
+# sees only manifest and directory-marker objects.
 while [ "$(date +%s)" -lt "$deadline" ]; do
-  count="$( (gcloud storage ls "gs://${CHECKPOINT_BUCKET}/runs/${SEED_RUN_ID}/checkpoints/" 2>/dev/null || true) | grep -c '\.tar\.gz$' || true)"
+  count="$( (gcloud storage ls "gs://${CHECKPOINT_BUCKET}/runs/${SEED_RUN_ID}/checkpoints/objects/" 2>/dev/null || true) | grep -c '\.tar\.gz$' || true)"
   [ "$count" -ge 2 ] 2>/dev/null && break
   sleep 5
 done
 [ "$count" -ge 2 ] 2>/dev/null || die "scenario A: expected >=2 checkpoints, found ${count}"
 log "  [PASS] ${count} checkpoint object(s) landed — independently verifying via gcloud storage"
-gcloud storage ls -l "gs://${CHECKPOINT_BUCKET}/runs/${SEED_RUN_ID}/checkpoints/"
-first_ck="$(gcloud storage ls "gs://${CHECKPOINT_BUCKET}/runs/${SEED_RUN_ID}/checkpoints/" 2>/dev/null | grep '\.tar\.gz$' | head -1)"
+gcloud storage ls -l "gs://${CHECKPOINT_BUCKET}/runs/${SEED_RUN_ID}/checkpoints/objects/"
+first_ck="$(gcloud storage ls "gs://${CHECKPOINT_BUCKET}/runs/${SEED_RUN_ID}/checkpoints/objects/" 2>/dev/null | grep '\.tar\.gz$' | head -1)"
 tmpfile="$(mktemp)"
 gcloud storage cat "$first_ck" > "$tmpfile"
 tar xzOf "$tmpfile" marker.txt | grep -q "periodic-snapshot proof" \
   || die "scenario A: checkpoint content did not match the seeded marker"
+if tar tzf "$tmpfile" | grep -q '/apply_patch$'; then
+  die "scenario A: checkpoint retained the unsafe Codex absolute tool link"
+fi
 rm -f "$tmpfile"
-log "  [PASS] checkpoint content verified byte-for-byte (not just the checkpointer's own log claim)"
+log "  [PASS] checkpoint content verified byte-for-byte; unsafe Codex tool link omitted"
 k -n "$NS_RUNS" delete pod "wren-e2e-seed-${SEED_RUN_ID}" --wait=false >/dev/null 2>&1 || true
 
 # --- 7. scenario B: positive restore path (full real pipeline) ---
@@ -392,7 +400,13 @@ spec:
   containers:
   - name: verify
     image: busybox:1.36
-    command: ["cat", "/workspace/marker.txt"]
+    command:
+    - sh
+    - -c
+    - |
+      cat /workspace/marker.txt
+      test ! -e /workspace/.git/wren/codex/tmp/arg0/codex-arg0/apply_patch
+      test ! -L /workspace/.git/wren/codex/tmp/arg0/codex-arg0/apply_patch
     securityContext:
       runAsUser: 65532
       runAsNonRoot: true
@@ -412,7 +426,7 @@ done
 restored="$(k -n "$NS_RUNS" logs wren-e2e-verify-restore 2>/dev/null || true)"
 k -n "$NS_RUNS" delete pod wren-e2e-verify-restore --wait=false >/dev/null 2>&1 || true
 [ "$restored" = "$MARKER" ] || die "scenario B: restored content mismatch: got '${restored}', want '${MARKER}'"
-log "  [PASS] restored file content verified byte-for-byte: ${restored}"
+log "  [PASS] restored content verified byte-for-byte; unsafe Codex tool link absent: ${restored}"
 
 # --- 8. scenario C: negative restore path (no checkpoint ever taken) ---
 log "scenario C: negative restore — workspace loss with zero checkpoints"
@@ -445,8 +459,14 @@ final_phase="$(wait_for_phase "$REG_RUN_ID" 60)"
 reason="$(k -n "$NS_RUNS" get agentrun "$REG_RUN_ID" -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}')"
 [ "$reason" = "WorkspaceLost" ] || die "scenario D: expected reason=WorkspaceLost (pre-WS-21 path), got ${reason}"
 restart_count="$(k -n "$NS_RUNS" get agentrun "$REG_RUN_ID" -o jsonpath='{.status.restartCount}')"
-[ -z "$restart_count" ] || [ "$restart_count" = "0" ] || die "scenario D: expected no restart (fails outright), got restartCount=${restart_count}"
-log "  [PASS] unchanged pre-WS-21 WorkspaceLost failure with checkpointing off"
+[ "$restart_count" = "1" ] || die "scenario D: expected the pod+PVC loss incident to consume one retry, got restartCount=${restart_count}"
+for _ in $(seq 1 20); do
+  k -n "$NS_RUNS" get pod "${REG_RUN_ID}-1" >/dev/null 2>&1 || break
+  sleep 1
+done
+k -n "$NS_RUNS" get pod "${REG_RUN_ID}-1" >/dev/null 2>&1 \
+  && die "scenario D: terminal WorkspaceLost leaked replacement pod ${REG_RUN_ID}-1"
+log "  [PASS] WorkspaceLost failed deterministically after one coalesced recovery incident; replacement pod cleaned up"
 
 # Restore the flag so a re-run (or a human poking at the cluster after) sees
 # the feature on, matching this script's own precondition.

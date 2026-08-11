@@ -175,10 +175,8 @@ if [ -n "$RUN_NS" ]; then
   if [ "$expected_enforcement" = "off" ]; then
     # In off mode the condition should be False/Disabled.
     if printf '%s' "$cr_yaml" | grep -q 'EgressEnforcement'; then
-      # The status field appears a few lines after 'type: EgressEnforcement';
-      # use awk to extract the block reliably.
-      egress_status="$(printf '%s' "$cr_yaml" | awk '/type: EgressEnforcement/{found=1} found && /status:/{print $2; exit}')"
-      if [ "$egress_status" = '"False"' ]; then
+      egress_status="$(k -n "$RUN_NS" get agentrun "$RUN_ID" -o jsonpath='{.status.conditions[?(@.type=="EgressEnforcement")].status}')"
+      if [ "$egress_status" = "False" ]; then
         log "  [PASS] EgressEnforcement=False (Disabled) — off mode confirmed"
       else
         warn "  [WARN] EgressEnforcement condition present but unexpected status='$egress_status'"
@@ -189,8 +187,8 @@ if [ -n "$RUN_NS" ]; then
   else
     # In iptables mode (default) the condition should be True.
     if printf '%s' "$cr_yaml" | grep -q 'EgressEnforcement'; then
-      egress_status="$(printf '%s' "$cr_yaml" | awk '/type: EgressEnforcement/{found=1} found && /status:/{print $2; exit}')"
-      if [ "$egress_status" = '"True"' ]; then
+      egress_status="$(k -n "$RUN_NS" get agentrun "$RUN_ID" -o jsonpath='{.status.conditions[?(@.type=="EgressEnforcement")].status}')"
+      if [ "$egress_status" = "True" ]; then
         log "  [PASS] EgressEnforcement=True (Iptables) — enforcement confirmed on AgentRun"
       else
         warn "  [WARN] EgressEnforcement condition present but status='$egress_status' (expected True)"

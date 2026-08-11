@@ -325,6 +325,35 @@ func TestReconcileWorkspacePVCLostFailsDeterministically(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-workspace"}, &corev1.PersistentVolumeClaim{}); !apierrors.IsNotFound(err) {
 		t.Errorf("expected no PVC recreated after WorkspaceLost, got err=%v", err)
 	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-0"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Errorf("expected pod removed after WorkspaceLost, got err=%v", err)
+	}
+}
+
+func TestReconcileWorkspaceLostDeletesAlreadyCreatedReplacementPod(t *testing.T) {
+	run := testRun()
+	run.Status = wrenv1.AgentRunStatus{
+		Phase:             wrenv1.PhaseInterrupted,
+		PodName:           "r-abc-1",
+		RestartCount:      1,
+		AttemptGeneration: 1,
+		Conditions: []metav1.Condition{
+			{Type: egressEnforcementConditionType, Status: metav1.ConditionTrue, Reason: "Iptables"},
+			{Type: checkpointStorageConditionType, Status: metav1.ConditionFalse, Reason: "Unavailable"},
+		},
+	}
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
+	r, c := newReconciler(t, run, pod)
+
+	reconcile(t, r, run)
+
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseFailed || got.Status.RestartCount != 1 {
+		t.Fatalf("terminal recovery status = %+v", got.Status)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: "r-abc-1"}, &corev1.Pod{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("replacement pod leaked after terminal WorkspaceLost: %v", err)
+	}
 }
 
 // TestReconcileWorkspaceRestore_FullFlow is the WS-21 recovery path: a run

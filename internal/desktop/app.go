@@ -66,6 +66,7 @@ type Bootstrap struct {
 	Contexts []ContextView    `json:"contexts"`
 	Projects []client.Project `json:"projects"`
 	Runs     []client.Run     `json:"runs"`
+	Warning  string           `json:"warning,omitempty"`
 }
 
 // Load returns everything required for the initial desktop frame.
@@ -85,11 +86,13 @@ func (a *App) Load() (Bootstrap, error) {
 	}
 	out.Projects, err = c.ListProjects(context.Background())
 	if err != nil {
-		return Bootstrap{}, err
+		out.Warning = err.Error()
+		return out, nil
 	}
 	out.Runs, err = c.ListRuns(context.Background(), "all", "")
 	if err != nil {
-		return Bootstrap{}, err
+		out.Warning = err.Error()
+		return out, nil
 	}
 	sortRuns(out.Runs)
 	return out, nil

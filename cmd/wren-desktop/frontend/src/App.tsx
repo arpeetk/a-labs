@@ -1,5 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react"
 import { api, Bootstrap, Project, Run, RunCreate } from "./api"
+import { canFollowRunLogs, logPlaceholder } from "./runState"
 
 const phases = ["", "Pending", "Provisioning", "Running", "Pausing", "Paused", "Interrupted", "Succeeded", "Failed", "Canceled"]
 const containers = ["harness", "hydrate", "egress-proxy", "checkpointer", "agent-gateway", "egress-lockdown"]
@@ -36,16 +37,21 @@ export function App() {
   const [composer, setComposer] = useState(false)
   const [contextModal, setContextModal] = useState(false)
 
+  const applyBootstrap = useCallback((next: Bootstrap) => {
+    setData(next)
+    setError(next.warning || "")
+  }, [])
+
   const load = useCallback(async () => {
     try {
       setError("")
       const next = await api.load()
-      setData(next)
+      applyBootstrap(next)
       if (!selected && next.runs[0]) setSelected(next.runs[0].id)
       if (next.contexts.length === 0) setContextModal(true)
     } catch (e) { setError(errText(e)) }
     finally { setBusy(false) }
-  }, [selected])
+  }, [applyBootstrap, selected])
 
   const refreshRuns = useCallback(async () => {
     if (!data.contexts.length) return
@@ -132,7 +138,7 @@ export function App() {
     </main>
 
     {composer && <RunComposer projects={data.projects} onClose={() => setComposer(false)} onCreated={run => { setComposer(false); setSelected(run.id); setView("fleet"); void refreshRuns() }} />}
-    {contextModal && <ContextModal contexts={data.contexts} onClose={() => data.contexts.length && setContextModal(false)} onLoaded={next => { setData(next); setContextModal(false) }} />}
+    {contextModal && <ContextModal contexts={data.contexts} onClose={() => data.contexts.length && setContextModal(false)} onLoaded={next => { applyBootstrap(next); setContextModal(false) }} />}
     {busy && <div className="busy"><span /></div>}
   </div>
 }
@@ -143,8 +149,11 @@ function RunDetail({ run, onAction, onDelete }: { run?: Run; onAction: (a: () =>
   const [logError, setLogError] = useState("")
   const [logLive, setLogLive] = useState(false)
   useEffect(() => {
-    setLogs(""); setLogError(""); setLogLive(false)
-    if (!run?.id) return
+    setLogs(""); setLogError("")
+  }, [run?.id, container])
+  useEffect(() => {
+    setLogError(""); setLogLive(false)
+    if (!run?.id || !canFollowRunLogs(run.phase)) return
     let disposed = false
     let streamID = ""
     const unsubscribe = api.onLog(event => {
@@ -163,7 +172,7 @@ function RunDetail({ run, onAction, onDelete }: { run?: Run; onAction: (a: () =>
       unsubscribe()
       if (streamID) void api.stopLogStream(streamID)
     }
-  }, [run?.id, container])
+  }, [run?.id, run?.phase, container])
   if (!run) return <aside className="detail empty-detail"><span>◇</span><h3>Select a run</h3><p>Inspect state, logs, pull requests, and lifecycle actions.</p></aside>
   const runID = run.id
   async function fetchLogs() {
@@ -176,7 +185,7 @@ function RunDetail({ run, onAction, onDelete }: { run?: Run; onAction: (a: () =>
     {run.lastCheckpoint && <div className="checkpoint-card"><small>Durable checkpoint · {run.lastCheckpoint.trigger || "recovery"}</small><strong>{run.lastCheckpoint.id}</strong><span>{run.lastCheckpoint.at ? new Date(run.lastCheckpoint.at).toLocaleString() : "—"} · {run.lastCheckpoint.sizeBytes ? `${Math.ceil(run.lastCheckpoint.sizeBytes / 1024)} KiB` : "—"}</span><code>{run.lastCheckpoint.sha256 ? `sha256:${run.lastCheckpoint.sha256.slice(0, 16)}…` : run.lastCheckpoint.uri}</code></div>}
     {!!run.conditions?.length && <div className="conditions"><h3>Recovery timeline</h3>{run.conditions.filter(c => c.type !== "Ready" && c.type !== "EgressEnforcement").map(c => <div key={c.type}><span className={`status-dot ${c.status === "False" ? "warn" : ""}`} /><span><strong>{c.type}</strong><small>{c.reason}{c.message ? ` · ${c.message}` : ""}</small></span></div>)}</div>}
     <div className="logs-head"><h3>Run logs {logLive && <span className="live"><i /> Live</span>}</h3><select value={container} onChange={e => setContainer(e.target.value)}>{containers.map(c => <option key={c}>{c}</option>)}</select><button className="ghost compact" onClick={() => void fetchLogs()}>Snapshot</button></div>
-    <pre className="logs">{logError ? `Unable to stream logs\n${logError}` : logs || "Waiting for container output…"}</pre>
+    <pre className="logs">{logError ? `Unable to stream logs\n${logError}` : logs || logPlaceholder(run.phase)}</pre>
     <div className="lifecycle">
       {(run.phase === "Running" || run.phase === "Pending" || run.phase === "Provisioning") && <button onClick={() => void onAction(() => api.stopRun(runID))}>Stop run</button>}
       {run.phase === "Running" && <button className="primary" onClick={() => void onAction(() => api.pauseRun(runID))}>Pause safely</button>}

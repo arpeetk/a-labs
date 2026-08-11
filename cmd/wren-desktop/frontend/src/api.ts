@@ -10,7 +10,7 @@ export type Run = {
   lastCheckpoint?: { id?: string; uri?: string; at?: string; sha256?: string; sizeBytes?: number; formatVersion?: number; trigger?: string };
   conditions?: { type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string }[]
 }
-export type Bootstrap = { contexts: WrenContext[]; projects: Project[]; runs: Run[] }
+export type Bootstrap = { contexts: WrenContext[]; projects: Project[]; runs: Run[]; warning?: string }
 export type RunCreate = {
   project: string; task: string; harness?: string; interactive?: boolean;
   baseRef?: string; cpu?: string; memory?: string; runtime?: string

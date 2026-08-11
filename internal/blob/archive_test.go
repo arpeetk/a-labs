@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -182,7 +183,7 @@ func TestArchiveDeterministicEntryCount(t *testing.T) {
 	}
 }
 
-func TestArchivePreservesSymlinkWithoutReadingTarget(t *testing.T) {
+func TestArchiveOmitsUnsafeSymlinkWithoutReadingTarget(t *testing.T) {
 	src := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "secret.txt")
 	if err := os.WriteFile(outside, []byte("must-not-enter-checkpoint"), 0o600); err != nil {
@@ -191,21 +192,68 @@ func TestArchivePreservesSymlinkWithoutReadingTarget(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(src, "agent-link")); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(src, "kept"), []byte("workspace data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	var buf bytes.Buffer
 	if err := blob.Archive(&buf, src); err != nil {
 		t.Fatal(err)
 	}
-	gz, err := gzip.NewReader(&buf)
+	checkpoint := append([]byte(nil), buf.Bytes()...)
+	gz, err := gzip.NewReader(bytes.NewReader(checkpoint))
 	if err != nil {
 		t.Fatal(err)
 	}
-	hdr, err := tar.NewReader(gz).Next()
-	if err != nil {
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Name == "agent-link" {
+			t.Fatalf("archive retained unsafe symlink to %q", hdr.Linkname)
+		}
+	}
+
+	dst := t.TempDir()
+	if err := blob.Unarchive(bytes.NewReader(checkpoint), dst); err != nil {
+		t.Fatalf("Unarchive checkpoint containing omitted tool link: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dst, "kept")); err != nil || string(got) != "workspace data" {
+		t.Fatalf("restored workspace file = %q, %v", got, err)
+	}
+}
+
+func TestArchiveOmitsCodexAbsoluteToolLink(t *testing.T) {
+	src := t.TempDir()
+	link := filepath.Join(src, ".git", "wren", "codex", "tmp", "arg0", "codex-arg0", "apply_patch")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if hdr.Typeflag != tar.TypeSymlink || hdr.Linkname != outside || hdr.Size != 0 {
-		t.Fatalf("symlink header = type %d target %q size %d", hdr.Typeflag, hdr.Linkname, hdr.Size)
+	if err := os.Symlink("/usr/local/lib/node_modules/@openai/codex/vendor/bin/codex", link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "result.md"), []byte("before pause\nafter resume\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var checkpoint bytes.Buffer
+	if err := blob.Archive(&checkpoint, src); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := blob.Unarchive(&checkpoint, dst); err != nil {
+		t.Fatalf("Codex checkpoint did not restore: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dst, ".git", "wren", "codex", "tmp", "arg0", "codex-arg0", "apply_patch")); !os.IsNotExist(err) {
+		t.Fatalf("disposable Codex tool link restored: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dst, "result.md")); err != nil || string(got) != "before pause\nafter resume\n" {
+		t.Fatalf("restored result = %q, %v", got, err)
 	}
 }
 

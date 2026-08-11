@@ -26,6 +26,35 @@ func TestLoadWithoutContextStartsDisconnected(t *testing.T) {
 	}
 }
 
+func TestLoadPreservesSelectedContextWhenControlPlaneIsUnavailable(t *testing.T) {
+	t.Setenv("WREN_CONFIG_DIR", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+	}))
+	serverURL := srv.URL
+	srv.Close()
+	if err := (&config.Config{
+		CurrentContext: "local",
+		Contexts:       []config.Context{{Name: "local", Server: serverURL, User: "desktop-user"}},
+	}).Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := New().Load()
+	if err != nil {
+		t.Fatalf("Load returned a fatal error: %v", err)
+	}
+	if len(got.Contexts) != 1 || !got.Contexts[0].Selected || got.Contexts[0].Name != "local" {
+		t.Fatalf("contexts lost after connection failure: %+v", got.Contexts)
+	}
+	if got.Warning == "" || !strings.Contains(got.Warning, "control plane request failed") {
+		t.Fatalf("warning = %q", got.Warning)
+	}
+	if len(got.Projects) != 0 || len(got.Runs) != 0 {
+		t.Fatalf("unavailable bootstrap contains data: %+v", got)
+	}
+}
+
 func TestLogStreamBridgesChunksAndCompletion(t *testing.T) {
 	t.Setenv("WREN_CONFIG_DIR", t.TempDir())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
