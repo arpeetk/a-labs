@@ -269,9 +269,12 @@ real PR without touching github.com.
   opt-in GCS-FUSE mount (`--checkpoint-gcs-mount`) with a dedicated Workload
   Identity KSA; `--checkpoint-local-path` is a single-node kind/dev test backend
   and is not node-durable. Without a mount, the checkpointer remains a liveness
-  sidecar and PVC reattach is the only workspace recovery layer. Snapshots are
-  full and interval-only today (no incremental bundles, retention policy,
-  `checkpoint_hint`, or final SIGTERM flush yet). **gateway** is still a
+  sidecar and PVC reattach is the only workspace recovery layer. WS-22 adds
+  atomic manifest-last publication, SHA-256 read-back verification, bounded
+  retention, exact-checkpoint restore for user-controlled pause/resume, and
+  `status.lastCheckpoint` projection. Snapshots remain full archives (no
+  incremental bundles, `checkpoint_hint`, or final SIGTERM flush yet).
+  **gateway** is still a
   liveness stand-in (run results reach status via the operator's pods/log
   scrape, WS-11; the event bridge is the v0.2 target).
 - **Transport:** control-plane API is HTTP/JSON (target: gRPC + Connect).

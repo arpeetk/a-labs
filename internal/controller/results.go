@@ -7,6 +7,7 @@ import (
 	"io"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -56,6 +57,41 @@ type resultEvents struct {
 	inTok, outTok   int64
 	hasUsage        bool
 	sessionID       string
+}
+
+func parseCheckpointEvents(r io.Reader) *wrenv1.CheckpointRef {
+	var latest *wrenv1.CheckpointRef
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		var ev harness.Event
+		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil || ev.Type != harness.EventCheckpointReady || ev.Checkpoint == nil {
+			continue
+		}
+		ck := ev.Checkpoint
+		latest = &wrenv1.CheckpointRef{ID: ck.ID, URI: ck.URI, SHA256: ck.SHA256, SizeBytes: ck.SizeBytes, FormatVersion: ck.FormatVersion, Trigger: ck.Trigger, At: metav1.NewTime(ck.At)}
+	}
+	return latest
+}
+
+// scrapeCheckpointStatus projects the trusted sidecar's newest published
+// manifest into status. It never affects run fate; pause writes its proof
+// directly and this path keeps periodic checkpoint age/integrity observable.
+func (r *AgentRunReconciler) scrapeCheckpointStatus(ctx context.Context, run *wrenv1.AgentRun, pod *corev1.Pod) bool {
+	if r.Logs == nil {
+		return false
+	}
+	rc, err := r.Logs.ReadLogs(ctx, pod.Namespace, pod.Name, ContainerCheckpointer, 100)
+	if err != nil {
+		return false
+	}
+	defer rc.Close()
+	latest := parseCheckpointEvents(rc)
+	if latest == nil || (run.Status.LastCheckpoint != nil && !latest.At.After(run.Status.LastCheckpoint.At.Time)) {
+		return false
+	}
+	run.Status.LastCheckpoint = latest
+	return true
 }
 
 // parseResultEvents scans newline-delimited harness events (the schema in

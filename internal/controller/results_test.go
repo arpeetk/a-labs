@@ -65,6 +65,16 @@ func TestParseResultEventsEmpty(t *testing.T) {
 	}
 }
 
+func TestParseCheckpointEventsUsesLastPublishedManifest(t *testing.T) {
+	log := `{"type":"checkpoint_ready","time":"2026-08-11T10:00:00Z","checkpoint":{"id":"ck-1","uri":"checkpoints/ck-1.json","sha256":"aaa","sizeBytes":10,"formatVersion":1,"trigger":"periodic","at":"2026-08-11T10:00:00Z"}}
+noise
+{"type":"checkpoint_ready","time":"2026-08-11T10:01:00Z","checkpoint":{"id":"ck-2","uri":"checkpoints/ck-2.json","sha256":"bbb","sizeBytes":20,"formatVersion":1,"trigger":"periodic","at":"2026-08-11T10:01:00Z"}}`
+	got := parseCheckpointEvents(strings.NewReader(log))
+	if got == nil || got.ID != "ck-2" || got.SHA256 != "bbb" || got.SizeBytes != 20 {
+		t.Fatalf("checkpoint = %+v", got)
+	}
+}
+
 // TestScrapeOnSucceeded: when the pod succeeds, the harness events land in
 // Status.PR/Usage/SessionID alongside the terminal phase.
 func TestScrapeOnSucceeded(t *testing.T) {

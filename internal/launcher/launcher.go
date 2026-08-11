@@ -63,6 +63,9 @@ type Launcher interface {
 	// drives the run to Canceled (terminal — no auto-resume). Distinct from
 	// DeleteRun, which removes the run entirely (`wren run stop`, WS-15 Part C).
 	RequestCancel(ctx context.Context, ns, name string) error
+	// RequestPause sets the one-shot pause annotation. Core API validation
+	// ensures the run is Running and checkpoint-capable before this call.
+	RequestPause(ctx context.Context, ns, name string) error
 	// RequestResume marks a terminally-Failed run for a fresh attempt by
 	// setting the resume annotation; the operator observes it, resets the
 	// retry budget, clears any leftover pod, and drops the run back to a
@@ -173,6 +176,22 @@ func (k *K8s) RequestCancel(ctx context.Context, ns, name string) error {
 		run.Annotations = map[string]string{}
 	}
 	run.Annotations[wrenv1.CancelAnnotation] = "true"
+	return k.c.Patch(ctx, &run, client.MergeFrom(base))
+}
+
+func (k *K8s) RequestPause(ctx context.Context, ns, name string) error {
+	var run wrenv1.AgentRun
+	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &run); err != nil {
+		return err
+	}
+	if run.Annotations[wrenv1.PauseAnnotation] == "true" {
+		return nil
+	}
+	base := run.DeepCopy()
+	if run.Annotations == nil {
+		run.Annotations = map[string]string{}
+	}
+	run.Annotations[wrenv1.PauseAnnotation] = "true"
 	return k.c.Patch(ctx, &run, client.MergeFrom(base))
 }
 

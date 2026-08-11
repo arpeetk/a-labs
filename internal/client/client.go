@@ -60,15 +60,35 @@ type RunCreateOptions struct {
 
 // Run is a summary view of an agent run.
 type Run struct {
-	ID           string    `json:"id"`
-	Project      string    `json:"project"`
-	User         string    `json:"user,omitempty"`
-	Phase        string    `json:"phase"`
-	Harness      string    `json:"harness,omitempty"`
-	Namespace    string    `json:"namespace,omitempty"`
-	PRURL        string    `json:"prUrl,omitempty"`
-	RestartCount int32     `json:"restartCount,omitempty"`
-	CreatedAt    time.Time `json:"createdAt,omitempty"`
+	ID             string         `json:"id"`
+	Project        string         `json:"project"`
+	User           string         `json:"user,omitempty"`
+	Phase          string         `json:"phase"`
+	Harness        string         `json:"harness,omitempty"`
+	Namespace      string         `json:"namespace,omitempty"`
+	PRURL          string         `json:"prUrl,omitempty"`
+	RestartCount   int32          `json:"restartCount,omitempty"`
+	LastCheckpoint *RunCheckpoint `json:"lastCheckpoint,omitempty"`
+	Conditions     []RunCondition `json:"conditions,omitempty"`
+	CreatedAt      time.Time      `json:"createdAt,omitempty"`
+}
+
+type RunCheckpoint struct {
+	ID            string    `json:"id,omitempty"`
+	URI           string    `json:"uri,omitempty"`
+	At            time.Time `json:"at,omitempty"`
+	SHA256        string    `json:"sha256,omitempty"`
+	SizeBytes     int64     `json:"sizeBytes,omitempty"`
+	FormatVersion int32     `json:"formatVersion,omitempty"`
+	Trigger       string    `json:"trigger,omitempty"`
+}
+
+type RunCondition struct {
+	Type               string    `json:"type"`
+	Status             string    `json:"status"`
+	Reason             string    `json:"reason,omitempty"`
+	Message            string    `json:"message,omitempty"`
+	LastTransitionTime time.Time `json:"lastTransitionTime,omitempty"`
 }
 
 // CreateRun submits a task to a new agent run.
@@ -121,7 +141,12 @@ func (c *Client) StopRun(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(id)+"/stop", nil, nil)
 }
 
-// ResumeRun manually restarts a terminally-Failed run (POST
+// PauseRun requests a verified durable pause (POST /v1/runs/{id}/pause).
+func (c *Client) PauseRun(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, "/v1/runs/"+url.PathEscape(id)+"/pause", nil, nil)
+}
+
+// ResumeRun restarts a Paused or terminally-Failed run (POST
 // /v1/runs/{id}/resume): the control plane resets the retry budget, clears
 // any leftover pod, and gives the run a fresh attempt.
 func (c *Client) ResumeRun(ctx context.Context, id string) error {

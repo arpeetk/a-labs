@@ -144,11 +144,14 @@ func TestBuildAgentPod(t *testing.T) {
 func TestBuildAgentPodMockHarnessUsesRuntimeImage(t *testing.T) {
 	run := testRun()
 	run.Spec.Harness = wrenv1.HarnessSpec{Kind: "mock", Image: "wren/claude-code:dev"}
-	pod := buildAgentPod(run, PodConfig{Images: testImages})
+	pod := buildAgentPod(run, PodConfig{Images: testImages, MockDelay: "2m"})
 	harness := containerByName(pod.Spec.Containers, ContainerHarness)
 	if harness.Image != testImages.Runtime {
 		t.Errorf("mock harness image = %q, want the runtime image %q (ignoring spec.Harness.Image=%q)",
 			harness.Image, testImages.Runtime, run.Spec.Harness.Image)
+	}
+	if delay, ok := envValue(harness, "WREN_MOCK_DELAY"); !ok || delay.Value != "2m" {
+		t.Fatalf("mock delay env = %+v, %v", delay, ok)
 	}
 }
 

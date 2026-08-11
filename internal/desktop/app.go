@@ -190,6 +190,14 @@ func (a *App) StopRun(id string) error {
 	return c.StopRun(context.Background(), id)
 }
 
+func (a *App) PauseRun(id string) error {
+	c, err := a.currentClient()
+	if err != nil {
+		return err
+	}
+	return c.PauseRun(context.Background(), id)
+}
+
 func (a *App) ResumeRun(id string) error {
 	c, err := a.currentClient()
 	if err != nil {

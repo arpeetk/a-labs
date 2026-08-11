@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -225,6 +226,26 @@ func TestResumeRun(t *testing.T) {
 	// Resume of an unknown run → 404.
 	if w = do(t, h, "POST", "/v1/runs/ghost/resume", "u@x", ""); w.Code != http.StatusNotFound {
 		t.Errorf("resume missing code = %d, want 404", w.Code)
+	}
+}
+
+func TestPauseRunEndpoint(t *testing.T) {
+	h, lc, _ := newTestServerWithLauncher(t)
+	do(t, h, "POST", "/v1/projects", "u@x", `{"name":"p","repo":"x/y"}`)
+	w := do(t, h, "POST", "/v1/runs", "u@x", `{"project":"p","task":"do it"}`)
+	var run store.Run
+	if err := json.Unmarshal(w.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+	if w = do(t, h, "POST", "/v1/runs/"+run.ID+"/pause", "u@x", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("pause Pending code=%d body=%s", w.Code, w.Body.String())
+	}
+	lc.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning, Conditions: []metav1.Condition{{Type: "CheckpointStorage", Status: metav1.ConditionTrue}}})
+	if w = do(t, h, "POST", "/v1/runs/"+run.ID+"/pause", "u@x", ""); w.Code != http.StatusAccepted {
+		t.Fatalf("pause code=%d body=%s", w.Code, w.Body.String())
+	}
+	if cr := lc.Runs[run.Namespace+"/"+run.ID]; cr.Annotations[wrenv1.PauseAnnotation] != "true" {
+		t.Fatalf("pause annotation=%v", cr.Annotations)
 	}
 }
 

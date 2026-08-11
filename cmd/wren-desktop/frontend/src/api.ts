@@ -6,7 +6,9 @@ export type Project = {
 }
 export type Run = {
   id: string; project: string; user?: string; phase: string; harness?: string;
-  namespace?: string; prUrl?: string; restartCount?: number; createdAt?: string
+  namespace?: string; prUrl?: string; restartCount?: number; createdAt?: string;
+  lastCheckpoint?: { id?: string; uri?: string; at?: string; sha256?: string; sizeBytes?: number; formatVersion?: number; trigger?: string };
+  conditions?: { type: string; status: string; reason?: string; message?: string; lastTransitionTime?: string }[]
 }
 export type Bootstrap = { contexts: WrenContext[]; projects: Project[]; runs: Run[] }
 export type RunCreate = {
@@ -23,6 +25,7 @@ type Backend = {
   GetRun(id: string): Promise<Run>
   CreateRun(options: RunCreate): Promise<Run>
   StopRun(id: string): Promise<void>
+  PauseRun(id: string): Promise<void>
   ResumeRun(id: string): Promise<void>
   DeleteRun(id: string): Promise<void>
   ListProjects(): Promise<Project[]>
@@ -53,6 +56,7 @@ export const api = {
   getRun: (id: string) => backend().GetRun(id),
   createRun: (options: RunCreate) => backend().CreateRun(options),
   stopRun: (id: string) => backend().StopRun(id),
+  pauseRun: (id: string) => backend().PauseRun(id),
   resumeRun: (id: string) => backend().ResumeRun(id),
   deleteRun: (id: string) => backend().DeleteRun(id),
   listProjects: () => backend().ListProjects(),

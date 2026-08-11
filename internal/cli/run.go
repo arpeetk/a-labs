@@ -21,10 +21,30 @@ func newRunCmd() *cobra.Command {
 		newRunGetCmd(),
 		newRunLogsCmd(),
 		newRunStopCmd(),
+		newRunPauseCmd(),
 		newRunResumeCmd(),
 		newRunRmCmd(),
 	)
 	return cmd
+}
+
+func newRunPauseCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "pause <run-id>",
+		Short: "Pause a Running run after publishing a verified checkpoint",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c, err := clientFromFlags(cmd)
+			if err != nil {
+				return err
+			}
+			if err := c.PauseRun(context.Background(), args[0]); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "run %s pausing (waiting for verified checkpoint)\n", args[0])
+			return nil
+		},
+	}
 }
 
 func newRunCreateCmd() *cobra.Command {
@@ -101,7 +121,7 @@ func newRunStopCmd() *cobra.Command {
 func newRunResumeCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "resume <run-id>",
-		Short: "Resume a Failed run: reset its retry budget and give it a fresh attempt",
+		Short: "Resume a Paused or Failed run from its durable workspace state",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := clientFromFlags(cmd)
@@ -111,7 +131,7 @@ func newRunResumeCmd() *cobra.Command {
 			if err := c.ResumeRun(context.Background(), args[0]); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "run %s resuming (retry budget reset)\n", args[0])
+			fmt.Fprintf(cmd.OutOrStdout(), "run %s resuming\n", args[0])
 			return nil
 		},
 	}

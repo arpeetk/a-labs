@@ -38,8 +38,10 @@ opened**. The GitHub token and model API key live only on a trusted egress-proxy
 sidecar; **the untrusted agent container holds no secrets**. Infrastructure
 crashes (OOM, eviction) auto-resume by recreating the pod and reattaching the
 surviving workspace disk; deterministic failures fail fast. With the opt-in GCS
-checkpoint mount, periodic workspace snapshots also allow recovery after the
-PVC is destroyed; without it, that loss ends cleanly as `Failed` with
+checkpoint mount, atomic checksummed workspace snapshots also allow recovery
+after the PVC is destroyed. A running agent can be safely paused only after a
+forced snapshot is verified and recorded; its pod is then removed until resume.
+Without a checkpoint mount, destructive PVC loss ends cleanly as `Failed` with
 diagnostics (spec §5.5).
 
 ## How a run flows
@@ -67,6 +69,8 @@ wren run create --project payments-api --task "Fix the flaky retry in checkout"
 wren run get    r-9d4c09a          # phase, PR url, restart count (token/cost usage reporting is roadmap, M1)
 wren run list   --scope mine        # table by default; --project/--phase filter, --watch keeps it live
 wren run logs   r-9d4c09a -f        # tail the agent's live logs (--container to pick a sidecar)
+wren run pause  r-9d4c09a          # quiesce, verify a durable checkpoint, remove compute
+wren run resume r-9d4c09a          # resume a Paused or Failed run
 wren run stop   r-9d4c09a          # cancel a run (no auto-resume) and delete its pod
 wren run rm     r-9d4c09a          # delete a run and its cluster resources
 wren fleet                          # every run across every project, at a glance
@@ -137,7 +141,7 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Task → PR (Journey A) | ✅ real Claude agent → PR, on kind **and** GKE | same |
 | Onboarding | ✅ one command (`wren install --kind`/`--registry`/`--create-cluster`) builds+delivers all 6 images, optionally provisions the GKE Standard cluster itself, deploys the control plane, and hands off a **minimal** `wren project create`/`wren run create` — install-configured namespace closes a silent credential footgun; a stuck image pull gets diagnosed with the exact fix, not a dead end; zero placeholder CLI commands ([SETUP.md](SETUP.md)) | same |
 | Harnesses | ✅ `claude-code` (proven e2e) + `mock` (keyless gate); `codex` + `opencode` adapters, images, and the `/openai/` egress route built — **not yet run against live providers** ([docs/harnesses.md](docs/harnesses.md)) | + BYO conformance suite |
-| Crash-resume | ✅ infra crashes resume via PVC reattach; opt-in GCS-FUSE checkpoints periodically snapshot the workspace and restore it after PVC loss; deterministic failures fail fast | + incremental/git-aware snapshots, transcript mirroring, graceful shutdown flush, checkpoint status |
+| Recovery + pause | ✅ infra crashes resume via PVC reattach; mounted checkpoints use manifest-last atomic publication, SHA-256 read-back verification, bounded retention and corruption fallback; pause/resume pins an exact verified checkpoint and removes compute; status is visible in CLI/desktop/Postgres | + incremental/git-aware snapshots, transcript mirroring, graceful shutdown flush |
 | Egress-proxy | ✅ injects creds (github.com, api.github.com, api.anthropic.com, api.openai.com) + allowlist; runner holds no secret; **bypass enforced** (iptables uid-lockdown + per-run canary; `--egress-enforcement=off` escape hatch with `config/netpol/` FQDN policies) + a DNS-rebinding-closed CONNECT path — **verified on real GKE Standard**, not just kind | — |
 | Control plane | ✅ runs in-cluster (operator + apiserver Deployments, `config/default`; `make e2e` rides them) — local-against-cluster remains the dev loop | published images + Ingress/OIDC front-door |
 | GitHub creds | ✅ PAT in the proxy secret | per-run **GitHub App** tokens |
@@ -146,8 +150,8 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Auth | `X-Wren-User` header | OIDC / SSO |
 | Isolation | hardened `runc` pods | + gVisor/Kata (deferred, M4) |
 
-Next up: per-run **GitHub App** tokens (the minter is built; wiring is next)
-and production hardening of checkpoints (incremental snapshots, transcript mirroring, status, retention).
+Next up: per-run **GitHub App** tokens (the minter is built; wiring is next),
+incremental snapshots, and transcript continuity for every harness.
 
 ## Repository layout
 

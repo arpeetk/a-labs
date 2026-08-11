@@ -49,6 +49,11 @@ func (s *exampleStore) List(_ context.Context, prefix string) ([]blob.Object, er
 	return out, nil
 }
 
+func (s *exampleStore) Delete(_ context.Context, key string) error {
+	delete(s.objects, key)
+	return nil
+}
+
 // A checkpointer snapshots the workspace under "checkpoints/"; on resume,
 // hydrate lists the run's checkpoints and reads back the latest bundle.
 func ExampleStore() {

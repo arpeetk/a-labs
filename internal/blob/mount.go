@@ -143,6 +143,22 @@ func (m *MountStore) List(ctx context.Context, prefix string) ([]Object, error) 
 	return out, nil
 }
 
+// Delete removes one object without following symlinks. Missing keys are an
+// idempotent success; keys outside the run prefix are rejected by resolve.
+func (m *MountStore) Delete(ctx context.Context, key string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	p, err := m.resolve(key)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(p); err != nil && !errorsIsNotExist(err) {
+		return fmt.Errorf("blob: delete %q: %w", key, err)
+	}
+	return nil
+}
+
 // errorsIsNotExist centralizes the not-exist check so Get and List agree on it.
 // errors.Is (not ==) so a wrapped fs.ErrNotExist still maps to ErrNotFound.
 func errorsIsNotExist(err error) bool { return errors.Is(err, fs.ErrNotExist) }

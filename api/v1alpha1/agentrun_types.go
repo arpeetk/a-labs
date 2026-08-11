@@ -10,6 +10,12 @@ import (
 // auto-resumed, unlike a crash). `wren run stop` sets it (WS-15 Part C).
 const CancelAnnotation = "wren.dev/cancel"
 
+// PauseAnnotation asks the operator to quiesce the harness, publish and verify
+// a durable checkpoint, and remove the pod before reporting PhasePaused. It is
+// a one-shot request which the operator clears after either completing or
+// safely aborting the pause.
+const PauseAnnotation = "wren.dev/pause"
+
 // ResumeAnnotation, set on an AgentRun, asks the operator to manually resume a
 // terminally-Failed run: reset the retry budget, clear any leftover pod, and
 // give the reconciler a fresh attempt. Unlike CancelAnnotation, the operator
@@ -46,6 +52,8 @@ const (
 	PhaseProvisioning RunPhase = "Provisioning"
 	PhaseCloning      RunPhase = "Cloning"
 	PhaseRunning      RunPhase = "Running"
+	PhasePausing      RunPhase = "Pausing"
+	PhasePaused       RunPhase = "Paused"
 	PhaseInterrupted  RunPhase = "Interrupted" // transient: operator will resume
 	PhaseFinalizing   RunPhase = "Finalizing"
 	PhaseSucceeded    RunPhase = "Succeeded"
@@ -91,6 +99,9 @@ type PVCSpec struct {
 type CheckpointSpec struct {
 	IntervalSeconds int32  `json:"intervalSeconds,omitempty"`
 	Bucket          string `json:"bucket"`
+	// Retain is the number of published checkpoint pairs kept for a run.
+	// +kubebuilder:default=5
+	Retain int32 `json:"retain,omitempty"`
 }
 
 // WorkspaceSpec is the durable workspace configuration.
@@ -133,9 +144,14 @@ type AgentRunSpec struct {
 
 // CheckpointRef points at the most recent durable checkpoint.
 type CheckpointRef struct {
-	URI    string      `json:"uri,omitempty"`
-	At     metav1.Time `json:"at,omitempty"`
-	Commit string      `json:"commit,omitempty"`
+	ID            string      `json:"id,omitempty"`
+	URI           string      `json:"uri,omitempty"`
+	At            metav1.Time `json:"at,omitempty"`
+	Commit        string      `json:"commit,omitempty"`
+	SHA256        string      `json:"sha256,omitempty"`
+	SizeBytes     int64       `json:"sizeBytes,omitempty"`
+	FormatVersion int32       `json:"formatVersion,omitempty"`
+	Trigger       string      `json:"trigger,omitempty"`
 }
 
 // PRStatus records the pull request the run produces.

@@ -76,4 +76,8 @@ type Store interface {
 	// List returns the objects under prefix (relative to the run's prefix) in
 	// key order. An empty prefix lists everything in the run's prefix.
 	List(ctx context.Context, prefix string) ([]Object, error)
+
+	// Delete removes an object. Missing objects are tolerated so retention and
+	// cleanup remain idempotent across retries.
+	Delete(ctx context.Context, key string) error
 }

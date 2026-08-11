@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -337,7 +339,13 @@ func TestRunCheckpointer_PeriodicSnapshots(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		entries, _ := os.ReadDir(ckptDir)
-		if len(entries) >= 2 {
+		manifests := 0
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".json") {
+				manifests++
+			}
+		}
+		if manifests >= 2 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -361,17 +369,78 @@ func TestRunCheckpointer_PeriodicSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadDir: %v", err)
 	}
-	if len(entries) < 2 {
-		t.Fatalf("expected at least 2 checkpoint objects, found %d", len(entries))
-	}
+	manifests := 0
 	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".json") {
+			manifests++
+		}
+	}
+	if manifests < 2 {
+		t.Fatalf("expected at least 2 published checkpoint manifests, found %d", manifests)
+	}
+	objects, err := os.ReadDir(filepath.Join(ckptDir, "objects"))
+	if err != nil || len(objects) < manifests {
+		t.Fatalf("immutable checkpoint archives = %d, manifests = %d, err=%v", len(objects), manifests, err)
+	}
+	for _, e := range objects {
 		if !strings.HasSuffix(e.Name(), ".tar.gz") {
-			t.Errorf("checkpoint object %q does not have .tar.gz suffix", e.Name())
+			t.Errorf("archive %q does not have .tar.gz suffix", e.Name())
 		}
 	}
 	logSoFar := buf.String()
 	if !strings.Contains(logSoFar, "checkpoint snapshot PASSED") {
 		t.Errorf("expected PASSED snapshot log line, got:\n%s", logSoFar)
+	}
+	if !strings.Contains(logSoFar, `"type":"checkpoint_ready"`) || !strings.Contains(logSoFar, `"sha256"`) {
+		t.Errorf("periodic checkpoint proof event missing:\n%s", logSoFar)
+	}
+}
+
+func TestRunCheckpointOncePublishesPauseManifest(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "accepted.txt"), []byte("yes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	orig := checkpointWorkspacePath
+	checkpointWorkspacePath = ws
+	t.Cleanup(func() { checkpointWorkspacePath = orig })
+	mount := t.TempDir()
+	t.Setenv("WREN_CHECKPOINT_BUCKET", "gs://bucket")
+	t.Setenv("WREN_CHECKPOINT_MOUNT_PATH", mount)
+	t.Setenv("WREN_RUN_ID", "r-pause")
+	t.Setenv("WREN_CHECKPOINT_RETAIN", "3")
+	var out bytes.Buffer
+	if err := RunCheckpointOnce(context.Background(), &out); err != nil {
+		t.Fatalf("RunCheckpointOnce: %v", err)
+	}
+	var m blob.CheckpointManifest
+	if err := json.Unmarshal(out.Bytes(), &m); err != nil {
+		t.Fatalf("manifest output: %v (%q)", err, out.String())
+	}
+	if m.Trigger != "pause" || m.RunID != "r-pause" || m.SHA256 == "" {
+		t.Fatalf("manifest = %+v", m)
+	}
+}
+
+func TestDispatchQuiesceAndUnquiesceSignalHarnessPID1(t *testing.T) {
+	orig := signalProcess
+	t.Cleanup(func() { signalProcess = orig })
+	var got []syscall.Signal
+	signalProcess = func(pid int, sig syscall.Signal) error {
+		if pid != 1 {
+			t.Fatalf("pid=%d, want 1", pid)
+		}
+		got = append(got, sig)
+		return nil
+	}
+	if err := Dispatch(context.Background(), io.Discard, RoleQuiesce, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := Dispatch(context.Background(), io.Discard, RoleUnquiesce, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0] != syscall.SIGSTOP || got[1] != syscall.SIGCONT {
+		t.Fatalf("signals = %v", got)
 	}
 }
 

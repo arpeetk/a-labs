@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -56,6 +57,28 @@ func newReconciler(t *testing.T, objs ...client.Object) (*AgentRunReconciler, cl
 		WithStatusSubresource(&wrenv1.AgentRun{}, &corev1.Pod{}).
 		Build()
 	return &AgentRunReconciler{Client: c, Scheme: s, PodConfig: PodConfig{Images: testImages}}, c
+}
+
+type fakePodExecutor struct {
+	calls      []string
+	checkpoint []byte
+	failRole   string
+}
+
+func (f *fakePodExecutor) Execute(_ context.Context, _, _, container string, command []string) ([]byte, error) {
+	role := command[len(command)-1]
+	f.calls = append(f.calls, container+":"+role)
+	if role == f.failRole {
+		return nil, errors.New("injected " + role + " failure")
+	}
+	if role == "checkpoint-once" {
+		return f.checkpoint, nil
+	}
+	return nil, nil
+}
+
+func pauseProof() []byte {
+	return []byte(`{"formatVersion":1,"id":"ck-pause","manifestKey":"checkpoints/ck-pause.json","sha256":"0123456789abcdef","sizeBytes":42,"createdAt":"2026-08-11T12:00:00Z","trigger":"pause"}`)
 }
 
 func reconcile(t *testing.T, r *AgentRunReconciler, run *wrenv1.AgentRun) {
@@ -133,6 +156,118 @@ func TestReconcileRunningPhase(t *testing.T) {
 
 	if got := getRun(t, c, run); got.Status.Phase != wrenv1.PhaseRunning {
 		t.Fatalf("phase = %q, want Running", got.Status.Phase)
+	}
+}
+
+func TestReconcilePausePublishesProofBeforeDeletingPod(t *testing.T) {
+	run := testRun()
+	run.Status = wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning, PodName: "r-abc-3", RestartCount: 2, AttemptGeneration: 3}
+	run.Annotations = map[string]string{wrenv1.PauseAnnotation: "true"}
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
+	pod.Name = "r-abc-3"
+	pod.Status.Phase = corev1.PodRunning
+	exec := &fakePodExecutor{checkpoint: pauseProof()}
+	r, c := newReconciler(t, run, buildWorkspacePVC(run), pod)
+	r.Executor = exec
+	r.PodConfig.CheckpointLocalPath = "/tmp/checkpoints"
+
+	reconcile(t, r, run) // Running -> Pausing, no destructive action.
+	if got := getRun(t, c, run); got.Status.Phase != wrenv1.PhasePausing {
+		t.Fatalf("phase = %q, want Pausing", got.Status.Phase)
+	}
+	if len(exec.calls) != 0 {
+		t.Fatalf("exec before Pausing status commit: %v", exec.calls)
+	}
+
+	reconcile(t, r, run) // quiesce + forced checkpoint + status proof.
+	got := getRun(t, c, run)
+	if got.Status.LastCheckpoint == nil || got.Status.LastCheckpoint.ID != "ck-pause" || got.Status.LastCheckpoint.SHA256 == "" {
+		t.Fatalf("checkpoint proof = %+v", got.Status.LastCheckpoint)
+	}
+	if cond := findCondition(got, pauseCheckpointConditionType); cond == nil || cond.Status != metav1.ConditionTrue {
+		t.Fatalf("PauseCheckpointReady = %+v", cond)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: pod.Name}, &corev1.Pod{}); err != nil {
+		t.Fatalf("pod deleted before checkpoint status commit: %v", err)
+	}
+	if strings.Join(exec.calls, ",") != "harness:quiesce,checkpointer:checkpoint-once" {
+		t.Fatalf("exec calls = %v", exec.calls)
+	}
+
+	reconcile(t, r, run) // delete the proven pod
+	reconcile(t, r, run) // observe absence -> Paused
+	got = getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhasePaused {
+		t.Fatalf("phase = %q, want Paused", got.Status.Phase)
+	}
+	if got.Annotations[wrenv1.PauseAnnotation] != "" {
+		t.Fatal("pause annotation not cleared")
+	}
+	if got.Status.RestartCount != 2 || got.Status.AttemptGeneration != 3 {
+		t.Fatalf("pause consumed retry/attempt: %+v", got.Status)
+	}
+	if len(exec.calls) != 2 {
+		t.Fatalf("checkpoint repeated after proof commit: %v", exec.calls)
+	}
+}
+
+func TestReconcilePauseCheckpointFailureUnquiescesAndKeepsPod(t *testing.T) {
+	run := testRun()
+	run.Status = wrenv1.AgentRunStatus{Phase: wrenv1.PhasePausing, PodName: "r-abc-0"}
+	run.Annotations = map[string]string{wrenv1.PauseAnnotation: "true"}
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
+	pod.Name = "r-abc-0"
+	pod.Status.Phase = corev1.PodRunning
+	exec := &fakePodExecutor{failRole: "checkpoint-once"}
+	r, c := newReconciler(t, run, buildWorkspacePVC(run), pod)
+	r.Executor = exec
+	r.PodConfig.CheckpointLocalPath = "/tmp/checkpoints"
+	reconcile(t, r, run)
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseRunning {
+		t.Fatalf("phase = %q, want Running", got.Status.Phase)
+	}
+	if strings.Join(exec.calls, ",") != "harness:quiesce,checkpointer:checkpoint-once,harness:unquiesce" {
+		t.Fatalf("exec calls = %v", exec.calls)
+	}
+	if cond := findCondition(got, pauseCheckpointConditionType); cond == nil || cond.Status != metav1.ConditionFalse || !strings.Contains(cond.Message, "injected") {
+		t.Fatalf("failure condition = %+v", cond)
+	}
+	if err := c.Get(context.Background(), types.NamespacedName{Namespace: run.Namespace, Name: pod.Name}, &corev1.Pod{}); err != nil {
+		t.Fatalf("live pod lost after failed checkpoint: %v", err)
+	}
+}
+
+func TestReconcileResumePausedPreservesRetryBudgetAndAdvancesOnce(t *testing.T) {
+	run := testRun()
+	run.Status = wrenv1.AgentRunStatus{Phase: wrenv1.PhasePaused, RestartCount: 2, AttemptGeneration: 4, LastCheckpoint: &wrenv1.CheckpointRef{ID: "ck-pause", URI: "checkpoints/ck-pause.json", At: metav1.NewTime(time.Now())}}
+	run.Annotations = map[string]string{wrenv1.ResumeAnnotation: "true"}
+	r, c := newReconciler(t, run, buildWorkspacePVC(run))
+	r.PodConfig.CheckpointLocalPath = "/tmp/checkpoints"
+	reconcile(t, r, run)
+	got := getRun(t, c, run)
+	if got.Status.Phase != wrenv1.PhaseInterrupted || got.Status.AttemptGeneration != 5 {
+		t.Fatalf("resume status = %+v", got.Status)
+	}
+	if got.Status.RestartCount != 2 {
+		t.Fatalf("paused resume reset retry budget: %d", got.Status.RestartCount)
+	}
+	if got.Annotations[wrenv1.ResumeAnnotation] != "" {
+		t.Fatal("resume annotation not cleared")
+	}
+	// Losing the paused PVC before the replacement starts restores the exact
+	// pause manifest without charging another attempt/restart.
+	if err := c.Delete(context.Background(), buildWorkspacePVC(run)); err != nil {
+		t.Fatal(err)
+	}
+	reconcile(t, r, run)
+	reconcile(t, r, run)
+	got = getRun(t, c, run)
+	if got.Status.AttemptGeneration != 5 || got.Status.RestartCount != 2 {
+		t.Fatalf("paused PVC restore charged twice: %+v", got.Status)
+	}
+	if rs := runSpecFor(t, c, run); rs.RestoreCheckpoint != "checkpoints/ck-pause.json" || !rs.RestoreRequired {
+		t.Fatalf("exact restore runspec = %+v", rs)
 	}
 }
 

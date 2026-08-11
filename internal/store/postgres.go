@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -214,13 +215,17 @@ func (p *Postgres) ListProjects(ctx context.Context) ([]*Project, error) {
 // --- Runs ---
 
 func (p *Postgres) CreateRun(ctx context.Context, r *Run) error {
-	_, err := p.pool.Exec(ctx, `
+	checkpoint, conditions, err := marshalRunStatus(r)
+	if err != nil {
+		return err
+	}
+	_, err = p.pool.Exec(ctx, `
 		INSERT INTO runs (
 			id, project, "user", prompt, harness, model, base_ref,
-			interactive, runtime, namespace, phase, pr_url, restart_count, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+			interactive, runtime, namespace, phase, pr_url, restart_count, last_checkpoint, conditions, created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		r.ID, r.Project, r.User, r.Prompt, r.Harness, r.Model, r.BaseRef,
-		r.Interactive, r.Runtime, r.Namespace, r.Phase, r.PRURL, r.RestartCount, r.CreatedAt)
+		r.Interactive, r.Runtime, r.Namespace, r.Phase, r.PRURL, r.RestartCount, checkpoint, conditions, r.CreatedAt)
 	if isUniqueViolation(err) {
 		return ErrExists
 	}
@@ -232,17 +237,21 @@ func (p *Postgres) CreateRun(ctx context.Context, r *Run) error {
 
 const runCols = `
 	id, project, "user", prompt, harness, model, base_ref,
-	interactive, runtime, namespace, phase, pr_url, restart_count, created_at`
+	interactive, runtime, namespace, phase, pr_url, restart_count, last_checkpoint, conditions, created_at`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
+	var checkpoint, conditions []byte
 	if err := row.Scan(
 		&r.ID, &r.Project, &r.User, &r.Prompt, &r.Harness, &r.Model, &r.BaseRef,
-		&r.Interactive, &r.Runtime, &r.Namespace, &r.Phase, &r.PRURL, &r.RestartCount, &r.CreatedAt,
+		&r.Interactive, &r.Runtime, &r.Namespace, &r.Phase, &r.PRURL, &r.RestartCount, &checkpoint, &conditions, &r.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
 	r.CreatedAt = r.CreatedAt.UTC()
+	if err := unmarshalRunStatus(&r, checkpoint, conditions); err != nil {
+		return nil, err
+	}
 	return &r, nil
 }
 
@@ -295,15 +304,19 @@ func (p *Postgres) ListRuns(ctx context.Context, f RunFilter) ([]*Run, error) {
 }
 
 func (p *Postgres) UpdateRun(ctx context.Context, r *Run) error {
+	checkpoint, conditions, err := marshalRunStatus(r)
+	if err != nil {
+		return err
+	}
 	tag, err := p.pool.Exec(ctx, `
 		UPDATE runs SET
 			project = $2, "user" = $3, prompt = $4, harness = $5, model = $6,
 			base_ref = $7, interactive = $8, runtime = $9, namespace = $10,
-			phase = $11, pr_url = $12, restart_count = $13, created_at = $14
+			phase = $11, pr_url = $12, restart_count = $13, last_checkpoint = $14, conditions = $15, created_at = $16
 		WHERE id = $1`,
 		r.ID, r.Project, r.User, r.Prompt, r.Harness, r.Model,
 		r.BaseRef, r.Interactive, r.Runtime, r.Namespace,
-		r.Phase, r.PRURL, r.RestartCount, r.CreatedAt)
+		r.Phase, r.PRURL, r.RestartCount, checkpoint, conditions, r.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("update run: %w", err)
 	}
@@ -332,22 +345,53 @@ func (p *Postgres) DeleteRun(ctx context.Context, id string) error {
 var _ upserter = (*Postgres)(nil)
 
 func (p *Postgres) UpsertRun(ctx context.Context, r *Run) error {
-	_, err := p.pool.Exec(ctx, `
+	checkpoint, conditions, err := marshalRunStatus(r)
+	if err != nil {
+		return err
+	}
+	_, err = p.pool.Exec(ctx, `
 		INSERT INTO runs (
 			id, project, "user", prompt, harness, model, base_ref,
-			interactive, runtime, namespace, phase, pr_url, restart_count, created_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			interactive, runtime, namespace, phase, pr_url, restart_count, last_checkpoint, conditions, created_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 		ON CONFLICT (id) DO UPDATE SET
 			project = EXCLUDED.project, "user" = EXCLUDED."user",
 			prompt = EXCLUDED.prompt, harness = EXCLUDED.harness,
 			model = EXCLUDED.model, base_ref = EXCLUDED.base_ref,
 			interactive = EXCLUDED.interactive, runtime = EXCLUDED.runtime,
 			namespace = EXCLUDED.namespace, phase = EXCLUDED.phase,
-			pr_url = EXCLUDED.pr_url, restart_count = EXCLUDED.restart_count`,
+			pr_url = EXCLUDED.pr_url, restart_count = EXCLUDED.restart_count,
+			last_checkpoint = EXCLUDED.last_checkpoint, conditions = EXCLUDED.conditions`,
 		r.ID, r.Project, r.User, r.Prompt, r.Harness, r.Model, r.BaseRef,
-		r.Interactive, r.Runtime, r.Namespace, r.Phase, r.PRURL, r.RestartCount, r.CreatedAt)
+		r.Interactive, r.Runtime, r.Namespace, r.Phase, r.PRURL, r.RestartCount, checkpoint, conditions, r.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("upsert run: %w", err)
+	}
+	return nil
+}
+
+func marshalRunStatus(r *Run) ([]byte, []byte, error) {
+	checkpoint, err := json.Marshal(r.LastCheckpoint)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal run checkpoint: %w", err)
+	}
+	conditions, err := json.Marshal(r.Conditions)
+	if err != nil {
+		return nil, nil, fmt.Errorf("marshal run conditions: %w", err)
+	}
+	return checkpoint, conditions, nil
+}
+
+func unmarshalRunStatus(r *Run, checkpoint, conditions []byte) error {
+	if len(checkpoint) > 0 && string(checkpoint) != "null" {
+		if err := json.Unmarshal(checkpoint, &r.LastCheckpoint); err != nil {
+			return fmt.Errorf("unmarshal run checkpoint: %w", err)
+		}
+	}
+	if len(conditions) > 0 {
+		if err := json.Unmarshal(conditions, &r.Conditions); err != nil {
+			return fmt.Errorf("unmarshal run conditions: %w", err)
+		}
 	}
 	return nil
 }

@@ -155,6 +155,12 @@ spec:
                       intervalSeconds:
                         format: int32
                         type: integer
+                      retain:
+                        default: 5
+                        description: Retain is the number of published checkpoint
+                          pairs kept for a run.
+                        format: int32
+                        type: integer
                     required:
                     - bucket
                     type: object
@@ -257,6 +263,18 @@ spec:
                     format: date-time
                     type: string
                   commit:
+                    type: string
+                  formatVersion:
+                    format: int32
+                    type: integer
+                  id:
+                    type: string
+                  sha256:
+                    type: string
+                  sizeBytes:
+                    format: int64
+                    type: integer
+                  trigger:
                     type: string
                   uri:
                     type: string

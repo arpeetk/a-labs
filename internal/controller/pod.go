@@ -3,6 +3,7 @@ package controller
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -143,6 +144,8 @@ type PodConfig struct {
 	// the pod ONLY when the GCS mount is added; empty falls back to
 	// DefaultCheckpointKSA.
 	CheckpointKSA string
+	// MockDelay is a dev/E2E-only duration passed only to mock harness pods.
+	MockDelay string
 }
 
 func (c PodConfig) checkpointMountEnabled(run *wrenv1.AgentRun) bool {
@@ -415,6 +418,7 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 			{Name: "WREN_RUN_ID", Value: run.Name},
 			{Name: "WREN_CHECKPOINT_BUCKET", Value: run.Spec.Workspace.Checkpoint.Bucket},
 			{Name: "WREN_CHECKPOINT_INTERVAL", Value: fmt.Sprintf("%d", checkpointInterval(run))},
+			{Name: "WREN_CHECKPOINT_RETAIN", Value: fmt.Sprintf("%d", checkpointRetention(run))},
 		},
 		VolumeMounts: []corev1.VolumeMount{{Name: VolumeWorkspace, MountPath: runspec.WorkspacePath, ReadOnly: true}},
 	}
@@ -446,6 +450,9 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 		{Name: "GIT_CONFIG_KEY_0", Value: "safe.directory"},
 		{Name: "GIT_CONFIG_VALUE_0", Value: runspec.WorkspacePath},
 	}, proxyEnv...)
+	if run.Spec.Harness.Kind == "mock" && cfg.MockDelay != "" {
+		harnessEnv = append(harnessEnv, corev1.EnvVar{Name: "WREN_MOCK_DELAY", Value: cfg.MockDelay})
+	}
 	if run.Spec.Harness.Kind == wrenv1.HarnessCodex {
 		// Codex stores resumable sessions under CODEX_HOME. Keep them inside
 		// .git on the durable workspace PVC: checkpoints include .git, while
@@ -652,6 +659,24 @@ func checkpointInterval(run *wrenv1.AgentRun) int32 {
 		return iv
 	}
 	return defaultCheckpointInterval
+}
+
+func checkpointRetention(run *wrenv1.AgentRun) int32 {
+	if n := run.Spec.Workspace.Checkpoint.Retain; n > 0 {
+		return n
+	}
+	return 5
+}
+
+func checkpointStatusPoll(run *wrenv1.AgentRun) time.Duration {
+	d := time.Duration(checkpointInterval(run)) * time.Second / 2
+	if d < 5*time.Second {
+		return 5 * time.Second
+	}
+	if d > 30*time.Second {
+		return 30 * time.Second
+	}
+	return d
 }
 
 // gcsBucketName extracts the bare bucket name the CSI driver's bucketName

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,6 +41,9 @@ type AgentRunReconciler struct {
 	// channel: terminal harness events are scraped into Status.PR/Usage/
 	// SessionID (WS-11). Nil disables the scrape (tests, bring-up).
 	Logs LogReader
+	// Executor backs the pause critical section (quiesce/checkpoint/unquiesce).
+	// A nil executor makes pause fail safely without deleting the live pod.
+	Executor PodExecutor
 }
 
 // +kubebuilder:rbac:groups=wren.dev,resources=agentruns,verbs=get;list;watch;create;update;patch;delete
@@ -47,6 +51,7 @@ type AgentRunReconciler struct {
 // +kubebuilder:rbac:groups=wren.dev,resources=agentruns/finalizers,verbs=update
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups="",resources=pods/exec,verbs=create
 // +kubebuilder:rbac:groups="",resources=persistentvolumeclaims;configmaps,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives an AgentRun toward its terminal state.
@@ -59,6 +64,15 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	}
 	if !run.DeletionTimestamp.IsZero() {
 		return ctrl.Result{}, nil // owned children are garbage-collected
+	}
+	if run.Status.Phase == wrenv1.PhasePaused {
+		if run.Annotations[wrenv1.CancelAnnotation] == "true" {
+			return r.cancel(ctx, &run)
+		}
+		if run.Annotations[wrenv1.ResumeAnnotation] == "true" {
+			return r.resume(ctx, &run)
+		}
+		return ctrl.Result{}, nil
 	}
 	if isTerminal(run.Status.Phase) {
 		// Manual resume (wren run resume) is the one exception to "terminal
@@ -78,6 +92,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if run.Annotations[wrenv1.CancelAnnotation] == "true" {
 		return r.cancel(ctx, &run)
 	}
+	if run.Status.Phase == wrenv1.PhasePausing || run.Annotations[wrenv1.PauseAnnotation] == "true" {
+		return r.pause(ctx, &run)
+	}
 
 	// First sight of the run: admit it.
 	if run.Status.Phase == "" {
@@ -89,6 +106,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	// (EgressEnforcement=True/Iptables) or free to bypass it (False/Disabled).
 	if err := r.ensureEgressCondition(ctx, &run); err != nil {
 		return ctrl.Result{}, fmt.Errorf("record egress condition: %w", err)
+	}
+	if err := r.ensureCheckpointStorageCondition(ctx, &run); err != nil {
+		return ctrl.Result{}, fmt.Errorf("record checkpoint storage condition: %w", err)
 	}
 
 	// Ensure the durable prerequisites exist before the pod.
@@ -140,6 +160,7 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // egressEnforcementConditionType is the condition type recording the egress
 // bypass-prevention posture (spec §5.6, WS-1).
 const egressEnforcementConditionType = "EgressEnforcement"
+const checkpointStorageConditionType = "CheckpointStorage"
 
 // ensureEgressCondition records an EgressEnforcement=Disabled condition when the
 // operator runs with --egress-enforcement=off, so the weaker posture is visible
@@ -164,6 +185,20 @@ func (r *AgentRunReconciler) ensureEgressCondition(ctx context.Context, run *wre
 	}
 	if existing := findCondition(run, egressEnforcementConditionType); existing != nil &&
 		existing.Status == want.Status && existing.Reason == want.Reason {
+		return nil
+	}
+	setCondition(run, want)
+	return r.Status().Update(ctx, run)
+}
+
+func (r *AgentRunReconciler) ensureCheckpointStorageCondition(ctx context.Context, run *wrenv1.AgentRun) error {
+	want := metav1.Condition{Type: checkpointStorageConditionType, Status: metav1.ConditionFalse, Reason: "Unavailable", Message: "operator has no checkpoint mount configured; durable pause is unavailable"}
+	if r.PodConfig.checkpointMountEnabled(run) {
+		want.Status = metav1.ConditionTrue
+		want.Reason = "Mounted"
+		want.Message = "trusted checkpointer and hydrate containers have checkpoint storage; harness does not"
+	}
+	if existing := findCondition(run, checkpointStorageConditionType); existing != nil && existing.Status == want.Status && existing.Reason == want.Reason {
 		return nil
 	}
 	setCondition(run, want)
@@ -211,6 +246,7 @@ var errPodDisappeared = errors.New("recorded run pod disappeared")
 // where the PVC will have survived and a restore must NOT be re-attempted
 // into a non-empty workspace.
 const workspaceRestoreConditionType = "WorkspaceRestorePending"
+const pauseResumeConditionType = "PauseResumePending"
 
 // ensurePVC creates the workspace PVC if it does not already exist. The PVC
 // name is stable across restarts so a surviving disk is reattached on resume
@@ -343,6 +379,10 @@ func (r *AgentRunReconciler) clearRecoveryConditions(ctx context.Context, run *w
 		})
 		changed = true
 	}
+	if existing := findCondition(run, pauseResumeConditionType); existing != nil && existing.Status == metav1.ConditionTrue {
+		setCondition(run, metav1.Condition{Type: pauseResumeConditionType, Status: metav1.ConditionFalse, Reason: "PodRunning", Message: "exact paused checkpoint is no longer pinned; resumed workspace is live"})
+		changed = true
+	}
 	if !changed {
 		return nil
 	}
@@ -388,6 +428,10 @@ func (r *AgentRunReconciler) buildRunSpec(run *wrenv1.AgentRun) runspec.RunSpec 
 		CheckpointBucket: run.Spec.Workspace.Checkpoint.Bucket,
 		RestoreRequired:  restoreCond != nil && restoreCond.Status == metav1.ConditionTrue,
 		BranchPrefix:     fmt.Sprintf("%s/%s", branchPrefix, sanitizeRef(run.Spec.User)),
+	}
+	pauseResume := findCondition(run, pauseResumeConditionType)
+	if rs.RestoreRequired && run.Status.LastCheckpoint != nil && pauseResume != nil && pauseResume.Status == metav1.ConditionTrue {
+		rs.RestoreCheckpoint = run.Status.LastCheckpoint.URI
 	}
 	if run.Spec.MCP.ConfigRef != "" {
 		rs.MCPConfigPath = runspec.MCPConfigPath
@@ -449,7 +493,18 @@ func (r *AgentRunReconciler) reconcilePodState(ctx context.Context, run *wrenv1.
 		if err := r.clearRecoveryConditions(ctx, run); err != nil {
 			return ctrl.Result{}, fmt.Errorf("clear recovery conditions: %w", err)
 		}
-		return r.setPhaseIfChanged(ctx, run, wrenv1.PhaseRunning, "PodRunning", "harness running")
+		changed := r.scrapeCheckpointStatus(ctx, run, pod)
+		if run.Status.Phase != wrenv1.PhaseRunning {
+			run.Status.Phase = wrenv1.PhaseRunning
+			setCondition(run, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "PodRunning", Message: "harness running"})
+			changed = true
+		}
+		if changed {
+			if err := r.Status().Update(ctx, run); err != nil {
+				return ctrl.Result{}, err
+			}
+		}
+		return ctrl.Result{RequeueAfter: checkpointStatusPoll(run)}, nil
 	case corev1.PodSucceeded:
 		// Harness exited 0: the PR is opened by the harness/control plane; the
 		// operator records terminal success. Scrape the harness event stream
@@ -555,6 +610,108 @@ func (r *AgentRunReconciler) cancel(ctx context.Context, run *wrenv1.AgentRun) (
 	return r.setPhase(ctx, run, wrenv1.PhaseCanceled, "Canceled", "run canceled by user (wren run stop)")
 }
 
+const pauseCheckpointConditionType = "PauseCheckpointReady"
+
+// pause performs the durable pause as a restart-safe state machine. Status is
+// the journal: once the checkpoint reference is committed, reconciliation
+// never executes another snapshot and proceeds only to pod removal.
+func (r *AgentRunReconciler) pause(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, error) {
+	if !r.PodConfig.checkpointMountEnabled(run) {
+		return r.abortPause(ctx, run, nil, errors.New("durable pause is unavailable because checkpoint storage is not mounted by the operator"))
+	}
+	if run.Status.Phase != wrenv1.PhasePausing {
+		run.Status.Phase = wrenv1.PhasePausing
+		setCondition(run, metav1.Condition{Type: "Ready", Status: metav1.ConditionFalse, Reason: "Pausing", Message: "quiescing harness and publishing a verified checkpoint"})
+		if err := r.Status().Update(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	ready := findCondition(run, pauseCheckpointConditionType)
+	if ready == nil || ready.Status != metav1.ConditionTrue || run.Status.LastCheckpoint == nil {
+		if r.Executor == nil {
+			return r.abortPause(ctx, run, nil, errors.New("operator pod executor is not configured"))
+		}
+		var pod corev1.Pod
+		if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: podName(run)}, &pod); err != nil {
+			if apierrors.IsNotFound(err) {
+				return r.setPhase(ctx, run, wrenv1.PhaseFailed, "PausePodLost", "agent pod disappeared before a pause checkpoint was verified")
+			}
+			return ctrl.Result{}, err
+		}
+		if _, err := r.Executor.Execute(ctx, run.Namespace, pod.Name, ContainerHarness, []string{"/usr/local/bin/wren-runtime", "quiesce"}); err != nil {
+			return r.abortPause(ctx, run, &pod, fmt.Errorf("quiesce harness: %w", err))
+		}
+		out, err := r.Executor.Execute(ctx, run.Namespace, pod.Name, ContainerCheckpointer, []string{"/usr/local/bin/wren-runtime", "checkpoint-once"})
+		if err != nil {
+			return r.abortPause(ctx, run, &pod, fmt.Errorf("forced checkpoint: %w", err))
+		}
+		var m struct {
+			ID            string    `json:"id"`
+			ManifestKey   string    `json:"manifestKey"`
+			SHA256        string    `json:"sha256"`
+			SizeBytes     int64     `json:"sizeBytes"`
+			FormatVersion int32     `json:"formatVersion"`
+			CreatedAt     time.Time `json:"createdAt"`
+			Trigger       string    `json:"trigger"`
+			Warning       string    `json:"warning"`
+		}
+		if err := json.Unmarshal(out, &m); err != nil || m.ID == "" || m.ManifestKey == "" || m.SHA256 == "" {
+			if err == nil {
+				err = errors.New("checkpoint proof is incomplete")
+			}
+			return r.abortPause(ctx, run, &pod, fmt.Errorf("decode checkpoint proof: %w", err))
+		}
+		run.Status.LastCheckpoint = &wrenv1.CheckpointRef{ID: m.ID, URI: m.ManifestKey, At: metav1.NewTime(m.CreatedAt), SHA256: m.SHA256, SizeBytes: m.SizeBytes, FormatVersion: m.FormatVersion, Trigger: m.Trigger}
+		setCondition(run, metav1.Condition{Type: pauseCheckpointConditionType, Status: metav1.ConditionTrue, Reason: "Verified", Message: fmt.Sprintf("checkpoint %s verified (sha256=%s)", m.ID, m.SHA256)})
+		if m.Warning != "" {
+			setCondition(run, metav1.Condition{Type: "CheckpointRetention", Status: metav1.ConditionFalse, Reason: "CleanupFailed", Message: m.Warning})
+		}
+		if err := r.Status().Update(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
+
+	var pod corev1.Pod
+	err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: podName(run)}, &pod)
+	if err == nil {
+		zero := int64(0)
+		if err := r.Delete(ctx, &pod, &client.DeleteOptions{GracePeriodSeconds: &zero, PropagationPolicy: ptr(metav1.DeletePropagationBackground)}); err != nil && !apierrors.IsNotFound(err) {
+			return ctrl.Result{}, fmt.Errorf("delete checkpointed pod on pause: %w", err)
+		}
+		return ctrl.Result{RequeueAfter: time.Second}, nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, err
+	}
+	delete(run.Annotations, wrenv1.PauseAnnotation)
+	if err := r.Update(ctx, run); err != nil {
+		return ctrl.Result{}, fmt.Errorf("clear pause annotation: %w", err)
+	}
+	return r.setPhase(ctx, run, wrenv1.PhasePaused, "Paused", fmt.Sprintf("paused at verified checkpoint %s; no agent pod is running", run.Status.LastCheckpoint.ID))
+}
+
+func (r *AgentRunReconciler) abortPause(ctx context.Context, run *wrenv1.AgentRun, pod *corev1.Pod, cause error) (ctrl.Result, error) {
+	if pod != nil && r.Executor != nil {
+		if _, err := r.Executor.Execute(ctx, run.Namespace, pod.Name, ContainerHarness, []string{"/usr/local/bin/wren-runtime", "unquiesce"}); err != nil {
+			cause = errors.Join(cause, fmt.Errorf("unquiesce harness: %w", err))
+		}
+	}
+	delete(run.Annotations, wrenv1.PauseAnnotation)
+	if err := r.Update(ctx, run); err != nil {
+		return ctrl.Result{}, fmt.Errorf("clear failed pause request: %w", err)
+	}
+	run.Status.Phase = wrenv1.PhaseRunning
+	setCondition(run, metav1.Condition{Type: pauseCheckpointConditionType, Status: metav1.ConditionFalse, Reason: "CheckpointFailed", Message: cause.Error()})
+	setCondition(run, metav1.Condition{Type: "Ready", Status: metav1.ConditionTrue, Reason: "PauseAborted", Message: "pause failed safely; harness was left running"})
+	if err := r.Status().Update(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, nil
+}
+
 // resume manually restarts a terminally-Failed run at the user's request
 // (wren run resume): it deletes any leftover pod from the failed attempt,
 // resets the retry budget, and drops the run back to Interrupted — the exact
@@ -566,6 +723,7 @@ func (r *AgentRunReconciler) cancel(ctx context.Context, run *wrenv1.AgentRun) (
 // PVC is genuinely gone will hit ensurePVC's same NotFound check on the very
 // next reconcile and fail WorkspaceLost again, truthfully.
 func (r *AgentRunReconciler) resume(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, error) {
+	wasPaused := run.Status.Phase == wrenv1.PhasePaused
 	// Resolve and delete the CURRENT attempt's pod before advancing its monotonic
 	// generation and resetting the independent automatic-retry counter.
 	// This must happen before the status mutation below so the exact pod that
@@ -592,14 +750,19 @@ func (r *AgentRunReconciler) resume(ctx context.Context, run *wrenv1.AgentRun) (
 		return ctrl.Result{}, fmt.Errorf("clear resume annotation: %w", err)
 	}
 
-	advanceAttempt(run)         // resume mode + a never-reused pod generation
-	run.Status.RestartCount = 0 // a fresh Spec.Retry.MaxRestarts worth of attempts
+	advanceAttempt(run) // resume mode + a never-reused pod generation
+	if !wasPaused {
+		run.Status.RestartCount = 0 // failed manual resume gets a fresh retry budget
+	}
+	if wasPaused {
+		setCondition(run, metav1.Condition{Type: pauseResumeConditionType, Status: metav1.ConditionTrue, Reason: "ManualResume", Message: "resume is pinned to the verified pause checkpoint if the PVC must be recreated"})
+	}
 	run.Status.Phase = wrenv1.PhaseInterrupted
 	setCondition(run, metav1.Condition{
 		Type:    "Resumed",
 		Status:  metav1.ConditionTrue,
 		Reason:  "ManualResume",
-		Message: "manually resumed via `wren run resume`; retry budget reset for a fresh attempt",
+		Message: "manually resumed via `wren run resume` from durable workspace state",
 	})
 	setCondition(run, metav1.Condition{
 		Type:    "Resuming",

@@ -37,20 +37,40 @@ type Project struct {
 // Run is the control-plane record of an agent run; a mirror of the AgentRun CR
 // plus the submission metadata.
 type Run struct {
-	ID           string    `json:"id"`
-	Project      string    `json:"project"`
-	User         string    `json:"user"`
-	Prompt       string    `json:"prompt"`
-	Harness      string    `json:"harness"`
-	Model        string    `json:"model"`
-	BaseRef      string    `json:"baseRef"`
-	Interactive  bool      `json:"interactive"`
-	Runtime      string    `json:"runtime"`
-	Namespace    string    `json:"namespace"`
-	Phase        string    `json:"phase"`
-	PRURL        string    `json:"prUrl,omitempty"`
-	RestartCount int32     `json:"restartCount"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID             string         `json:"id"`
+	Project        string         `json:"project"`
+	User           string         `json:"user"`
+	Prompt         string         `json:"prompt"`
+	Harness        string         `json:"harness"`
+	Model          string         `json:"model"`
+	BaseRef        string         `json:"baseRef"`
+	Interactive    bool           `json:"interactive"`
+	Runtime        string         `json:"runtime"`
+	Namespace      string         `json:"namespace"`
+	Phase          string         `json:"phase"`
+	PRURL          string         `json:"prUrl,omitempty"`
+	RestartCount   int32          `json:"restartCount"`
+	LastCheckpoint *RunCheckpoint `json:"lastCheckpoint,omitempty"`
+	Conditions     []RunCondition `json:"conditions,omitempty"`
+	CreatedAt      time.Time      `json:"createdAt"`
+}
+
+type RunCheckpoint struct {
+	ID            string    `json:"id,omitempty"`
+	URI           string    `json:"uri,omitempty"`
+	At            time.Time `json:"at,omitempty"`
+	SHA256        string    `json:"sha256,omitempty"`
+	SizeBytes     int64     `json:"sizeBytes,omitempty"`
+	FormatVersion int32     `json:"formatVersion,omitempty"`
+	Trigger       string    `json:"trigger,omitempty"`
+}
+
+type RunCondition struct {
+	Type               string    `json:"type"`
+	Status             string    `json:"status"`
+	Reason             string    `json:"reason,omitempty"`
+	Message            string    `json:"message,omitempty"`
+	LastTransitionTime time.Time `json:"lastTransitionTime,omitempty"`
 }
 
 // RunFilter narrows ListRuns. An empty filter returns all runs.

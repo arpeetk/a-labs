@@ -98,6 +98,9 @@ func TestDesktopManagementUsesRealControlPlaneAPI(t *testing.T) {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/r-1/stop":
 			actions = append(actions, "stop")
 			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/r-1/pause":
+			actions = append(actions, "pause")
+			w.WriteHeader(http.StatusAccepted)
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/r-1/resume":
 			actions = append(actions, "resume")
 			w.WriteHeader(http.StatusAccepted)
@@ -143,6 +146,9 @@ func TestDesktopManagementUsesRealControlPlaneAPI(t *testing.T) {
 	if err := app.StopRun("r-1"); err != nil {
 		t.Fatal(err)
 	}
+	if err := app.PauseRun("r-1"); err != nil {
+		t.Fatal(err)
+	}
 	if err := app.ResumeRun("r-1"); err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +167,7 @@ func TestDesktopManagementUsesRealControlPlaneAPI(t *testing.T) {
 	if err != nil || logs != "agent output\n" {
 		t.Fatalf("Logs = %q, %v", logs, err)
 	}
-	if strings.Join(actions, ",") != "stop,resume,delete" {
+	if strings.Join(actions, ",") != "stop,pause,resume,delete" {
 		t.Fatalf("actions = %v", actions)
 	}
 	if _, err := app.SelectContext("test"); err != nil {

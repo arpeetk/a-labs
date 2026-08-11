@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -253,6 +254,14 @@ func (s *Service) GetRun(ctx context.Context, id string) (*store.Run, error) {
 	if url := cr.Status.PR.URL; url != "" && url != rec.PRURL {
 		rec.PRURL, changed = url, true
 	}
+	checkpoint := checkpointFromStatus(cr.Status.LastCheckpoint)
+	if checkpoint != nil && !reflect.DeepEqual(checkpoint, rec.LastCheckpoint) {
+		rec.LastCheckpoint, changed = checkpoint, true
+	}
+	conditions := conditionsFromStatus(cr.Status.Conditions)
+	if len(conditions) > 0 && !reflect.DeepEqual(conditions, rec.Conditions) {
+		rec.Conditions, changed = conditions, true
+	}
 	if changed {
 		_ = s.store.UpdateRun(ctx, rec)
 	}
@@ -286,7 +295,44 @@ func (s *Service) StopRun(ctx context.Context, id string) error {
 	return s.launcher.RequestCancel(ctx, rec.Namespace, id)
 }
 
-// ResumeRun manually restarts a terminally-Failed run: it asks the operator
+// PauseRun requests a durable pause. The live CR is authoritative: accepting a
+// pause from a stale store phase could checkpoint an already-completed pod.
+// Checkpoint storage is mandatory because Paused promises recoverable state.
+func (s *Service) PauseRun(ctx context.Context, id string) error {
+	rec, err := s.store.GetRun(ctx, id)
+	if err != nil {
+		return err
+	}
+	cr, err := s.launcher.GetRun(ctx, rec.Namespace, id)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: run %q has no AgentRun to pause", ErrNotFound, id)
+		}
+		return fmt.Errorf("get AgentRun: %w", err)
+	}
+	if cr.Status.Phase == wrenv1.PhasePausing || cr.Status.Phase == wrenv1.PhasePaused {
+		return nil
+	}
+	if cr.Status.Phase != wrenv1.PhaseRunning {
+		return fmt.Errorf("%w: run %q is %s, not Running; nothing to pause", ErrValidation, id, cr.Status.Phase)
+	}
+	if strings.TrimSpace(cr.Spec.Workspace.Checkpoint.Bucket) == "" {
+		return fmt.Errorf("%w: run %q has no checkpoint storage configured", ErrValidation, id)
+	}
+	storageReady := false
+	for _, c := range cr.Status.Conditions {
+		if c.Type == "CheckpointStorage" && c.Status == metav1.ConditionTrue {
+			storageReady = true
+			break
+		}
+	}
+	if !storageReady {
+		return fmt.Errorf("%w: run %q has no mounted checkpoint storage; durable pause is unavailable", ErrValidation, id)
+	}
+	return s.launcher.RequestPause(ctx, rec.Namespace, id)
+}
+
+// ResumeRun restarts a Paused or terminally-Failed run: it asks the operator
 // (via the resume annotation) to reset the retry budget, clear any leftover
 // pod, and give the reconciler a fresh attempt at the run — a deliberate
 // human/automated decision distinct from the operator's own crash-resume.
@@ -308,8 +354,8 @@ func (s *Service) ResumeRun(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("get AgentRun: %w", err)
 	}
-	if cr.Status.Phase != wrenv1.PhaseFailed {
-		return fmt.Errorf("%w: run %q is %s, not Failed; nothing to resume", ErrValidation, id, cr.Status.Phase)
+	if cr.Status.Phase != wrenv1.PhaseFailed && cr.Status.Phase != wrenv1.PhasePaused {
+		return fmt.Errorf("%w: run %q is %s, not Failed or Paused; nothing to resume", ErrValidation, id, cr.Status.Phase)
 	}
 	return s.launcher.RequestResume(ctx, rec.Namespace, id)
 }
@@ -374,20 +420,22 @@ func (s *Service) ReconcileFromCluster(ctx context.Context) (int, error) {
 // time. prior may be nil (run unknown to the store).
 func runFromCR(cr *wrenv1.AgentRun, prior *store.Run) *store.Run {
 	rec := &store.Run{
-		ID:           cr.Name,
-		Project:      cr.Spec.Project,
-		User:         cr.Spec.User,
-		Prompt:       cr.Spec.Task.Prompt,
-		Harness:      string(cr.Spec.Harness.Kind),
-		Model:        cr.Spec.Harness.Model,
-		BaseRef:      cr.Spec.Task.BaseRef,
-		Interactive:  cr.Spec.Interactive,
-		Runtime:      string(cr.Spec.Sandbox.RuntimeClass),
-		Namespace:    cr.Namespace,
-		Phase:        string(cr.Status.Phase),
-		PRURL:        cr.Status.PR.URL,
-		RestartCount: cr.Status.RestartCount,
-		CreatedAt:    cr.CreationTimestamp.Time,
+		ID:             cr.Name,
+		Project:        cr.Spec.Project,
+		User:           cr.Spec.User,
+		Prompt:         cr.Spec.Task.Prompt,
+		Harness:        string(cr.Spec.Harness.Kind),
+		Model:          cr.Spec.Harness.Model,
+		BaseRef:        cr.Spec.Task.BaseRef,
+		Interactive:    cr.Spec.Interactive,
+		Runtime:        string(cr.Spec.Sandbox.RuntimeClass),
+		Namespace:      cr.Namespace,
+		Phase:          string(cr.Status.Phase),
+		PRURL:          cr.Status.PR.URL,
+		RestartCount:   cr.Status.RestartCount,
+		LastCheckpoint: checkpointFromStatus(cr.Status.LastCheckpoint),
+		Conditions:     conditionsFromStatus(cr.Status.Conditions),
+		CreatedAt:      cr.CreationTimestamp.Time,
 	}
 	if prior != nil {
 		if rec.Phase == "" {
@@ -395,6 +443,12 @@ func runFromCR(cr *wrenv1.AgentRun, prior *store.Run) *store.Run {
 		}
 		if rec.PRURL == "" {
 			rec.PRURL = prior.PRURL
+		}
+		if rec.LastCheckpoint == nil {
+			rec.LastCheckpoint = prior.LastCheckpoint
+		}
+		if len(rec.Conditions) == 0 {
+			rec.Conditions = append([]store.RunCondition(nil), prior.Conditions...)
 		}
 		if !prior.CreatedAt.IsZero() {
 			rec.CreatedAt = prior.CreatedAt // keep the true submission time
@@ -404,6 +458,21 @@ func runFromCR(cr *wrenv1.AgentRun, prior *store.Run) *store.Run {
 		rec.CreatedAt = time.Now()
 	}
 	return rec
+}
+
+func checkpointFromStatus(in *wrenv1.CheckpointRef) *store.RunCheckpoint {
+	if in == nil {
+		return nil
+	}
+	return &store.RunCheckpoint{ID: in.ID, URI: in.URI, At: in.At.Time, SHA256: in.SHA256, SizeBytes: in.SizeBytes, FormatVersion: in.FormatVersion, Trigger: in.Trigger}
+}
+
+func conditionsFromStatus(in []metav1.Condition) []store.RunCondition {
+	out := make([]store.RunCondition, 0, len(in))
+	for _, c := range in {
+		out = append(out, store.RunCondition{Type: c.Type, Status: string(c.Status), Reason: c.Reason, Message: c.Message, LastTransitionTime: c.LastTransitionTime.Time})
+	}
+	return out
 }
 
 // --- internals ---

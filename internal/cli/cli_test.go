@@ -261,11 +261,14 @@ func TestRunStopAndRm(t *testing.T) {
 
 // TestRunResume covers `wren run resume`: it must POST /v1/runs/{id}/resume.
 func TestRunResume(t *testing.T) {
-	var resumeHit bool
+	var resumeHit, pauseHit bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/r-1/resume":
 			resumeHit = true
+			w.WriteHeader(http.StatusAccepted)
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/runs/r-1/pause":
+			pauseHit = true
 			w.WriteHeader(http.StatusAccepted)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -282,6 +285,12 @@ func TestRunResume(t *testing.T) {
 	}
 	if !resumeHit {
 		t.Error("run resume did not POST /resume")
+	}
+	if out, err := execIn(t, dir, "run", "pause", "r-1"); err != nil || !strings.Contains(out, "verified checkpoint") {
+		t.Fatalf("run pause = %q, %v", out, err)
+	}
+	if !pauseHit {
+		t.Error("run pause did not POST /pause")
 	}
 }
 

@@ -337,6 +337,32 @@ func TestK8sRequestResume(t *testing.T) {
 	}
 }
 
+func TestK8sRequestPauseIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	s, err := NewScheme()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(s).WithObjects(sampleRun("ns", "r-1")).Build()
+	k := &K8s{c: c}
+	if err := k.RequestPause(ctx, "ns", "r-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.RequestPause(ctx, "ns", "r-1"); err != nil {
+		t.Fatalf("duplicate RequestPause: %v", err)
+	}
+	got, err := k.GetRun(ctx, "ns", "r-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Annotations[wrenv1.PauseAnnotation] != "true" {
+		t.Fatalf("annotations = %v", got.Annotations)
+	}
+	if err := k.RequestPause(ctx, "ns", "missing"); !apierrors.IsNotFound(err) {
+		t.Fatalf("missing = %v", err)
+	}
+}
+
 // TestK8sRequestResumeSurvivesConcurrentStatusWrite mirrors
 // TestK8sRequestCancelSurvivesConcurrentStatusWrite: RequestResume must use a
 // merge Patch (client.MergeFrom), not a read-modify-write Update, so a

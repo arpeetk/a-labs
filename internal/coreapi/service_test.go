@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"strings"
 	"testing"
 	"time"
@@ -233,6 +234,51 @@ func TestStopRun(t *testing.T) {
 	}
 	if err := svc.StopRun(ctx, "ghost"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("stop missing = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPauseRunValidatesLivePhaseAndIsIdempotent(t *testing.T) {
+	svc, _, fl := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.PauseRun(ctx, run.ID); !errors.Is(err, ErrValidation) {
+		t.Fatalf("pause Pending = %v, want validation", err)
+	}
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning, Conditions: []metav1.Condition{{Type: "CheckpointStorage", Status: metav1.ConditionTrue}}})
+	if err := svc.PauseRun(ctx, run.ID); err != nil {
+		t.Fatalf("pause Running: %v", err)
+	}
+	cr := fl.Runs[run.Namespace+"/"+run.ID]
+	if cr.Annotations[wrenv1.PauseAnnotation] != "true" {
+		t.Fatalf("pause annotation = %v", cr.Annotations)
+	}
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhasePausing})
+	if err := svc.PauseRun(ctx, run.ID); err != nil {
+		t.Fatalf("duplicate pause: %v", err)
+	}
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhasePaused})
+	if err := svc.ResumeRun(ctx, run.ID); err != nil {
+		t.Fatalf("resume Paused: %v", err)
+	}
+}
+
+func TestPauseRunRequiresCheckpointStorage(t *testing.T) {
+	svc, _, fl := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock", CheckpointBucket: "disabled"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr := fl.Runs[run.Namespace+"/"+run.ID]
+	cr.Spec.Workspace.Checkpoint.Bucket = ""
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning})
+	if err := svc.PauseRun(ctx, run.ID); !errors.Is(err, ErrValidation) {
+		t.Fatalf("pause without storage = %v", err)
 	}
 }
 

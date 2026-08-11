@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
@@ -50,6 +51,7 @@ func main() {
 		"Kubernetes ServiceAccount (Workload-Identity-bound to a GCP SA with objectAdmin on the checkpoint bucket) applied to pods with --checkpoint-gcs-mount enabled")
 	flag.StringVar(&podCfg.CheckpointLocalPath, "checkpoint-local-path", "",
 		"development/test only: existing absolute node directory mounted into trusted checkpoint containers (single-node kind; not node-durable)")
+	flag.StringVar(&podCfg.MockDelay, "mock-delay", "", "development/test only: delay deterministic mock harness completion (for example 2m)")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -57,6 +59,13 @@ func main() {
 	if podCfg.CheckpointLocalPath != "" && (!filepath.IsAbs(podCfg.CheckpointLocalPath) || filepath.Clean(podCfg.CheckpointLocalPath) == string(filepath.Separator)) {
 		fmt.Fprintf(os.Stderr, "wren-operator: invalid --checkpoint-local-path %q (want a non-root absolute path)\n", podCfg.CheckpointLocalPath)
 		os.Exit(1)
+	}
+	if podCfg.MockDelay != "" {
+		d, err := time.ParseDuration(podCfg.MockDelay)
+		if err != nil || d <= 0 {
+			fmt.Fprintf(os.Stderr, "wren-operator: invalid --mock-delay %q (want a positive duration)\n", podCfg.MockDelay)
+			os.Exit(1)
+		}
 	}
 
 	switch controller.EgressEnforcement(egressEnforcement) {
@@ -98,6 +107,7 @@ func main() {
 		Scheme:    mgr.GetScheme(),
 		PodConfig: podCfg,
 		Logs:      controller.NewLogReader(cs),
+		Executor:  controller.NewPodExecutor(mgr.GetConfig(), cs),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to set up AgentRun controller")
 		os.Exit(1)

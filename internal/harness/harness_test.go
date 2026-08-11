@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/summiteight/wren/internal/runspec"
 )
@@ -111,6 +112,22 @@ func TestMockHarnessWritesWorkspaceAndReportsPR(t *testing.T) {
 	}
 	if len(eventsOfType(evs, EventToolCall)) != 1 {
 		t.Error("expected a tool_call event")
+	}
+}
+
+func TestMockHarnessOptionalDelay(t *testing.T) {
+	t.Setenv("WREN_MOCK_DELAY", "2ms")
+	start := time.Now()
+	_, err := (Mock{}).Run(context.Background(), runspec.RunSpec{RunID: "r", Project: "p", Prompt: "wait", WorkspacePath: t.TempDir()}, NewEmitter(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) < time.Millisecond {
+		t.Fatal("mock delay was not applied")
+	}
+	t.Setenv("WREN_MOCK_DELAY", "invalid")
+	if _, err := (Mock{}).Run(context.Background(), runspec.RunSpec{RunID: "r", WorkspacePath: t.TempDir()}, NewEmitter(io.Discard)); err == nil {
+		t.Fatal("invalid mock delay accepted")
 	}
 }
 

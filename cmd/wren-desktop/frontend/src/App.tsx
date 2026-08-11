@@ -1,7 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react"
 import { api, Bootstrap, Project, Run, RunCreate } from "./api"
 
-const phases = ["", "Pending", "Provisioning", "Running", "Interrupted", "Succeeded", "Failed", "Canceled"]
+const phases = ["", "Pending", "Provisioning", "Running", "Pausing", "Paused", "Interrupted", "Succeeded", "Failed", "Canceled"]
 const containers = ["harness", "hydrate", "egress-proxy", "checkpointer", "agent-gateway", "egress-lockdown"]
 
 function errText(error: unknown) {
@@ -20,7 +20,7 @@ function relativeTime(value?: string) {
 function phaseTone(phase: string) {
   if (phase === "Succeeded") return "success"
   if (phase === "Failed" || phase === "Canceled") return "danger"
-  if (phase === "Running" || phase === "Finalizing") return "active"
+  if (phase === "Running" || phase === "Finalizing" || phase === "Pausing") return "active"
   return "quiet"
 }
 
@@ -173,11 +173,14 @@ function RunDetail({ run, onAction, onDelete }: { run?: Run; onAction: (a: () =>
     <div className="detail-head"><div><b className={`phase ${phaseTone(run.phase)}`}>{run.phase}</b><h2>{run.id}</h2><p>{run.project} · {run.harness || "default"}</p></div><button className="icon">•••</button></div>
     <dl><div><dt>Owner</dt><dd>{run.user || "—"}</dd></div><div><dt>Restarts</dt><dd>{run.restartCount || 0}</dd></div><div><dt>Namespace</dt><dd>{run.namespace || "—"}</dd></div><div><dt>Created</dt><dd>{run.createdAt ? new Date(run.createdAt).toLocaleString() : "—"}</dd></div></dl>
     {run.prUrl && <a className="pr-card" href={run.prUrl} target="_blank"><span>⑂</span><span><small>Pull request ready</small><strong>{run.prUrl.replace("https://github.com/", "")}</strong></span><b>↗</b></a>}
+    {run.lastCheckpoint && <div className="checkpoint-card"><small>Durable checkpoint · {run.lastCheckpoint.trigger || "recovery"}</small><strong>{run.lastCheckpoint.id}</strong><span>{run.lastCheckpoint.at ? new Date(run.lastCheckpoint.at).toLocaleString() : "—"} · {run.lastCheckpoint.sizeBytes ? `${Math.ceil(run.lastCheckpoint.sizeBytes / 1024)} KiB` : "—"}</span><code>{run.lastCheckpoint.sha256 ? `sha256:${run.lastCheckpoint.sha256.slice(0, 16)}…` : run.lastCheckpoint.uri}</code></div>}
+    {!!run.conditions?.length && <div className="conditions"><h3>Recovery timeline</h3>{run.conditions.filter(c => c.type !== "Ready" && c.type !== "EgressEnforcement").map(c => <div key={c.type}><span className={`status-dot ${c.status === "False" ? "warn" : ""}`} /><span><strong>{c.type}</strong><small>{c.reason}{c.message ? ` · ${c.message}` : ""}</small></span></div>)}</div>}
     <div className="logs-head"><h3>Run logs {logLive && <span className="live"><i /> Live</span>}</h3><select value={container} onChange={e => setContainer(e.target.value)}>{containers.map(c => <option key={c}>{c}</option>)}</select><button className="ghost compact" onClick={() => void fetchLogs()}>Snapshot</button></div>
     <pre className="logs">{logError ? `Unable to stream logs\n${logError}` : logs || "Waiting for container output…"}</pre>
     <div className="lifecycle">
       {(run.phase === "Running" || run.phase === "Pending" || run.phase === "Provisioning") && <button onClick={() => void onAction(() => api.stopRun(runID))}>Stop run</button>}
-      {run.phase === "Failed" && <button className="primary" onClick={() => void onAction(() => api.resumeRun(runID))}>Resume run</button>}
+      {run.phase === "Running" && <button className="primary" onClick={() => void onAction(() => api.pauseRun(runID))}>Pause safely</button>}
+      {(run.phase === "Failed" || run.phase === "Paused") && <button className="primary" onClick={() => void onAction(() => api.resumeRun(runID))}>Resume run</button>}
       <button className="danger-button" onClick={() => { if (confirm(`Delete ${runID} and its workspace?`)) void onAction(async () => { await api.deleteRun(runID); onDelete() }) }}>Delete</button>
     </div>
   </aside>

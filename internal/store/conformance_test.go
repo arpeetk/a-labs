@@ -96,11 +96,13 @@ func testRunCRUDAndFilter(t *testing.T, s Store) {
 	r2, _ := s.GetRun(ctx, "r-2")
 	r2.Phase = "Succeeded"
 	r2.PRURL = "http://pr/2"
+	r2.LastCheckpoint = &RunCheckpoint{ID: "ck-1", URI: "checkpoints/ck-1.json", SHA256: "abc", SizeBytes: 42, FormatVersion: 1, Trigger: "pause", At: base}
+	r2.Conditions = []RunCondition{{Type: "PauseCheckpointReady", Status: "True", Reason: "Verified", Message: "safe", LastTransitionTime: base}}
 	if err := s.UpdateRun(ctx, r2); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.GetRun(ctx, "r-2")
-	if got.Phase != "Succeeded" || got.PRURL != "http://pr/2" {
+	if got.Phase != "Succeeded" || got.PRURL != "http://pr/2" || got.LastCheckpoint == nil || got.LastCheckpoint.ID != "ck-1" || len(got.Conditions) != 1 {
 		t.Errorf("update not persisted: %+v", got)
 	}
 	if err := s.UpdateRun(ctx, &Run{ID: "ghost"}); !errors.Is(err, ErrNotFound) {

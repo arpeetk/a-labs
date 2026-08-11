@@ -40,6 +40,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
 	mux.HandleFunc("DELETE /v1/runs/{id}", s.deleteRun)
 	mux.HandleFunc("POST /v1/runs/{id}/stop", s.stopRun)
+	mux.HandleFunc("POST /v1/runs/{id}/pause", s.pauseRun)
 	mux.HandleFunc("POST /v1/runs/{id}/resume", s.resumeRun)
 	mux.HandleFunc("GET /v1/runs/{id}/logs", s.runLogs)
 	mux.HandleFunc("POST /v1/projects", s.createProject)
@@ -130,6 +131,14 @@ func (s *Server) deleteRun(w http.ResponseWriter, r *http.Request) {
 // halts the pod and drives the run to Canceled (terminal, no auto-resume).
 func (s *Server) stopRun(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.StopRun(r.Context(), r.PathValue("id")); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) pauseRun(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.PauseRun(r.Context(), r.PathValue("id")); err != nil {
 		writeServiceErr(w, err)
 		return
 	}
