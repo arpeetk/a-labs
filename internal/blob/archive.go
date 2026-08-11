@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // Archive walks srcDir and writes a gzip-compressed tar stream of its full
@@ -102,6 +101,11 @@ func Unarchive(src io.Reader, destDir string) error {
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		return fmt.Errorf("blob: open archive destination: %w", err)
+	}
+	defer root.Close()
 
 	for {
 		hdr, err := tr.Next()
@@ -111,31 +115,30 @@ func Unarchive(src io.Reader, destDir string) error {
 		if err != nil {
 			return fmt.Errorf("blob: unarchive tar read: %w", err)
 		}
-		target, err := resolveArchivePath(destDir, hdr.Name)
+		target, err := resolveArchivePath(hdr.Name)
 		if err != nil {
 			return err
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := root.MkdirAll(target, 0o755); err != nil {
 				return fmt.Errorf("blob: unarchive mkdir %q: %w", hdr.Name, err)
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return fmt.Errorf("blob: unarchive mkdir parent of %q: %w", hdr.Name, err)
 			}
-			if err := writeArchiveFile(target, hdr, tr); err != nil {
+			if err := writeArchiveFile(root, target, hdr, tr); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
-			linkTarget, err := resolveArchiveSymlink(destDir, target, hdr.Linkname)
-			if err != nil {
+			if err := validateArchiveSymlink(target, hdr.Linkname); err != nil {
 				return fmt.Errorf("blob: unarchive symlink %q: %w", hdr.Name, err)
 			}
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return fmt.Errorf("blob: unarchive mkdir parent of symlink %q: %w", hdr.Name, err)
 			}
-			if err := os.Symlink(linkTarget, target); err != nil {
+			if err := root.Symlink(hdr.Linkname, target); err != nil {
 				return fmt.Errorf("blob: unarchive create symlink %q: %w", hdr.Name, err)
 			}
 		default:
@@ -145,23 +148,22 @@ func Unarchive(src io.Reader, destDir string) error {
 	}
 }
 
-// resolveArchiveSymlink accepts only relative links whose cleaned destination
-// remains under destDir. Returning the original relative target preserves the
-// workspace layout while preventing an archive from planting a link to another
-// mount (or using a later entry beneath that link to write outside destDir).
-func resolveArchiveSymlink(destDir, linkPath, linkTarget string) (string, error) {
+// validateArchiveSymlink accepts only relative links whose cleaned destination
+// remains inside the extraction root. os.Root is the load-bearing boundary: it
+// also rejects a later archive entry that tries to traverse through a symlink.
+func validateArchiveSymlink(linkPath, linkTarget string) error {
 	if filepath.IsAbs(linkTarget) {
-		return "", fmt.Errorf("absolute target %q is not allowed", linkTarget)
+		return fmt.Errorf("absolute target %q is not allowed", linkTarget)
 	}
 	resolved := filepath.Clean(filepath.Join(filepath.Dir(linkPath), filepath.FromSlash(linkTarget)))
-	if resolved != destDir && !strings.HasPrefix(resolved, destDir+string(os.PathSeparator)) {
-		return "", fmt.Errorf("target %q escapes destination", linkTarget)
+	if !filepath.IsLocal(resolved) {
+		return fmt.Errorf("target %q escapes destination", linkTarget)
 	}
-	return linkTarget, nil
+	return nil
 }
 
-func writeArchiveFile(target string, hdr *tar.Header, r io.Reader) error {
-	f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, hdr.FileInfo().Mode().Perm())
+func writeArchiveFile(root *os.Root, target string, hdr *tar.Header, r io.Reader) error {
+	f, err := root.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, hdr.FileInfo().Mode().Perm())
 	if err != nil {
 		return fmt.Errorf("blob: unarchive create %q: %w", hdr.Name, err)
 	}
@@ -172,11 +174,12 @@ func writeArchiveFile(target string, hdr *tar.Header, r io.Reader) error {
 	return f.Close()
 }
 
-// resolveArchivePath maps a tar entry name to an absolute path under destDir,
-// rejecting any name that would escape it (e.g. "../../etc/passwd").
-func resolveArchivePath(destDir, name string) (string, error) {
-	clean := filepath.Join(destDir, filepath.FromSlash(name))
-	if clean != destDir && !strings.HasPrefix(clean, destDir+string(os.PathSeparator)) {
+// resolveArchivePath converts a portable tar name into a local relative path.
+// The caller then uses it only with os.Root, which enforces the same boundary
+// even when an earlier entry created a symlink in the destination tree.
+func resolveArchivePath(name string) (string, error) {
+	clean := filepath.Clean(filepath.FromSlash(name))
+	if !filepath.IsLocal(clean) {
 		return "", fmt.Errorf("blob: archive entry %q escapes destination", name)
 	}
 	return clean, nil

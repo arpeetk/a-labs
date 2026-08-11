@@ -253,3 +253,34 @@ func TestUnarchiveRejectsUnsafeSymlink(t *testing.T) {
 		}
 	}
 }
+
+func TestUnarchiveRejectsWriteThroughEscapingSymlink(t *testing.T) {
+	dst := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dst, "pivot")); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "pivot/escaped", Typeflag: tar.TypeReg, Mode: 0o644, Size: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("evil")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := blob.Unarchive(&buf, dst); err == nil {
+		t.Fatal("Unarchive accepted a write through an escaping symlink")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escaped")); !os.IsNotExist(err) {
+		t.Fatalf("outside file exists after rejected extraction: %v", err)
+	}
+}
