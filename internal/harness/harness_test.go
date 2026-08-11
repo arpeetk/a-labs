@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +13,10 @@ import (
 
 	"github.com/summiteight/wren/internal/runspec"
 )
+
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
 
 func decodeEvents(t *testing.T, r *bytes.Buffer) []Event {
 	t.Helper()
@@ -54,6 +60,22 @@ func TestEmitterStampsTimeAndSerializes(t *testing.T) {
 	}
 	if evs[2].PR == nil || evs[2].PR.Branch != "b" {
 		t.Errorf("pr = %+v", evs[2].PR)
+	}
+}
+
+func TestStreamCLIReturnsReadError(t *testing.T) {
+	want := errors.New("stream broke")
+	_, _, _, err := streamCLI(failingReader{err: want}, NewEmitter(io.Discard), func([]byte) []cliEvent { return nil })
+	if !errors.Is(err, want) {
+		t.Fatalf("streamCLI error = %v, want %v", err, want)
+	}
+}
+
+func TestStreamCLIReturnsOversizedLineError(t *testing.T) {
+	line := bytes.Repeat([]byte("x"), 8*1024*1024+1)
+	_, _, _, err := streamCLI(bytes.NewReader(line), NewEmitter(io.Discard), func([]byte) []cliEvent { return nil })
+	if err == nil {
+		t.Fatal("streamCLI accepted a line beyond its configured limit")
 	}
 }
 

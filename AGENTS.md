@@ -61,7 +61,7 @@ internal/
   launcher/            creates AgentRun CRs (Launcher interface + K8s impl + Fake)
   controller/          AgentRun reconciler + pod builder
   runspec/             the RunSpec contract handed to a harness
-  blob/                object-store contract for checkpoints (interface only — no impls yet)
+  blob/                checkpoint store contract + mounted implementation + archives
   harness/             harness adapters (mock, claude-code, codex, opencode) + event protocol
   podruntime/          in-pod role runners (harness/hydrate/sidecars) + dispatch
   egress/              the credential-injecting allowlist proxy (github/anthropic/openai routes)
@@ -262,13 +262,14 @@ real PR without touching github.com.
   the escape hatch for clusters that forbid privileged init containers (e.g.
   GKE Autopilot) — `config/netpol/` has a weaker NetworkPolicy layer for that
   path. Residual: a runc escape to the node (gVisor/Kata, M4).
-  **checkpointer** is an experimental liveness stub (no snapshots; crash-resume
-  is PVC reattach + resume-mode — spec §5.5 v0.1). WS-18 made *one* narrow thing
-  real: an opt-in GCS-FUSE **mount** into the checkpointer container
-  (`--checkpoint-gcs-mount`, default off) backed by `internal/blob.MountStore`,
-  with a startup Put/Get/List self-check proven live on GKE via Workload
-  Identity — but the actual checkpoint feature (interval snapshots + restore)
-  still does not exist. **gateway** is still a
+  **checkpointer** is real when the opt-in GCS-FUSE mount is enabled
+  (`--checkpoint-gcs-mount`, default off): it snapshots the full workspace on a
+  configurable interval through `internal/blob.MountStore`, and hydrate restores
+  the newest checkpoint when the controller detects that the PVC was destroyed.
+  Without that mount it remains a liveness-only sidecar. The GCS mount and
+  Workload Identity path have been proven live on GKE; incremental/git-aware
+  snapshots, transcript mirroring, checkpoint status, and graceful-termination
+  flush remain future work. **gateway** is still a
   liveness stand-in (run results reach status via the operator's pods/log
   scrape, WS-11; the event bridge is the v0.2 target).
 - **Transport:** control-plane API is HTTP/JSON (target: gRPC + Connect).

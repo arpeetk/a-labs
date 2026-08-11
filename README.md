@@ -37,9 +37,10 @@ repo and edits files** → the change is committed, pushed, and **a real PR is
 opened**. The GitHub token and model API key live only on a trusted egress-proxy
 sidecar; **the untrusted agent container holds no secrets**. Infrastructure
 crashes (OOM, eviction) auto-resume by recreating the pod and reattaching the
-surviving workspace disk; deterministic failures fail fast. A node/zone loss
-that destroys the disk ends the run cleanly (`Failed`, with diagnostics) —
-object-store checkpoints are post-launch (spec §5.5).
+surviving workspace disk; deterministic failures fail fast. With the opt-in GCS
+checkpoint mount, periodic workspace snapshots also allow recovery after the
+PVC is destroyed; without it, that loss ends cleanly as `Failed` with
+diagnostics (spec §5.5).
 
 ## How a run flows
 
@@ -109,7 +110,7 @@ Engineers then port-forward, `wren login`, `wren project create`,
                                                                         ▼
    ┌──────────────────────── hardened agent pod (per run) ─────────────────┐
    │  egress-proxy (creds + allowlist) ◀── harness runner (Claude, no creds)│
-   │  + checkpointer (experimental stub) + gateway sidecars                 │
+   │  + checkpointer (opt-in snapshots) + gateway sidecars                  │
    │  + hydrate init  + workspace PVC                                       │
    └───────────────────────────────────────────────────────────────────────┘
 ```
@@ -119,7 +120,7 @@ Engineers then port-forward, `wren login`, `wren project create`,
   `AgentRun` custom resource.
 - **Operator** (controller-runtime) reconciles each `AgentRun` into a hardened
   pod, owns the lifecycle, and auto-resumes infrastructure crashes by
-  reattaching the surviving workspace PVC (resume-mode; no checkpoints yet).
+  reattaching the surviving workspace PVC, or restoring its latest opt-in GCS checkpoint.
 - **Agent pod** is the sandbox: one untrusted harness container + trusted
   sidecars (egress-proxy holds the credentials); the runner reaches the internet
   only through the proxy.
@@ -136,7 +137,7 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Task → PR (Journey A) | ✅ real Claude agent → PR, on kind **and** GKE | same |
 | Onboarding | ✅ one command (`wren install --kind`/`--registry`/`--create-cluster`) builds+delivers all 6 images, optionally provisions the GKE Standard cluster itself, deploys the control plane, and hands off a **minimal** `wren project create`/`wren run create` — install-configured namespace closes a silent credential footgun; a stuck image pull gets diagnosed with the exact fix, not a dead end; zero placeholder CLI commands ([SETUP.md](SETUP.md)) | same |
 | Harnesses | ✅ `claude-code` (proven e2e) + `mock` (keyless gate); `codex` + `opencode` adapters, images, and the `/openai/` egress route built — **not yet run against live providers** ([docs/harnesses.md](docs/harnesses.md)) | + BYO conformance suite |
-| Crash-resume | ✅ infra crashes (OOM/eviction) resume via PVC reattach + resume-mode; deterministic failures fail fast; a disk-destroying node/zone loss = clean `Failed` (deterministically, not by accident — reconciler distinguishes first-provision from a PVC that vanished later) | + object-store checkpoints (`workspace.checkpoint.*` accepted, **no-op** until the checkpointer lands post-launch; `internal/blob.Store` is the socket) |
+| Crash-resume | ✅ infra crashes resume via PVC reattach; opt-in GCS-FUSE checkpoints periodically snapshot the workspace and restore it after PVC loss; deterministic failures fail fast | + incremental/git-aware snapshots, transcript mirroring, graceful shutdown flush, checkpoint status |
 | Egress-proxy | ✅ injects creds (github.com, api.github.com, api.anthropic.com, api.openai.com) + allowlist; runner holds no secret; **bypass enforced** (iptables uid-lockdown + per-run canary; `--egress-enforcement=off` escape hatch with `config/netpol/` FQDN policies) + a DNS-rebinding-closed CONNECT path — **verified on real GKE Standard**, not just kind | — |
 | Control plane | ✅ runs in-cluster (operator + apiserver Deployments, `config/default`; `make e2e` rides them) — local-against-cluster remains the dev loop | published images + Ingress/OIDC front-door |
 | GitHub creds | ✅ PAT in the proxy secret | per-run **GitHub App** tokens |
@@ -146,7 +147,7 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Isolation | hardened `runc` pods | + gVisor/Kata (deferred, M4) |
 
 Next up: per-run **GitHub App** tokens (the minter is built; wiring is next)
-and the object-store checkpointer behind `internal/blob.Store` (post-launch).
+and production hardening of checkpoints (incremental snapshots, transcript mirroring, status, retention).
 
 ## Repository layout
 
@@ -165,7 +166,7 @@ internal/
   controller/               AgentRun reconciler + pod builder
   harness/ podruntime/      harness adapters (claude-code, codex, opencode, mock) + in-pod roles
   egress/                   the credential-injecting allowlist proxy
-  blob/                     object-store Store interface for checkpoints (impls post-launch)
+  blob/                     checkpoint Store + mounted implementation + safe archive/restore
   github/ gitwork/ finalize/  GitHub PR client, go-git ops, commit→push→PR
   runspec/                  the RunSpec contract handed to each harness
 build/                Dockerfiles (runtime, claude-code, codex, opencode, generic gobin)
@@ -184,12 +185,16 @@ make build            # -> ./bin/wren
 make build-operator   # -> ./bin/wren-operator
 make build-apiserver  # -> ./bin/wren-apiserver
 make build-runtime    # -> ./bin/wren-runtime
+make build-desktop    # -> native Wren desktop app (Wails v2 + npm)
 
 make test             # unit tests (fake k8s client, httptest, local git repos)
 make cover            # per-package coverage
 make vet fmt tidy
 make manifests generate   # regenerate CRD/RBAC YAML + DeepCopy from code
 ```
+
+The native fleet/run/project management app lives in `cmd/wren-desktop`; see
+[`docs/desktop.md`](docs/desktop.md) for its current surface and development loop.
 
 For a full local end-to-end (kind + operator + apiserver + a real task), see the
 recipe in [`AGENTS.md`](AGENTS.md#7-local-end-to-end-on-kind) and

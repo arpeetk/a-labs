@@ -432,10 +432,8 @@ func splitAllowlist(s string) []string {
 
 // RunSidecar runs a long-lived sidecar role: it logs liveness and blocks until
 // the context is canceled (SIGTERM), then exits cleanly so the pod can complete.
-// It backs the checkpointer and agent-gateway roles. The checkpointer is
-// EXPERIMENTAL (spec §5.5): a liveness stub keeping the pod shape stable — it
-// takes no snapshots in v0.1; real checkpointing plugs into internal/blob.Store
-// post-launch.
+// It backs the agent-gateway role and the checkpointer when no checkpoint mount
+// is configured. With a mount, RunCheckpointer selects the real snapshot loop.
 func RunSidecar(ctx context.Context, out io.Writer, name string) error {
 	em := harness.NewEmitter(out)
 	em.Message(name + ": started (M0 stand-in)")
@@ -587,7 +585,7 @@ const (
 	RoleHydrate        = "hydrate"
 	RoleEgressProxy    = "egress-proxy"
 	RoleEgressLockdown = "egress-lockdown"
-	RoleCheckpointer   = "checkpointer" // experimental: liveness stub, no snapshots (spec §5.5)
+	RoleCheckpointer   = "checkpointer" // periodic snapshots when the GCS mount is configured
 	RoleGateway        = "agent-gateway"
 )
 

@@ -17,6 +17,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 
 	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
 	"github.com/summiteight/wren/internal/launcher"
@@ -104,6 +105,23 @@ func (s *Service) CreateProject(ctx context.Context, p *store.Project) (*store.P
 	if strings.TrimSpace(p.Name) == "" {
 		return nil, fmt.Errorf("%w: project name is required", ErrValidation)
 	}
+	if problems := utilvalidation.IsDNS1123Label(p.Name); len(problems) > 0 {
+		return nil, fmt.Errorf("%w: invalid project name %q: %s", ErrValidation, p.Name, strings.Join(problems, "; "))
+	}
+	if p.Namespace != "" {
+		if problems := utilvalidation.IsDNS1123Label(p.Namespace); len(problems) > 0 {
+			return nil, fmt.Errorf("%w: invalid namespace %q: %s", ErrValidation, p.Namespace, strings.Join(problems, "; "))
+		}
+	}
+	if p.Repo != "" && !validRepo(p.Repo) {
+		return nil, fmt.Errorf("%w: repo must be GitHub owner/name, got %q", ErrValidation, p.Repo)
+	}
+	if p.DefaultHarness != "" && !validHarness(p.DefaultHarness) {
+		return nil, fmt.Errorf("%w: unsupported default harness %q", ErrValidation, p.DefaultHarness)
+	}
+	if p.RuntimeClass != "" && !validRuntime(p.RuntimeClass) {
+		return nil, fmt.Errorf("%w: unsupported runtime class %q", ErrValidation, p.RuntimeClass)
+	}
 	// repo is OPTIONAL: a repo-less project is the keyless design — its runs have
 	// an empty RunSpec.Repo, so hydrate's clone and finalize's PR are both skipped
 	// (see internal/podruntime). This is what `make e2e` exercises with no creds.
@@ -183,10 +201,6 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (*store.R
 	if err := s.launcher.EnsureNamespace(ctx, ns); err != nil {
 		return nil, fmt.Errorf("ensure namespace: %w", err)
 	}
-	if err := s.launcher.CreateRun(ctx, run); err != nil {
-		return nil, fmt.Errorf("create AgentRun: %w", err)
-	}
-
 	rec := &store.Run{
 		ID:          id,
 		Project:     req.Project,
@@ -203,6 +217,15 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (*store.R
 	}
 	if err := s.store.CreateRun(ctx, rec); err != nil {
 		return nil, err
+	}
+	// Persist before publishing the CR. The operator can execute a CR as soon as
+	// it appears, so the reverse order allowed a store failure to return 500 while
+	// an untracked, billable agent run continued in the cluster.
+	if err := s.launcher.CreateRun(ctx, run); err != nil {
+		if rollbackErr := s.store.DeleteRun(ctx, rec.ID); rollbackErr != nil {
+			return nil, fmt.Errorf("create AgentRun: %w (also roll back run record: %v)", err, rollbackErr)
+		}
+		return nil, fmt.Errorf("create AgentRun: %w", err)
 	}
 	return rec, nil
 }
@@ -484,17 +507,35 @@ func (s *Service) credentialHint(ns string) string {
 
 // buildAgentRun maps the effective config onto an AgentRun custom resource.
 func buildAgentRun(id, ns string, req CreateRunRequest, eff effectiveConfig) (*wrenv1.AgentRun, error) {
+	if !validHarness(eff.harness) {
+		return nil, fmt.Errorf("%w: unsupported harness %q", ErrValidation, eff.harness)
+	}
+	if !validRuntime(eff.runtime) {
+		return nil, fmt.Errorf("%w: unsupported runtime class %q", ErrValidation, eff.runtime)
+	}
+	if eff.harness != "mock" && strings.TrimSpace(eff.image) == "" {
+		return nil, fmt.Errorf("%w: harness image is required for %q", ErrValidation, eff.harness)
+	}
 	cpu, err := resource.ParseQuantity(eff.cpu)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid cpu %q", ErrValidation, eff.cpu)
+	}
+	if cpu.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: cpu must be positive, got %q", ErrValidation, eff.cpu)
 	}
 	mem, err := resource.ParseQuantity(eff.memory)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid memory %q", ErrValidation, eff.memory)
 	}
+	if mem.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: memory must be positive, got %q", ErrValidation, eff.memory)
+	}
 	disk, err := resource.ParseQuantity(eff.disk)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid disk %q", ErrValidation, eff.disk)
+	}
+	if disk.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: disk must be positive, got %q", ErrValidation, eff.disk)
 	}
 	return &wrenv1.AgentRun{
 		ObjectMeta: metav1.ObjectMeta{
@@ -527,6 +568,31 @@ func buildAgentRun(id, ns string, req CreateRunRequest, eff effectiveConfig) (*w
 			Egress: wrenv1.EgressSpec{Allowlist: eff.allowlist},
 		},
 	}, nil
+}
+
+var repoPart = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+
+func validRepo(repo string) bool {
+	parts := strings.Split(repo, "/")
+	return len(parts) == 2 && repoPart.MatchString(parts[0]) && repoPart.MatchString(parts[1])
+}
+
+func validHarness(h string) bool {
+	switch h {
+	case "mock", "claude-code", "codex", "opencode", "byo":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRuntime(runtime string) bool {
+	switch runtime {
+	case "runc", "gvisor", "kata":
+		return true
+	default:
+		return false
+	}
 }
 
 func firstNonEmpty(vals ...string) string {

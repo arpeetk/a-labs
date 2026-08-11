@@ -35,7 +35,7 @@ The **core of milestone M0 — Journey A (task → PR)** — is built and valida
 2. ~~**Egress bypass enforcement**~~ — **done** (iptables uid-match lockdown; NetworkPolicy examples shipped under `config/netpol/` as a belt-and-suspenders second layer). ~~Remaining: verify on GKE Standard.~~ **Done (2026-07-24)** — live-validated on a real GKE Standard cluster: lockdown applied, canary proved the direct-dial/direct-HTTPS paths blocked and the proxy path succeeded, `EgressEnforcement=True/Iptables`. GKE Autopilot/PSA-restricted admission remains untestable in this environment (covered by design: a deterministic `PodAdmissionForbidden`, not a silent failure).
 3. **`wren install --create-cluster`** (in progress) — a bounded, opt-in GKE Standard cluster provisioning path (shells out to `gcloud`) so the one remaining manual step in onboarding — standing up the cluster itself — has a one-command quickstart option too, alongside the existing bring-your-own-cluster path (still the recommended flow for a real team setup).
 
-Also pending: the object-store **checkpointer** + checkpoint-restore hydrate — **de-scoped to post-launch (WS-8)**: v0.1 resumes via PVC reattach + resume-mode only, the checkpointer sidecar is an experimental liveness stub, the `workspace.checkpoint.*` CRD fields are accepted but **no-op**, and `internal/blob.Store` is the interface the real checkpointer (S3-compatible / GCS; MinIO in e2e) will plug into — WS-18 shipped its first impl (`blob.MountStore`) and the opt-in GKE GCS-FUSE mount into the checkpointer container (proven live), but the interval-snapshot/restore logic itself is still de-scoped. Also: `mcp`, `fleet`, `usage`, `project config`, `run attach`/`steer` — all deliberately **removed from the CLI surface** (WS-15) rather than left as stub commands; they're M1–M2 roadmap, not regressions (`project create/list/get` and `run create/list/get/logs/stop/rm/resume` are all real). Also still open: historical/aggregated logs (GCS) and multi-restart `--previous` for `run logs` (live-tail is built), managed Postgres provisioning (the store impl exists — see above), gRPC/Connect transport, isolated agent node pool.
+The object-store **checkpointer** is now real behind the opt-in GCS-FUSE mount (WS-21): it periodically archives the complete workspace through `blob.MountStore`, and hydrate restores the newest archive after a confirmed PVC loss. Runs without the mount retain PVC-reattach-only behavior. Still pending are incremental/git-aware snapshots, transcript mirroring, checkpoint status, graceful-termination flush, and retention controls. Also: `mcp`, `usage`, `project config`, and `run attach`/`steer` remain M1–M2 roadmap (`fleet` and `run create/list/get/logs/stop/rm/resume` are real). Also still open: historical/aggregated logs (GCS), multi-restart `--previous` for `run logs`, managed Postgres provisioning, gRPC/Connect transport, and an isolated agent node pool.
 
 **Repo:** the M0 codebase is on GitHub at `arpeetk/a-labs` (PR #2, branch `wren/m0-foundations`). Contributor/agent working guide: [`AGENTS.md`](../AGENTS.md) — read it before making changes.
 
@@ -126,7 +126,7 @@ Same as A, but with `--interactive`: the engineer attaches to a live stream, see
 
 Pod is OOMKilled mid-run. Operator detects termination, recreates the pod, an init container restores the workspace from the latest checkpoint, and the harness resumes the session from its mirrored transcript. `run get` shows `restartCount: 1` with the reason. The engineer sees continuity, not a mystery.
 
-> **v0.1 reality (WS-8):** resume = recreate the pod, reattach the surviving workspace PVC (stable name), and start the harness in resume mode (`RunSpec.mode=resume`; hydrate skips the re-clone, so the agent continues in its surviving workspace). The checkpoint restore + mirrored transcript above are the target — object-store checkpointing is post-launch, so a node/zone loss that destroys the PVC ends the run `Failed` with diagnostics instead (§5.5 v0.1 status).
+> **Current reality:** resume normally recreates the pod and reattaches the stable workspace PVC. When the opt-in GCS checkpoint mount is configured, a destroyed PVC is recreated and hydrate restores the newest full-workspace archive before the harness starts. Transcript/session restoration remains future work.
 
 ### 2.4 Journey D — Onboarding
 
@@ -400,7 +400,7 @@ spec:
     resources: { cpu: "2", memory: 4Gi, ephemeralDisk: 10Gi }
   workspace:
     pvc: { storageClass: regional-pd, size: 20Gi }
-    checkpoint: { intervalSeconds: 120, bucket: gs://wren-ckpt }  # accepted but NO-OP in v0.1 (checkpointer is post-launch; §5.5)
+    checkpoint: { intervalSeconds: 120, bucket: gs://wren-ckpt }  # active with operator --checkpoint-gcs-mount
   mcp:
     configRef: mcp-payments-api    # rendered config secret
   egress:
@@ -410,7 +410,7 @@ status:
   phase: Running
   podName: r-8f3a2c-0
   restartCount: 1
-  lastCheckpoint: { uri: gs://wren-ckpt/r-8f3a2c/ck-000042, at: "…", commit: "wip-abc" }  # never populated in v0.1 (no checkpoints taken)
+  lastCheckpoint: { uri: gs://wren-ckpt/r-8f3a2c/ck-000042, at: "…", commit: "wip-abc" }  # status population remains future work
   sessionId: sess-…
   pr: { url: "", branch: wren/arpeet/r-8f3a2c-idempotency }
   usage: { inputTokens: …, outputTokens: …, costUsd: … }
@@ -431,7 +431,7 @@ spec:
 status: { available: 6, claimed: 2 }
 ```
 
-**Reconciliation (AgentRun):** *(target flow; v0.1 deviations: every run takes the cold path — `AgentPool` claim/hand-off lands in M3 — and hydrate never restores from a checkpoint; see the §5.5 v0.1 status)*
+**Reconciliation (AgentRun):** *(current flow; every run takes the cold path — `AgentPool` claim/hand-off lands in M3 — and checkpoint restore requires the opt-in GCS mount; see §5.5)*
 
 1. **Placement** — claim a warm pod from a matching `AgentPool` (fast path) or create a new pod (cold path).
 2. **Volumes** — bind/provision the workspace PVC; attach the MCP config secret and per-run egress config.
@@ -450,7 +450,7 @@ Containers in the pod:
 |---|---|---|
 | **harness runner** | Runs the chosen agent (Claude Code / Codex / BYO) against the workspace. Executes untrusted, model-generated code. | **Untrusted** |
 | **agent-gateway** | Bridges the harness's stream-json I/O to the control plane (attach/steer); routes tool-permission prompts. | Semi-trusted |
-| **checkpointer** | Sidecar: mirrors session transcript to GCS continuously; snapshots workspace to GCS on interval + on SIGTERM. **Experimental in v0.1:** a liveness stub that keeps the pod shape stable and takes no snapshots (`workspace.checkpoint.*` is a no-op; §5.5). WS-18 gave it a real GCS-FUSE **mount** (opt-in, `--checkpoint-gcs-mount`) + a startup Put/Get/List self-check over `blob.MountStore` — the bucket credential and mount live here, never on the harness — but the snapshot/restore logic still does not exist. | Trusted |
+| **checkpointer** | With the opt-in GCS-FUSE mount, runs a Put/Get/List self-check and periodically writes full-workspace archives through `blob.MountStore`; hydrate restores the newest archive after confirmed PVC loss. Without the mount it is liveness-only. Incremental/git-aware snapshots, transcript mirroring, SIGTERM flush, and status remain future work. | Trusted |
 | **egress-proxy** | Sidecar: the pod's only route to the internet. Enforces domain allowlist; injects Anthropic/GitHub/MCP credentials so secrets never touch the runner env. | Trusted |
 
 The runner has **no cloud credentials, no GitHub token, and no direct internet** — only a route to the local egress-proxy. This is the core of the security model (§9).
@@ -479,7 +479,7 @@ EXIT:     0 = task complete (PR ready) · non-zero = error (retryable/fatal via 
 
 ### 5.5 Persistence & crash recovery
 
-> **v0.1 status (WS-8):** crash-resume is built as **PVC reattach + resume-mode only**. On a retryable infrastructure failure (OOMKill, eviction, node loss) the operator deletes the failed pod, bumps `restartCount`, and recreates the pod bound to the same workspace PVC (stable name) with `RunSpec.mode=resume`; hydrate skips the re-clone and the harness continues in the surviving workspace. Layers 2–3 below (object-store checkpoints + transcript mirroring) are **not built**: the checkpointer sidecar is an experimental liveness stub and the `workspace.checkpoint.*` CRD fields are accepted but **no-op in v0.1** (kept for API stability). Consequences: a crash whose PVC survives (the common case — OOM, eviction, reschedule; zone loss under Regional PD) resumes with the workspace intact; a node/zone loss that destroys the PVC ends the run **Failed** immediately and deterministically (reason `WorkspaceLost`, `internal/controller/agentrun_controller.go:ensurePVC`) — *not* spent against the retry budget, since no amount of retrying recovers a destroyed disk — rather than silently resuming into an empty workspace with no signal anything was lost (WS-16 A.4). `internal/blob.Store` is the interface the post-launch checkpointer plugs into; WS-18 landed its first real implementation — `blob.MountStore`, plain file I/O over a POSIX mount — plus the GKE Cloud Storage FUSE **mount** wiring: an operator-gated (`--checkpoint-gcs-mount`, default off) CSI volume backed by the run's checkpoint bucket, mounted into the checkpointer container only (never the harness) with a dedicated Workload-Identity KSA, proven end-to-end on real GKE by a checkpointer startup self-check (Put/Get/List round-trip visible in the bucket). **What still does not exist:** the real checkpointer itself — interval snapshots, `checkpoint_hint`/SIGTERM flush, git-aware bundles, and restore-on-resume via hydrate — all remain deferred (this workstream built the mount + the store, not the feature). The rest of this section is the **target** design.
+> **Current status (WS-21):** retryable failures recreate the pod in resume mode. A surviving PVC is reattached unchanged. If the PVC is gone and `--checkpoint-gcs-mount` is enabled, the controller creates a fresh PVC and hydrate restores the newest periodic full-workspace archive from `blob.MountStore`; without the mount the run fails deterministically as `WorkspaceLost`. The bucket is mounted only into trusted checkpointer/hydrate containers, never the harness, using a dedicated Workload-Identity KSA. Remaining target work: transcript/session mirroring, incremental git-aware bundles, event/SIGTERM snapshots, checkpoint status, and retention controls.
 
 **Requirement:** no work is ever lost; pods survive OOMKill, eviction, node failure, and any crash; the engineer always sees continuity.
 
@@ -636,8 +636,8 @@ Everything is provisioned by **Terraform modules** shipped with Wren so `wren in
 
 v1 targets multi-harness + steering; the build is sequenced but all lands within v1.
 
-- **M0 — Foundations.** Control-plane skeleton (auth, projects, runs), operator + `AgentRun` CRD, **Claude Code** harness, async task→PR, Regional PD workspace (the GCS checkpointer moved post-launch — WS-8), hardened `runc` pod on an isolated agent node pool, egress-proxy, GitHub App + repo-scoped tokens, `run create/get/logs`. *(Journey A + C end-to-end.)*
-  - **Done:** operator (`AgentRun` reconcile + crash-resume with retry classification; the `AgentPool` skeleton mentioned in earlier drafts was removed as dead code — it stays a target-only M3 design, nothing built); control-plane Runs/Projects services + HTTP API, running **in-cluster** (`config/default` Deployments + Service); CLI `run create/list/get/logs/stop/rm`, `project create/list/get` (`logs [-f]` live-tails via `pods/log`; **zero placeholder commands** — WS-15); CR-status mirroring; the `wren-runtime` image + the **real Claude Code agent** + **codex**/**opencode** adapters (WS-12, not yet live-key-validated); the **egress-proxy** (credential injection + allowlist, runner holds no secret) with **bypass enforcement** (iptables uid-lockdown + per-run canary, WS-1 — **verified on real GKE Standard**, not just kind) and a DNS-rebinding-closed CONNECT path (WS-16); the **Postgres store** (WS-3) alongside the in-memory default; idempotent, retry-classified **GitHub PR/finalize** (WS-11); and **onboarding as product surface** (WS-13/14/15: `wren install` builds+delivers all 6 images, the install-configured namespace closes a silent credential-footgun, a stuck image pull gets diagnosed with the exact IAM remedy). **Verified e2e on kind and real GKE: Journey A to `Succeeded` with a real Claude agent opening a real PR**, and the full onboarding loop (install → project create → run create → Succeeded) live-verified the same way, on `arpeetk/a-labs`. **Remaining:** **GitHub App** tokens wired per-run (the minter is built), published control-plane images + Ingress/OIDC front-door, isolated node pool, managed Postgres provisioning (WS-5), gRPC transport, `wren install --create-cluster` (WS-17, in progress). The GCS checkpointer + checkpoint-restore moved **post-launch** (WS-8): v0.1 resumes via PVC reattach + resume-mode only, and `workspace.checkpoint.*` is accepted but no-op (§5.5 v0.1 status); a disk-destroying loss now ends the run `Failed`/`WorkspaceLost` deterministically rather than silently resuming into an empty workspace (WS-16).
+- **M0 — Foundations.** Control-plane skeleton (auth, projects, runs), operator + `AgentRun` CRD, **Claude Code** harness, async task→PR, durable workspace with opt-in GCS checkpoints, hardened `runc` pod, egress-proxy, and `run create/get/logs`. *(Journey A + C end-to-end.)*
+  - **Done:** operator (`AgentRun` reconcile + retry classification, manual resume, PVC reattach, and opt-in checkpoint restore); control-plane Runs/Projects services + HTTP API, running **in-cluster** (`config/default` Deployments + Service); CLI `run create/list/get/logs/stop/rm/resume`, `project create/list/get`; CR-status mirroring; real Claude Code plus Codex/OpenCode adapters; credential-injecting, bypass-enforced egress proxy; memory and Postgres stores; idempotent retry-classified PR finalization; and one-command onboarding. Journey A has been verified on kind and GKE with a real Claude agent and PR. **Remaining:** per-run GitHub App tokens, published control-plane images + Ingress/OIDC, isolated nodes, managed Postgres provisioning, gRPC transport, and the checkpoint enhancements listed in §5.5.
 - **M1 — Breadth.** **Codex** + **BYO** harness adapters, MCP config service + `wren mcp`, usage metering (tokens/CPU/mem) + `wren usage`, `fleet` views, RBAC.
 - **M2 — Interactive.** agent-gateway + steering stream, `run attach/steer`, tool-permission routing, rubric validation modes.
 - **M3 — Scale & polish.** `AgentPool` warm pools, quotas/budgets with hard-cap pause, Terraform-driven `wren install`, read-only web dashboard.
@@ -677,7 +677,7 @@ That's the whole bar: **one admin command, one engineer command, then `run creat
 ## 12. Open questions & risks
 
 1. **Kernel isolation deferral (accepted for v1)** — v1 ships without gVisor/Kata, relying on the network/credential/identity boundary + hardened pods + an isolated agent node pool. Residual risk: a `runc` container escape could reach the node. Revisit before exposing highly-sensitive repos or if node-tenancy assumptions change. When enabled (M4), gVisor requires GKE Standard sandbox node pools and needs per-toolchain validation, else Kata for affected projects.
-2. **Checkpoint granularity vs cost** — applies when the checkpointer lands (post-launch; it is a no-op stub in v0.1). 120s interval is a starting default; git-aware incremental snapshots should keep GCS cost low, but very large working trees (monorepos) need tuning (sparse checkout, interval backoff).
+2. **Checkpoint granularity vs cost** — full-workspace snapshots run every 120s by default when enabled. Large working trees need interval tuning now and should move toward incremental git-aware snapshots, sparse checkout, and retention controls.
 3. **Codex/BYO parity** — the harness contract must capture resume + streaming semantics faithfully for non-Claude harnesses; some may lack first-class transcript resume, degrading crash recovery to workspace-only. Document per-harness capability tiers.
 4. **Steering + autonomy policy** — where to draw the auto-approve line for tool calls (esp. shell) per project; needs a clear policy model.
 5. **Regional PD failover** — regional PD covers zone loss within a region but not region loss; is cross-region durability (GCS is cross-region-capable) sufficient for the SLA?

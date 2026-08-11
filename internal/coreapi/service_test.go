@@ -37,6 +37,17 @@ func TestCreateProjectValidation(t *testing.T) {
 	if _, err := svc.CreateProject(ctx, &store.Project{Repo: "x/y"}); !errors.Is(err, ErrValidation) {
 		t.Errorf("missing name = %v", err)
 	}
+	for _, p := range []*store.Project{
+		{Name: "bad/name", DefaultHarness: "mock"},
+		{Name: "UPPER", DefaultHarness: "mock"},
+		{Name: "valid", Repo: "not-owner-and-name", DefaultHarness: "mock"},
+		{Name: "valid", Namespace: "Bad Namespace", DefaultHarness: "mock"},
+		{Name: "valid", DefaultHarness: "unknown"},
+	} {
+		if _, err := svc.CreateProject(ctx, p); !errors.Is(err, ErrValidation) {
+			t.Errorf("invalid project %+v = %v, want ErrValidation", p, err)
+		}
+	}
 	// repo is OPTIONAL: a keyless (repo-less) project creates successfully.
 	keyless, err := svc.CreateProject(ctx, &store.Project{Name: "keyless", DefaultHarness: "mock"})
 	if err != nil {
@@ -57,6 +68,45 @@ func TestCreateProjectValidation(t *testing.T) {
 		t.Error("CreatedAt not set")
 	}
 }
+
+func TestCreateRunPublishesOnlyAfterPersistence(t *testing.T) {
+	ctx := context.Background()
+	fl := launcher.NewFake()
+	base := store.NewMemory()
+	failing := createRunFailStore{Store: base, err: errors.New("database unavailable")}
+	svc := New(failing, fl, DefaultDefaults())
+	svc.idgen = func() string { return "r-store-fail" }
+	if err := base.CreateProject(ctx, &store.Project{Name: "demo", DefaultHarness: "mock"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"}); err == nil {
+		t.Fatal("CreateRun succeeded with failing store")
+	}
+	if len(fl.Runs) != 0 {
+		t.Fatalf("store failure published AgentRun(s): %+v", fl.Runs)
+	}
+}
+
+func TestCreateRunRollsBackStoreWhenClusterPublishFails(t *testing.T) {
+	svc, st, fl := newService(t)
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	fl.CreateRunErr = errors.New("cluster unavailable")
+
+	if _, err := svc.CreateRun(context.Background(), CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"}); err == nil {
+		t.Fatal("CreateRun succeeded with failing launcher")
+	}
+	if _, err := st.GetRun(context.Background(), "r-fixed"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("store row survived failed publication: %v", err)
+	}
+}
+
+type createRunFailStore struct {
+	store.Store
+	err error
+}
+
+func (s createRunFailStore) CreateRun(context.Context, *store.Run) error { return s.err }
 
 // TestCreateRunMissingCredentialSecret is WS-15 Part A: a run resolved to a
 // namespace that lacks the harness's credential Secret is rejected up front with
@@ -359,6 +409,21 @@ func TestCreateRunInvalidResourceOverride(t *testing.T) {
 	})
 	if !errors.Is(err, ErrValidation) {
 		t.Fatalf("err = %v, want validation", err)
+	}
+}
+
+func TestCreateRunRejectsNonPositiveResourcesAndUnknownOverrides(t *testing.T) {
+	svc, _, _ := newService(t)
+	seedProject(t, svc, &store.Project{Name: "p", DefaultHarness: "mock"})
+	for _, req := range []CreateRunRequest{
+		{Project: "p", User: "u@x", Prompt: "hi", CPU: "0"},
+		{Project: "p", User: "u@x", Prompt: "hi", Memory: "-1Gi"},
+		{Project: "p", User: "u@x", Prompt: "hi", Harness: "mystery"},
+		{Project: "p", User: "u@x", Prompt: "hi", Runtime: "host"},
+	} {
+		if _, err := svc.CreateRun(context.Background(), req); !errors.Is(err, ErrValidation) {
+			t.Errorf("CreateRun(%+v) = %v, want ErrValidation", req, err)
+		}
 	}
 }
 
