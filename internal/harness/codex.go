@@ -3,7 +3,9 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -25,6 +27,14 @@ func (Codex) Name() string { return "codex" }
 // Run implements Harness.
 func (Codex) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (Result, error) {
 	baseURL := os.Getenv("OPENAI_BASE_URL")
+	if spec.Mode == runspec.ModeResume && !codexSessionExists(os.Getenv("CODEX_HOME")) {
+		// Older runs and repo-less custom images may not have persisted Codex's
+		// transcript. Workspace-only recovery is still useful and safer than a
+		// deterministic "no session found" loop: start a fresh conversation in
+		// the surviving workspace and tell the operator exactly what degraded.
+		em.Message("codex: no persisted session found; continuing in workspace-only recovery mode")
+		spec.Mode = runspec.ModeStart
+	}
 	return runAgentCLI(ctx, spec, em, agentCLI{
 		adapter:   "codex",
 		bin:       "codex",
@@ -39,18 +49,28 @@ func (Codex) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (Result
 // Responses HTTP/SSE path. A local invocation without the route retains the
 // user's normal Codex provider configuration.
 func codexArgs(spec runspec.RunSpec, baseURL string) []string {
-	args := []string{
-		"exec",
-		"--json",
-		// danger-full-access disables Codex's own sandbox/approvals — safe
-		// here for the same reason as claude's --dangerously-skip-permissions:
-		// the pod IS the sandbox, and codex's landlock sandbox would otherwise
-		// also deny the agent's spawned commands their (proxied) network path
-		// (spec §5.6).
-		"--sandbox", "danger-full-access",
-		// A repo-less run (no clone) has no .git; the pod boundary, not git,
-		// is what makes the workspace safe.
-		"--skip-git-repo-check",
+	args := []string{"exec"}
+	if spec.Mode == runspec.ModeResume {
+		args = append(args,
+			"resume", "--last", "--json",
+			// `exec resume` does not accept `--sandbox`; this is its supported
+			// equivalent for an externally sandboxed Wren pod.
+			"--dangerously-bypass-approvals-and-sandbox",
+			"--skip-git-repo-check",
+		)
+	} else {
+		args = append(args,
+			"--json",
+			// danger-full-access disables Codex's own sandbox/approvals — safe
+			// here for the same reason as claude's --dangerously-skip-permissions:
+			// the pod IS the sandbox, and codex's landlock sandbox would otherwise
+			// also deny the agent's spawned commands their (proxied) network path
+			// (spec §5.6).
+			"--sandbox", "danger-full-access",
+			// A repo-less run (no clone) has no .git; the pod boundary, not git,
+			// is what makes the workspace safe.
+			"--skip-git-repo-check",
+		)
 	}
 	if baseURL != "" {
 		baseURL = strings.TrimRight(baseURL, "/")
@@ -69,7 +89,31 @@ func codexArgs(spec runspec.RunSpec, baseURL string) []string {
 	if spec.Model != "" {
 		args = append(args, "--model", spec.Model)
 	}
+	if spec.Mode == runspec.ModeResume {
+		return append(args, "Continue the interrupted task from the durable workspace. Inspect existing work before changing anything, complete the original task, and do not duplicate finished work.")
+	}
 	return append(args, spec.Prompt)
+}
+
+// codexSessionExists checks only Codex's documented session directory and is
+// deliberately tolerant of versioned subdirectories. Each run has a private
+// CODEX_HOME, so --last cannot select another run's conversation.
+func codexSessionExists(home string) bool {
+	if home == "" {
+		return false
+	}
+	found := false
+	_ = filepath.WalkDir(filepath.Join(home, "sessions"), func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".jsonl") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // codexEnv adds placeholder keys only in proxy mode. The CLI needs an API key

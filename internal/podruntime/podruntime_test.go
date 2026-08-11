@@ -258,6 +258,35 @@ func TestRunCheckpointer_NoMountConfigured(t *testing.T) {
 	}
 }
 
+func TestPrepareHarnessState(t *testing.T) {
+	for _, tc := range []struct {
+		name, repo, want string
+	}{
+		{"repository", "owner/repo", filepath.Join(".git", "wren", "codex")},
+		{"repo-less", "", filepath.Join(".wren", "codex")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := t.TempDir()
+			spec := runspec.RunSpec{Harness: "codex", Repo: tc.repo, WorkspacePath: ws}
+			if err := prepareHarnessState(spec); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(filepath.Join(ws, tc.want))
+			if err != nil || !info.IsDir() {
+				t.Fatalf("Codex state dir missing: info=%v err=%v", info, err)
+			}
+		})
+	}
+	ws := t.TempDir()
+	if err := prepareHarnessState(runspec.RunSpec{Harness: "mock", WorkspacePath: ws}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(ws)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("non-Codex hydrate mutated workspace: entries=%v err=%v", entries, err)
+	}
+}
+
 // TestRunCheckpointer_SelfCheckFailsNonFatal: a broken mount path makes the
 // self-check fail, but the sidecar logs FAILED and keeps running (it must not
 // crash-loop the pod for an experimental feature).

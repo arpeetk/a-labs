@@ -58,6 +58,21 @@ func TestCodexArgs(t *testing.T) {
 				"--config", `model_providers.wren.wire_api="responses"`,
 				"--config", "model_providers.wren.supports_websockets=false"}, "p"),
 		},
+		{
+			name: "resume uses the private persisted session",
+			spec: runspec.RunSpec{Prompt: "original", Mode: runspec.ModeResume, Model: "gpt-5.6-sol"},
+			base: "http://proxy/openai",
+			want: []string{"exec", "resume", "--last", "--json",
+				"--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check",
+				"--config", `model_provider="wren"`,
+				"--config", `model_providers.wren.name="Wren egress proxy"`,
+				"--config", `model_providers.wren.base_url="http://proxy/openai/v1"`,
+				"--config", `model_providers.wren.env_key="OPENAI_API_KEY"`,
+				"--config", `model_providers.wren.wire_api="responses"`,
+				"--config", "model_providers.wren.supports_websockets=false",
+				"--model", "gpt-5.6-sol",
+				"Continue the interrupted task from the durable workspace. Inspect existing work before changing anything, complete the original task, and do not duplicate finished work."},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -66,6 +81,23 @@ func TestCodexArgs(t *testing.T) {
 				t.Errorf("codexArgs = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCodexSessionExists(t *testing.T) {
+	home := t.TempDir()
+	if codexSessionExists(home) {
+		t.Fatal("empty CODEX_HOME reported a session")
+	}
+	session := filepath.Join(home, "sessions", "2026", "08", "11", "rollout-test.jsonl")
+	if err := os.MkdirAll(filepath.Dir(session), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !codexSessionExists(home) {
+		t.Fatal("persisted Codex session was not detected")
 	}
 }
 

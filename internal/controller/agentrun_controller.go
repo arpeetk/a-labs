@@ -118,6 +118,9 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	pod, err := r.ensurePod(ctx, &run)
 	if err != nil {
+		if errors.Is(err, errPodDisappeared) {
+			return r.handleMissingPod(ctx, &run)
+		}
 		// An admission rejection (Forbidden) is permanent: no pod with this
 		// spec will ever be admitted — e.g. the privileged egress-lockdown init
 		// container on GKE Autopilot or in a PSA-restricted namespace. Fail the
@@ -191,6 +194,12 @@ var errWorkspaceLost = errors.New("workspace PVC lost after provisioning")
 // to a requeue (not a failure) at the Reconcile call site.
 var errWorkspaceRestoring = errors.New("workspace PVC lost; recreating for checkpoint-restore")
 
+// errPodDisappeared means the pod recorded in status vanished without a
+// terminal pod object for classifyTermination to inspect (for example an
+// external deletion or node loss). It is still an infrastructure interruption
+// and must consume retry budget and advance to a resume generation.
+var errPodDisappeared = errors.New("recorded run pod disappeared")
+
 // workspaceRestoreConditionType marks a run whose workspace PVC was lost and
 // is being recreated for checkpoint-restore (WS-21). It is set True the
 // reconcile the loss is first observed, stays True across the requeued
@@ -220,14 +229,15 @@ const workspaceRestoreConditionType = "WorkspaceRestorePending"
 // deletion), not first-time provisioning.
 //
 // For a run that has NOT opted into checkpointing (no bucket, or the
-// operator's --checkpoint-gcs-mount flag off), silently creating a fresh,
+// operator has no checkpoint mount enabled), silently creating a fresh,
 // empty PVC would resume the harness into a workspace with no signal that
 // everything on disk was lost (WS-8 truthing pass; WS-16 A.4) — so that case
 // still returns errWorkspaceLost, unchanged from before WS-21.
 //
 // For a run that HAS opted in (restoreEligible), the loss is recoverable: the
-// dead pod (if any) is deleted, RestartCount bumped, and
-// workspaceRestoreConditionType set True — but the PVC is NOT created in this
+// dead pod (if any) is deleted, the attempt/retry counters are advanced once
+// for the recovery incident, and workspaceRestoreConditionType is set True —
+// but the PVC is NOT created in this
 // same call (errWorkspaceRestoring instead), so the just-deleted pod can't
 // race a same-generation PVC. The requeued follow-up reconcile calls ensurePVC
 // again, finds the condition already True, and creates the PVC then; hydrate
@@ -245,7 +255,7 @@ func (r *AgentRunReconciler) ensurePVC(ctx context.Context, run *wrenv1.AgentRun
 		return r.createWorkspacePVC(ctx, run)
 	}
 
-	restoreEligible := r.PodConfig.CheckpointGCSMount && run.Spec.Workspace.Checkpoint.Bucket != ""
+	restoreEligible := r.PodConfig.checkpointMountEnabled(run)
 	if !restoreEligible {
 		return errWorkspaceLost
 	}
@@ -270,7 +280,23 @@ func (r *AgentRunReconciler) ensurePVC(ctx context.Context, run *wrenv1.AgentRun
 		return getErr
 	}
 
-	run.Status.RestartCount++
+	// A pod disappearance and its PVC deletion commonly arrive as two separate
+	// watch events for the same node-loss incident. If recovery is already in
+	// progress, do not charge the retry budget or advance the pod generation a
+	// second time. The recovery pod (if Kubernetes managed to create it before
+	// the PVC finalizer completed) has not reached Running and performed work.
+	resuming := findCondition(run, "Resuming")
+	recoveryAlreadyCharged := resuming != nil && resuming.Status == metav1.ConditionTrue
+	if !recoveryAlreadyCharged {
+		advanceAttempt(run)
+		run.Status.RestartCount++
+	} else {
+		// We deliberately deleted this not-yet-running recovery pod above. Clear
+		// its recorded identity so ensurePod may recreate the same generation;
+		// otherwise the missing-pod detector would count our own deletion as a
+		// second interruption on the following reconcile.
+		run.Status.PodName = ""
+	}
 	run.Status.Phase = wrenv1.PhaseInterrupted
 	setCondition(run, metav1.Condition{
 		Type:    workspaceRestoreConditionType,
@@ -293,21 +319,33 @@ func (r *AgentRunReconciler) createWorkspacePVC(ctx context.Context, run *wrenv1
 	return r.Create(ctx, pvc)
 }
 
-// clearWorkspaceRestoreCondition clears WorkspaceRestorePending=True once a
-// new pod is confirmed Running. A no-op (no Status().Update) when the
-// condition is absent or already False, so ordinary reconciles of an
-// already-running pod don't churn status every loop.
-func (r *AgentRunReconciler) clearWorkspaceRestoreCondition(ctx context.Context, run *wrenv1.AgentRun) error {
-	existing := findCondition(run, workspaceRestoreConditionType)
-	if existing == nil || existing.Status != metav1.ConditionTrue {
+// clearRecoveryConditions closes the active recovery window once a replacement
+// pod is confirmed Running. While Resuming=True, a delayed PVC-deletion event
+// is part of the same infrastructure incident and must not consume a second
+// retry. This is a no-op when both conditions are absent/already False.
+func (r *AgentRunReconciler) clearRecoveryConditions(ctx context.Context, run *wrenv1.AgentRun) error {
+	changed := false
+	if existing := findCondition(run, workspaceRestoreConditionType); existing != nil && existing.Status == metav1.ConditionTrue {
+		setCondition(run, metav1.Condition{
+			Type:    workspaceRestoreConditionType,
+			Status:  metav1.ConditionFalse,
+			Reason:  "PodRunning",
+			Message: "workspace restore (if any) completed; hydrate succeeded and the pod is running",
+		})
+		changed = true
+	}
+	if existing := findCondition(run, "Resuming"); existing != nil && existing.Status == metav1.ConditionTrue {
+		setCondition(run, metav1.Condition{
+			Type:    "Resuming",
+			Status:  metav1.ConditionFalse,
+			Reason:  "PodRunning",
+			Message: "replacement pod is running; recovery incident completed",
+		})
+		changed = true
+	}
+	if !changed {
 		return nil
 	}
-	setCondition(run, metav1.Condition{
-		Type:    workspaceRestoreConditionType,
-		Status:  metav1.ConditionFalse,
-		Reason:  "PodRunning",
-		Message: "workspace restore (if any) completed; hydrate succeeded and the pod is running",
-	})
 	return r.Status().Update(ctx, run)
 }
 
@@ -345,7 +383,7 @@ func (r *AgentRunReconciler) buildRunSpec(run *wrenv1.AgentRun) runspec.RunSpec 
 		BaseRef:          run.Spec.Task.BaseRef,
 		WorkspacePath:    runspec.WorkspacePath,
 		SessionID:        run.Status.SessionID,
-		Mode:             mode(run.Status.RestartCount > 0),
+		Mode:             mode(attemptGeneration(run) > 0),
 		Interactive:      run.Spec.Interactive,
 		CheckpointBucket: run.Spec.Workspace.Checkpoint.Bucket,
 		RestoreRequired:  restoreCond != nil && restoreCond.Status == metav1.ConditionTrue,
@@ -367,6 +405,9 @@ func (r *AgentRunReconciler) ensurePod(ctx context.Context, run *wrenv1.AgentRun
 	if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
+	if run.Status.PodName == podName(run) {
+		return nil, errPodDisappeared
+	}
 	desired := buildAgentPod(run, r.PodConfig)
 	if err := controllerutil.SetControllerReference(run, desired, r.Scheme); err != nil {
 		return nil, err
@@ -380,6 +421,17 @@ func (r *AgentRunReconciler) ensurePod(ctx context.Context, run *wrenv1.AgentRun
 // reconcilePodState maps the pod's phase onto the run's phase, driving resume or
 // failure on pod termination.
 func (r *AgentRunReconciler) reconcilePodState(ctx context.Context, run *wrenv1.AgentRun, pod *corev1.Pod) (ctrl.Result, error) {
+	// Persist the exact pod identity before interpreting its phase. A later
+	// NotFound for this name is then distinguishable from first provisioning
+	// and is recovered as an interrupted attempt rather than silently recreated
+	// in start mode.
+	if run.Status.PodName != pod.Name {
+		run.Status.PodName = pod.Name
+		if err := r.Status().Update(ctx, run); err != nil {
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{Requeue: true}, nil
+	}
 	// A pod that is being deleted — externally, or by us during resume — is not
 	// a harness crash. A terminating pod can briefly report phase=Failed; acting
 	// on it would spuriously consume the retry budget. Wait for it to disappear;
@@ -394,8 +446,8 @@ func (r *AgentRunReconciler) reconcilePodState(ctx context.Context, run *wrenv1.
 		// Proof hydrate completed successfully (it blocks the harness from
 		// starting): clear any pending workspace-restore condition so a later,
 		// ordinary crash-resume of this same run does not re-trigger a restore.
-		if err := r.clearWorkspaceRestoreCondition(ctx, run); err != nil {
-			return ctrl.Result{}, fmt.Errorf("clear workspace-restore condition: %w", err)
+		if err := r.clearRecoveryConditions(ctx, run); err != nil {
+			return ctrl.Result{}, fmt.Errorf("clear recovery conditions: %w", err)
 		}
 		return r.setPhaseIfChanged(ctx, run, wrenv1.PhaseRunning, "PodRunning", "harness running")
 	case corev1.PodSucceeded:
@@ -409,6 +461,33 @@ func (r *AgentRunReconciler) reconcilePodState(ctx context.Context, run *wrenv1.
 	default:
 		return ctrl.Result{}, nil
 	}
+}
+
+// handleMissingPod recovers an infrastructure disappearance for which no
+// terminal pod remains to classify (external deletion, node loss). The
+// recorded PodName is the proof this was a real attempt, not first creation.
+func (r *AgentRunReconciler) handleMissingPod(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, error) {
+	max := run.Spec.Retry.MaxRestarts
+	if max == 0 {
+		max = defaultMaxRestarts
+	}
+	if run.Status.RestartCount >= max {
+		return r.setPhase(ctx, run, wrenv1.PhaseFailed, "RetryBudgetExhausted",
+			fmt.Sprintf("failed after %d restarts (pod disappeared)", run.Status.RestartCount))
+	}
+	advanceAttempt(run)
+	run.Status.RestartCount++
+	run.Status.Phase = wrenv1.PhaseInterrupted
+	setCondition(run, metav1.Condition{
+		Type:    "Resuming",
+		Status:  metav1.ConditionTrue,
+		Reason:  "PodDisappeared",
+		Message: fmt.Sprintf("restart %d/%d after recorded pod disappeared", run.Status.RestartCount, max),
+	})
+	if err := r.Status().Update(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
 }
 
 // handlePodFailure resumes the run (up to the retry budget) or fails it,
@@ -441,6 +520,7 @@ func (r *AgentRunReconciler) handlePodFailure(ctx context.Context, run *wrenv1.A
 	if err := r.Delete(ctx, pod, client.PropagationPolicy(metav1.DeletePropagationBackground)); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("delete failed pod: %w", err)
 	}
+	advanceAttempt(run)
 	run.Status.RestartCount++
 	run.Status.Phase = wrenv1.PhaseInterrupted
 	meta := metav1.Condition{
@@ -480,14 +560,17 @@ func (r *AgentRunReconciler) cancel(ctx context.Context, run *wrenv1.AgentRun) (
 // resets the retry budget, and drops the run back to Interrupted — the exact
 // non-terminal phase handlePodFailure uses for an ordinary crash-resume, so
 // the very next reconcile takes that same, already-tested path (ensurePVC's
-// checks, ensurePod recreating the pod at generation 0). This is deliberate:
+// checks, ensurePod recreating the pod at a fresh generation). This is deliberate:
 // resume gives the reconciler another real attempt, it does not paper over
 // whatever made the run fail — a run that failed WorkspaceLost because its
 // PVC is genuinely gone will hit ensurePVC's same NotFound check on the very
 // next reconcile and fail WorkspaceLost again, truthfully.
 func (r *AgentRunReconciler) resume(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, error) {
-	// podName is keyed off the CURRENT RestartCount — resolve and delete the
-	// leftover pod (if handlePodFailure left one for diagnosis, e.g.
+	// Resolve and delete the CURRENT attempt's pod before advancing its monotonic
+	// generation and resetting the independent automatic-retry counter.
+	// This must happen before the status mutation below so the exact pod that
+	// failed remains addressable.
+	// Delete the leftover pod (if handlePodFailure left one for diagnosis, e.g.
 	// RetryBudgetExhausted/HarnessError) BEFORE that count is reset below.
 	var pod corev1.Pod
 	err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: podName(run)}, &pod)
@@ -509,6 +592,7 @@ func (r *AgentRunReconciler) resume(ctx context.Context, run *wrenv1.AgentRun) (
 		return ctrl.Result{}, fmt.Errorf("clear resume annotation: %w", err)
 	}
 
+	advanceAttempt(run)         // resume mode + a never-reused pod generation
 	run.Status.RestartCount = 0 // a fresh Spec.Retry.MaxRestarts worth of attempts
 	run.Status.Phase = wrenv1.PhaseInterrupted
 	setCondition(run, metav1.Condition{
@@ -516,6 +600,12 @@ func (r *AgentRunReconciler) resume(ctx context.Context, run *wrenv1.AgentRun) (
 		Status:  metav1.ConditionTrue,
 		Reason:  "ManualResume",
 		Message: "manually resumed via `wren run resume`; retry budget reset for a fresh attempt",
+	})
+	setCondition(run, metav1.Condition{
+		Type:    "Resuming",
+		Status:  metav1.ConditionTrue,
+		Reason:  "ManualResume",
+		Message: "manual recovery attempt is pending",
 	})
 	if err := r.Status().Update(ctx, run); err != nil {
 		return ctrl.Result{}, err

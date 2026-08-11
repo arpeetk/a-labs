@@ -78,6 +78,15 @@ func TestBuildAgentPod(t *testing.T) {
 	if harness.SecurityContext == nil || harness.SecurityContext.RunAsNonRoot == nil || !*harness.SecurityContext.RunAsNonRoot {
 		t.Error("harness must run as non-root")
 	}
+	for name, want := range map[string]string{
+		"GIT_CONFIG_COUNT":   "1",
+		"GIT_CONFIG_KEY_0":   "safe.directory",
+		"GIT_CONFIG_VALUE_0": "/workspace",
+	} {
+		if got, ok := envVal(harness.Env, name); !ok || got != want {
+			t.Errorf("harness %s = %q (present=%v), want %q", name, got, ok, want)
+		}
+	}
 
 	// egress-lockdown (enforcement default=iptables) runs first, then native
 	// sidecars + hydrate init, in order.
@@ -158,6 +167,21 @@ func TestBuildAgentPodResumeName(t *testing.T) {
 	pod := buildAgentPod(run, PodConfig{Images: testImages})
 	if pod.Name != "r-abc-2" {
 		t.Errorf("resume pod name = %q, want r-abc-2", pod.Name)
+	}
+}
+
+func TestBuildAgentPodCodexHomeIsDurableAndPrivate(t *testing.T) {
+	run := testRun()
+	run.Spec.Harness.Kind = wrenv1.HarnessCodex
+	run.Spec.Repo = "owner/repo"
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
+	harness := containerByName(pod.Spec.Containers, ContainerHarness)
+	env, ok := envValue(harness, "CODEX_HOME")
+	if !ok || env.Value != "/workspace/.git/wren/codex" {
+		t.Fatalf("CODEX_HOME = %q (ok=%v), want durable .git-private path", env.Value, ok)
+	}
+	if volumeMount(*harness, VolumeWorkspace) == nil {
+		t.Fatal("CODEX_HOME must live on the workspace PVC mount")
 	}
 }
 
@@ -447,6 +471,57 @@ func TestBuildAgentPod_GCSMount_NoBucket(t *testing.T) {
 	}
 	if pod.Spec.ServiceAccountName != "" {
 		t.Errorf("ServiceAccountName = %q with no bucket; want empty", pod.Spec.ServiceAccountName)
+	}
+}
+
+func TestBuildAgentPod_LocalCheckpointMount_Enabled(t *testing.T) {
+	run := testRun()
+	pod := buildAgentPod(run, PodConfig{Images: testImages, CheckpointLocalPath: "/var/local/wren-checkpoints"})
+	v := podVolume(pod, VolumeCheckpoints)
+	if v == nil || v.HostPath == nil || v.HostPath.Path != "/var/local/wren-checkpoints" {
+		t.Fatalf("local checkpoint volume = %+v", v)
+	}
+	if v.HostPath.Type == nil || *v.HostPath.Type != corev1.HostPathDirectory {
+		t.Fatalf("hostPath type = %v, want Directory (operator must pre-create it)", v.HostPath.Type)
+	}
+	ck := containerByName(pod.Spec.InitContainers, ContainerCheckpointer)
+	hy := containerByName(pod.Spec.InitContainers, InitHydrate)
+	if vm := volumeMount(*ck, VolumeCheckpoints); vm == nil || vm.ReadOnly {
+		t.Fatalf("checkpointer local mount = %+v, want writable", vm)
+	}
+	if vm := volumeMount(*hy, VolumeCheckpoints); vm == nil || !vm.ReadOnly {
+		t.Fatalf("hydrate local mount = %+v, want read-only", vm)
+	}
+	h := containerByName(pod.Spec.Containers, ContainerHarness)
+	if vm := volumeMount(*h, VolumeCheckpoints); vm != nil {
+		t.Fatalf("SECURITY: harness received local checkpoint mount: %+v", vm)
+	}
+	if pod.Spec.ServiceAccountName != "" || pod.Annotations[gcsFuseVolumeAnnotation] != "" {
+		t.Fatalf("local mount must not acquire GCS identity/annotations: sa=%q annotations=%v", pod.Spec.ServiceAccountName, pod.Annotations)
+	}
+}
+
+func TestCheckpointMountEnabled(t *testing.T) {
+	run := testRun()
+	cases := []struct {
+		name string
+		cfg  PodConfig
+		want bool
+	}{
+		{"off", PodConfig{}, false},
+		{"gcs", PodConfig{CheckpointGCSMount: true}, true},
+		{"local", PodConfig{CheckpointLocalPath: "/checkpoints"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.checkpointMountEnabled(run); got != tc.want {
+				t.Fatalf("checkpointMountEnabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	run.Spec.Workspace.Checkpoint.Bucket = ""
+	if (PodConfig{CheckpointLocalPath: "/checkpoints"}).checkpointMountEnabled(run) {
+		t.Fatal("mount must remain disabled without a checkpoint bucket")
 	}
 }
 

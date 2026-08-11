@@ -59,6 +59,14 @@ entirely (a keyless/mock-only eval install).
   `CODEX_API_KEY` / `OPENAI_API_KEY` placeholders. The proxy injects the real
   key from the `wren-openai-key` Secret (operator flag
   `--openai-key-secret`). No placeholders are synthesized in direct mode.
+- **Crash resume:** each run gets a private `CODEX_HOME` on the durable
+  workspace (`/workspace/.git/wren/codex` for a repository run, so execution
+  state can never be staged into its PR). A replacement pod invokes
+  `codex exec resume --last`; `--last` is safe because that directory contains
+  only this run's sessions. The session directory is included in workspace
+  checkpoints, so checkpoint restore preserves the same capability. Runs
+  created before this state existed degrade explicitly to workspace-only
+  recovery instead of entering a deterministic retry loop.
 - **Events:** parses the `codex exec --json` JSONL stream — `item.completed`
   (`agent_message` → message; `command_execution` / `mcp_tool_call` /
   `file_change` / `web_search` → tool_call), `turn.completed.usage` →
@@ -96,9 +104,10 @@ repeatable builds; override it with `--build-arg CODEX_VERSION=<version>`.
   Codex's Responses HTTP/SSE proxy configuration has been proven by a live Wren
   canary; both adapters' command construction, event parsing, and credential
   wiring remain hermetically unit-tested.
-- **No session/resume:** `RunSpec.mode=resume` restarts the agent fresh in the
-  surviving workspace (same as claude-code today; transcript-restore is
-  post-launch with the checkpointer, spec §5.5).
+- **Resume parity is harness-specific:** Codex has durable session resume as
+  described above. Claude Code and OpenCode currently restart a fresh agent in
+  the surviving/restored workspace; native transcript resume for them remains
+  roadmap work.
 - **MCP config is not wired** into either CLI.
 - An unknown harness kind falls back to `mock` with a note in the event stream
   (M0 behavior).

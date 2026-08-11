@@ -128,16 +128,25 @@ type PodConfig struct {
 	// iptables). Empty is treated as iptables.
 	EgressEnforcement EgressEnforcement
 	// CheckpointGCSMount enables mounting the run's checkpoint bucket into the
-	// checkpointer container via the GCS FUSE CSI driver (WS-18). Off by default:
-	// experimental, requires the CSI addon + a Workload Identity binding, and the
-	// real checkpointer feature does not exist yet. The mount is added only when
-	// this is true AND the run sets a checkpoint bucket.
+	// trusted checkpointer/hydrate containers via the GCS FUSE CSI driver
+	// (WS-18–WS-21). Off by default; requires the CSI addon + a Workload Identity
+	// binding. The mount is added only when this is true AND the run sets a
+	// checkpoint bucket.
 	CheckpointGCSMount bool
+	// CheckpointLocalPath mounts an operator-administered node directory into
+	// the trusted checkpointer/hydrate containers. It exists for kind and other
+	// single-node development E2E only; unlike GCS it is not node-durable and
+	// must never be used as a production recovery guarantee.
+	CheckpointLocalPath string
 	// CheckpointKSA is the Kubernetes ServiceAccount bound (via Workload
 	// Identity) to a GCP SA with objectAdmin on the checkpoint bucket. Applied to
 	// the pod ONLY when the GCS mount is added; empty falls back to
 	// DefaultCheckpointKSA.
 	CheckpointKSA string
+}
+
+func (c PodConfig) checkpointMountEnabled(run *wrenv1.AgentRun) bool {
+	return run.Spec.Workspace.Checkpoint.Bucket != "" && (c.CheckpointGCSMount || c.CheckpointLocalPath != "")
 }
 
 // checkpointKSA is the ServiceAccount for GCS-mount pods, defaulting when unset.
@@ -193,7 +202,21 @@ func runSpecConfigMapName(run *wrenv1.AgentRun) string { return run.Name + "-run
 // podName is the pod name for the current restart generation. It embeds the
 // restart count so a recreated pod never collides with a terminating one.
 func podName(run *wrenv1.AgentRun) string {
-	return fmt.Sprintf("%s-%d", run.Name, run.Status.RestartCount)
+	return fmt.Sprintf("%s-%d", run.Name, attemptGeneration(run))
+}
+
+// attemptGeneration tolerates CRs created before status.attemptGeneration was
+// introduced: their restart count was also their pod generation. New writes
+// always advance AttemptGeneration explicitly and never reset it.
+func attemptGeneration(run *wrenv1.AgentRun) int32 {
+	if run.Status.AttemptGeneration > run.Status.RestartCount {
+		return run.Status.AttemptGeneration
+	}
+	return run.Status.RestartCount
+}
+
+func advanceAttempt(run *wrenv1.AgentRun) {
+	run.Status.AttemptGeneration = attemptGeneration(run) + 1
 }
 
 func runLabels(run *wrenv1.AgentRun) map[string]string {
@@ -321,7 +344,7 @@ func runtimeClassName(rc wrenv1.RuntimeClass) *string {
 // container plus native-sidecar egress-proxy, checkpointer, and gateway, with a
 // hydrate init container that clones the repo or restores a checkpoint.
 func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
-	resume := run.Status.RestartCount > 0
+	resume := attemptGeneration(run) > 0
 	images := cfg.Images
 	proxyBase := cfg.proxyBaseURL()
 	// The runner routes GitHub/model traffic through the egress-proxy; it holds
@@ -414,7 +437,23 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 		{Name: "WREN_MODE", Value: string(mode(resume))},
 		runSpecEnv,
 		{Name: "HOME", Value: MountHome},
+		// Hydrate and the untrusted harness intentionally use different UIDs.
+		// Git otherwise rejects the cloned repository as "dubious ownership",
+		// breaking ordinary agent inspection. Trust exactly the pod's workspace
+		// (not "*") through Git's environment-backed config, which is ephemeral
+		// and cannot be committed into the target repository.
+		{Name: "GIT_CONFIG_COUNT", Value: "1"},
+		{Name: "GIT_CONFIG_KEY_0", Value: "safe.directory"},
+		{Name: "GIT_CONFIG_VALUE_0", Value: runspec.WorkspacePath},
 	}, proxyEnv...)
+	if run.Spec.Harness.Kind == wrenv1.HarnessCodex {
+		// Codex stores resumable sessions under CODEX_HOME. Keep them inside
+		// .git on the durable workspace PVC: checkpoints include .git, while
+		// finalization can never stage this private execution state into the PR.
+		harnessEnv = append(harnessEnv, corev1.EnvVar{
+			Name: "CODEX_HOME", Value: runspec.CodexHomePath(runspec.WorkspacePath, run.Spec.Repo),
+		})
+	}
 	// When enforcement is on, tell the harness to run its egress canary (a direct
 	// dial/HTTPS attempt that MUST fail). Off mode omits the flag so the canary
 	// is skipped — there is no lockdown to prove.
@@ -464,6 +503,7 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 	var saName string
 	var hostAliases []corev1.HostAlias
 	gcsMount := cfg.CheckpointGCSMount && run.Spec.Workspace.Checkpoint.Bucket != ""
+	localCheckpointMount := !gcsMount && cfg.CheckpointLocalPath != "" && run.Spec.Workspace.Checkpoint.Bucket != ""
 	// GCS checkpoint mount (WS-18): a CSI volume backed by the run's checkpoint
 	// bucket, mounted into the checkpointer container ONLY. The checkpointer is a
 	// trusted native sidecar; the harness runs untrusted model-generated code and
@@ -512,6 +552,23 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 			{IP: gcsRestrictedAPIsVIP, Hostnames: []string{gcsStorageHost}},
 			{IP: gcpMetadataIP, Hostnames: []string{gcpMetadataHost}},
 		}
+	}
+	if localCheckpointMount {
+		hostPathType := corev1.HostPathDirectory
+		volumes = append(volumes, corev1.Volume{
+			Name: VolumeCheckpoints,
+			VolumeSource: corev1.VolumeSource{HostPath: &corev1.HostPathVolumeSource{
+				Path: cfg.CheckpointLocalPath, Type: &hostPathType,
+			}},
+		})
+		checkpointer.VolumeMounts = append(checkpointer.VolumeMounts,
+			corev1.VolumeMount{Name: VolumeCheckpoints, MountPath: MountCheckpoints})
+		checkpointer.Env = append(checkpointer.Env,
+			corev1.EnvVar{Name: "WREN_CHECKPOINT_MOUNT_PATH", Value: MountCheckpoints})
+		hydrate.VolumeMounts = append(hydrate.VolumeMounts,
+			corev1.VolumeMount{Name: VolumeCheckpoints, MountPath: MountCheckpoints, ReadOnly: true})
+		hydrate.Env = append(hydrate.Env,
+			corev1.EnvVar{Name: "WREN_CHECKPOINT_MOUNT_PATH", Value: MountCheckpoints})
 	}
 
 	return &corev1.Pod{

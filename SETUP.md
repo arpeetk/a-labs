@@ -179,15 +179,15 @@ install` already wrote — no extra credential needed). Codex/opencode are
 construction, event parsing, credential wiring) versus what still needs a
 live-key smoke run.
 
-## Experimental: GCS checkpoint mount (WS-18, WS-19)
+## Checkpoint and restore (GCS; WS-18–WS-21)
 
 Off by default and independent of the core task→PR loop. This mounts a run's
 checkpoint bucket into the **checkpointer container only** (never the untrusted
 harness) via GKE's Cloud Storage FUSE CSI driver, and exposes it to Go as a
-`blob.Store` of plain files. It proves the mount + store plumbing; the real
-periodic checkpointer (interval snapshots + restore-on-resume) is still
-deferred (spec §5.5), so today the only thing that uses the mount is a startup
-self-check that writes/reads/lists one object and logs the result.
+`blob.Store` of plain files. The sidecar performs a startup mount self-check,
+then writes full-workspace tar.gz snapshots at `intervalSeconds` (120 seconds
+by default). If the live PVC is later confirmed lost, the controller provisions
+a new PVC and hydrate restores the newest snapshot before starting the harness.
 
 Prerequisites on the cluster and project (all one-time):
 
@@ -238,11 +238,23 @@ wren run create --project demo --task "..."
 
 The checkpointer container's logs will show
 `checkpointer: mount self-check PASSED — wrote+read+listed
-_wren-mount-check/<run-id>.txt ...`, and the object is visible in the bucket:
+_wren-mount-check/<run-id>.txt ...` followed by periodic
+`checkpoint snapshot PASSED` events. Objects are visible in the bucket:
 
 ```sh
 gcloud storage cat gs://$BUCKET/_wren-mount-check/<run-id>.txt
 ```
+
+For a single-node kind/dev recovery test, the operator also accepts
+`--checkpoint-local-path=/absolute/existing/node/path`. This uses a Kubernetes
+`hostPath` only in the trusted checkpointer (write) and hydrate (read) containers.
+It is deliberately not a production backend: the data disappears with that
+node and does not protect a multi-node cluster from node loss.
+
+Current checkpoint limitations are explicit: snapshots are full archives and
+interval-triggered only. Incremental/git-aware bundles, retention/garbage
+collection, `checkpoint_hint` snapshots, and a final SIGTERM flush are not yet
+implemented, so worst-case workspace loss is approximately one interval.
 
 **Trust boundary:** the CSI volume and the bucket-scoped credential live on the
 checkpointer sidecar only. The harness — which runs untrusted model-generated
