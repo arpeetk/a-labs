@@ -8,6 +8,12 @@ newline-delimited JSON stream (`status` / `message` / `tool_call` /
 failure exits 1 (no retry — retrying would just re-spend tokens); the adapter
 itself never retries.
 
+Harnesses may leave ordinary working-tree changes or create their own commits.
+Finalize handles both forms: it creates or reuses the Wren run branch and opens
+a PR when the resulting history is ahead of the requested hydrate-time base.
+Rewritten or unrelated history is rejected instead of pushed; a clean HEAD
+exactly at the requested base remains a genuine no-change run.
+
 Credentials are never in the harness image or the runner env: the in-pod
 egress-proxy injects them on credentialed reverse routes (spec §5.6). Each
 adapter passes only a **placeholder** API key so its CLI starts in API-key

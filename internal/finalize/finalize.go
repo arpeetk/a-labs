@@ -11,6 +11,8 @@ import (
 
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/storer"
 
 	"github.com/summiteight/wren/internal/github"
 	"github.com/summiteight/wren/internal/gitwork"
@@ -42,14 +44,27 @@ func Run(ctx context.Context, spec runspec.RunSpec, token string, client github.
 	}
 	title := "Wren: " + truncate(spec.Prompt, 72)
 
-	// Resume note: if the run branch already exists on the durable workspace,
-	// a previous pod committed before crashing mid-push. CommitAll then reports
-	// ErrNoChanges (its HEAD already captures the worktree) — that is NOT an
-	// empty run, so fall through to the idempotent push/PR instead of bailing.
-	resume := branchExists(repo, branch)
+	// Validate the history before staging anything. In particular, an existing
+	// run branch with unrelated ancestry must not become publishable merely
+	// because CommitAll adds a new commit on top of it.
+	if err := validateStartingPoint(repo, branch, base); err != nil {
+		return nil, fmt.Errorf("finalize: verify starting point: %w", err)
+	}
 	if _, err := gitwork.CommitAll(repo, branch, title, prAuthor); err != nil {
-		if !errors.Is(err, gitwork.ErrNoChanges) || !resume {
-			return nil, err // a genuine no-change run reports ErrNoChanges
+		if !errors.Is(err, gitwork.ErrNoChanges) {
+			return nil, err
+		}
+		// A clean worktree can mean either that the harness did nothing or that
+		// it committed its own changes. Compare the resulting run branch with
+		// origin/base, which hydrate recorded before the untrusted harness ran.
+		// Requiring that base to be an ancestor also prevents publishing a
+		// replacement or otherwise unrelated history.
+		ahead, err := branchAheadOfBase(repo, branch, base)
+		if err != nil {
+			return nil, fmt.Errorf("finalize: verify run branch: %w", err)
+		}
+		if !ahead {
+			return nil, gitwork.ErrNoChanges
 		}
 	}
 	if err := gitwork.Push(repo, branch, token); err != nil {
@@ -69,11 +84,57 @@ func Run(ctx context.Context, spec runspec.RunSpec, token string, client github.
 	return pr, nil
 }
 
-// branchExists reports whether the run branch already exists in the workspace
-// clone (i.e. this finalize is a resume re-run).
-func branchExists(repo *git.Repository, branch string) bool {
-	_, err := repo.Reference(plumbing.NewBranchReferenceName(branch), true)
-	return err == nil
+// branchAheadOfBase reports whether branch contains commits on top of the
+// requested base. The remote-tracking ref is the immutable-in-run anchor:
+// the harness may commit on or move the local base branch itself.
+func branchAheadOfBase(repo *git.Repository, branch, base string) (bool, error) {
+	branchRef, err := repo.Reference(plumbing.NewBranchReferenceName(branch), true)
+	if err != nil {
+		return false, fmt.Errorf("resolve run branch %s: %w", branch, err)
+	}
+	return commitAheadOfBase(repo, branchRef.Hash(), base)
+}
+
+func validateStartingPoint(repo *git.Repository, branch, base string) error {
+	ref, err := repo.Reference(plumbing.NewBranchReferenceName(branch), true)
+	if err != nil {
+		ref, err = repo.Head()
+		if err != nil {
+			return fmt.Errorf("resolve HEAD: %w", err)
+		}
+	}
+	_, err = commitAheadOfBase(repo, ref.Hash(), base)
+	return err
+}
+
+func commitAheadOfBase(repo *git.Repository, head plumbing.Hash, base string) (bool, error) {
+	baseRef, err := repo.Reference(plumbing.NewRemoteReferenceName("origin", base), true)
+	if err != nil {
+		return false, fmt.Errorf("resolve requested base origin/%s: %w", base, err)
+	}
+	if head == baseRef.Hash() {
+		return false, nil
+	}
+
+	commits, err := repo.Log(&git.LogOptions{From: head})
+	if err != nil {
+		return false, fmt.Errorf("walk candidate history: %w", err)
+	}
+	foundBase := false
+	err = commits.ForEach(func(commit *object.Commit) error {
+		if commit.Hash == baseRef.Hash() {
+			foundBase = true
+			return storer.ErrStop
+		}
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("walk candidate history: %w", err)
+	}
+	if !foundBase {
+		return false, fmt.Errorf("candidate history is not descended from requested base origin/%s", base)
+	}
+	return true, nil
 }
 
 // BranchName is the run's PR branch: "<prefix>/<run-id>".
