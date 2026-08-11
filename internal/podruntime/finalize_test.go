@@ -20,6 +20,7 @@ import (
 	gh "github.com/google/go-github/v66/github"
 
 	"github.com/summiteight/wren/internal/github"
+	"github.com/summiteight/wren/internal/gitwork"
 	"github.com/summiteight/wren/internal/runspec"
 )
 
@@ -60,6 +61,7 @@ func bareOrigin(t *testing.T) string {
 	}
 	head, _ := repo.Head()
 	_ = repo.Storer.SetReference(plumbing.NewHashReference(plumbing.NewBranchReferenceName("main"), head.Hash()))
+	_ = repo.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName("main")))
 
 	bare := t.TempDir()
 	if _, err := git.PlainClone(bare, true, &git.CloneOptions{URL: seed}); err != nil {
@@ -80,7 +82,7 @@ func TestRunHarnessFinalizesRealBranch(t *testing.T) {
 	// clone directly (hydrate builds an https URL from owner/repo). Instead we
 	// exercise clone→harness→commit→push via the same helpers hydrate/finalize
 	// use, with a file remote.
-	if _, err := git.PlainClone(ws, false, &git.CloneOptions{URL: "file://" + origin}); err != nil {
+	if _, err := gitwork.Clone("file://"+origin, "main", ws, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -119,7 +121,7 @@ func TestRunHarnessFinalizesRealBranch(t *testing.T) {
 func TestRunHarnessOpensPR(t *testing.T) {
 	origin := bareOrigin(t)
 	ws := t.TempDir()
-	if _, err := git.PlainClone(ws, false, &git.CloneOptions{URL: "file://" + origin}); err != nil {
+	if _, err := gitwork.Clone("file://"+origin, "main", ws, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -178,7 +180,7 @@ func TestRunHarnessFinalizeRetryClassification(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			origin := bareOrigin(t)
 			ws := t.TempDir()
-			if _, err := git.PlainClone(ws, false, &git.CloneOptions{URL: "file://" + origin}); err != nil {
+			if _, err := gitwork.Clone("file://"+origin, "main", ws, ""); err != nil {
 				t.Fatal(err)
 			}
 			fake := &github.Fake{Err: tc.openPRErr}
