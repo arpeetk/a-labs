@@ -4,13 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/summiteight/wren/internal/runspec"
 )
+
+type failingReader struct{ err error }
+
+func (r failingReader) Read([]byte) (int, error) { return 0, r.err }
 
 func decodeEvents(t *testing.T, r *bytes.Buffer) []Event {
 	t.Helper()
@@ -57,6 +64,22 @@ func TestEmitterStampsTimeAndSerializes(t *testing.T) {
 	}
 }
 
+func TestStreamCLIReturnsReadError(t *testing.T) {
+	want := errors.New("stream broke")
+	_, _, _, err := streamCLI(failingReader{err: want}, NewEmitter(io.Discard), func([]byte) []cliEvent { return nil })
+	if !errors.Is(err, want) {
+		t.Fatalf("streamCLI error = %v, want %v", err, want)
+	}
+}
+
+func TestStreamCLIReturnsOversizedLineError(t *testing.T) {
+	line := bytes.Repeat([]byte("x"), 8*1024*1024+1)
+	_, _, _, err := streamCLI(bytes.NewReader(line), NewEmitter(io.Discard), func([]byte) []cliEvent { return nil })
+	if err == nil {
+		t.Fatal("streamCLI accepted a line beyond its configured limit")
+	}
+}
+
 func TestMockHarnessWritesWorkspaceAndReportsPR(t *testing.T) {
 	ws := t.TempDir()
 	spec := runspec.RunSpec{
@@ -89,6 +112,22 @@ func TestMockHarnessWritesWorkspaceAndReportsPR(t *testing.T) {
 	}
 	if len(eventsOfType(evs, EventToolCall)) != 1 {
 		t.Error("expected a tool_call event")
+	}
+}
+
+func TestMockHarnessOptionalDelay(t *testing.T) {
+	t.Setenv("WREN_MOCK_DELAY", "2ms")
+	start := time.Now()
+	_, err := (Mock{}).Run(context.Background(), runspec.RunSpec{RunID: "r", Project: "p", Prompt: "wait", WorkspacePath: t.TempDir()}, NewEmitter(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) < time.Millisecond {
+		t.Fatal("mock delay was not applied")
+	}
+	t.Setenv("WREN_MOCK_DELAY", "invalid")
+	if _, err := (Mock{}).Run(context.Background(), runspec.RunSpec{RunID: "r", WorkspacePath: t.TempDir()}, NewEmitter(io.Discard)); err == nil {
+		t.Fatal("invalid mock delay accepted")
 	}
 }
 

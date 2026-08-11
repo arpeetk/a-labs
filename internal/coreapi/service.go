@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 
 	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
 	"github.com/summiteight/wren/internal/launcher"
@@ -104,6 +106,23 @@ func (s *Service) CreateProject(ctx context.Context, p *store.Project) (*store.P
 	if strings.TrimSpace(p.Name) == "" {
 		return nil, fmt.Errorf("%w: project name is required", ErrValidation)
 	}
+	if problems := utilvalidation.IsDNS1123Label(p.Name); len(problems) > 0 {
+		return nil, fmt.Errorf("%w: invalid project name %q: %s", ErrValidation, p.Name, strings.Join(problems, "; "))
+	}
+	if p.Namespace != "" {
+		if problems := utilvalidation.IsDNS1123Label(p.Namespace); len(problems) > 0 {
+			return nil, fmt.Errorf("%w: invalid namespace %q: %s", ErrValidation, p.Namespace, strings.Join(problems, "; "))
+		}
+	}
+	if p.Repo != "" && !validRepo(p.Repo) {
+		return nil, fmt.Errorf("%w: repo must be GitHub owner/name, got %q", ErrValidation, p.Repo)
+	}
+	if p.DefaultHarness != "" && !validHarness(p.DefaultHarness) {
+		return nil, fmt.Errorf("%w: unsupported default harness %q", ErrValidation, p.DefaultHarness)
+	}
+	if p.RuntimeClass != "" && !validRuntime(p.RuntimeClass) {
+		return nil, fmt.Errorf("%w: unsupported runtime class %q", ErrValidation, p.RuntimeClass)
+	}
 	// repo is OPTIONAL: a repo-less project is the keyless design — its runs have
 	// an empty RunSpec.Repo, so hydrate's clone and finalize's PR are both skipped
 	// (see internal/podruntime). This is what `make e2e` exercises with no creds.
@@ -183,10 +202,6 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (*store.R
 	if err := s.launcher.EnsureNamespace(ctx, ns); err != nil {
 		return nil, fmt.Errorf("ensure namespace: %w", err)
 	}
-	if err := s.launcher.CreateRun(ctx, run); err != nil {
-		return nil, fmt.Errorf("create AgentRun: %w", err)
-	}
-
 	rec := &store.Run{
 		ID:          id,
 		Project:     req.Project,
@@ -203,6 +218,15 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (*store.R
 	}
 	if err := s.store.CreateRun(ctx, rec); err != nil {
 		return nil, err
+	}
+	// Persist before publishing the CR. The operator can execute a CR as soon as
+	// it appears, so the reverse order allowed a store failure to return 500 while
+	// an untracked, billable agent run continued in the cluster.
+	if err := s.launcher.CreateRun(ctx, run); err != nil {
+		if rollbackErr := s.store.DeleteRun(ctx, rec.ID); rollbackErr != nil {
+			return nil, fmt.Errorf("create AgentRun: %w (also roll back run record: %v)", err, rollbackErr)
+		}
+		return nil, fmt.Errorf("create AgentRun: %w", err)
 	}
 	return rec, nil
 }
@@ -229,6 +253,14 @@ func (s *Service) GetRun(ctx context.Context, id string) (*store.Run, error) {
 	}
 	if url := cr.Status.PR.URL; url != "" && url != rec.PRURL {
 		rec.PRURL, changed = url, true
+	}
+	checkpoint := checkpointFromStatus(cr.Status.LastCheckpoint)
+	if checkpoint != nil && !reflect.DeepEqual(checkpoint, rec.LastCheckpoint) {
+		rec.LastCheckpoint, changed = checkpoint, true
+	}
+	conditions := conditionsFromStatus(cr.Status.Conditions)
+	if len(conditions) > 0 && !reflect.DeepEqual(conditions, rec.Conditions) {
+		rec.Conditions, changed = conditions, true
 	}
 	if changed {
 		_ = s.store.UpdateRun(ctx, rec)
@@ -263,7 +295,44 @@ func (s *Service) StopRun(ctx context.Context, id string) error {
 	return s.launcher.RequestCancel(ctx, rec.Namespace, id)
 }
 
-// ResumeRun manually restarts a terminally-Failed run: it asks the operator
+// PauseRun requests a durable pause. The live CR is authoritative: accepting a
+// pause from a stale store phase could checkpoint an already-completed pod.
+// Checkpoint storage is mandatory because Paused promises recoverable state.
+func (s *Service) PauseRun(ctx context.Context, id string) error {
+	rec, err := s.store.GetRun(ctx, id)
+	if err != nil {
+		return err
+	}
+	cr, err := s.launcher.GetRun(ctx, rec.Namespace, id)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return fmt.Errorf("%w: run %q has no AgentRun to pause", ErrNotFound, id)
+		}
+		return fmt.Errorf("get AgentRun: %w", err)
+	}
+	if cr.Status.Phase == wrenv1.PhasePausing || cr.Status.Phase == wrenv1.PhasePaused {
+		return nil
+	}
+	if cr.Status.Phase != wrenv1.PhaseRunning {
+		return fmt.Errorf("%w: run %q is %s, not Running; nothing to pause", ErrValidation, id, cr.Status.Phase)
+	}
+	if strings.TrimSpace(cr.Spec.Workspace.Checkpoint.Bucket) == "" {
+		return fmt.Errorf("%w: run %q has no checkpoint storage configured", ErrValidation, id)
+	}
+	storageReady := false
+	for _, c := range cr.Status.Conditions {
+		if c.Type == "CheckpointStorage" && c.Status == metav1.ConditionTrue {
+			storageReady = true
+			break
+		}
+	}
+	if !storageReady {
+		return fmt.Errorf("%w: run %q has no mounted checkpoint storage; durable pause is unavailable", ErrValidation, id)
+	}
+	return s.launcher.RequestPause(ctx, rec.Namespace, id)
+}
+
+// ResumeRun restarts a Paused or terminally-Failed run: it asks the operator
 // (via the resume annotation) to reset the retry budget, clear any leftover
 // pod, and give the reconciler a fresh attempt at the run — a deliberate
 // human/automated decision distinct from the operator's own crash-resume.
@@ -285,8 +354,8 @@ func (s *Service) ResumeRun(ctx context.Context, id string) error {
 		}
 		return fmt.Errorf("get AgentRun: %w", err)
 	}
-	if cr.Status.Phase != wrenv1.PhaseFailed {
-		return fmt.Errorf("%w: run %q is %s, not Failed; nothing to resume", ErrValidation, id, cr.Status.Phase)
+	if cr.Status.Phase != wrenv1.PhaseFailed && cr.Status.Phase != wrenv1.PhasePaused {
+		return fmt.Errorf("%w: run %q is %s, not Failed or Paused; nothing to resume", ErrValidation, id, cr.Status.Phase)
 	}
 	return s.launcher.RequestResume(ctx, rec.Namespace, id)
 }
@@ -351,20 +420,22 @@ func (s *Service) ReconcileFromCluster(ctx context.Context) (int, error) {
 // time. prior may be nil (run unknown to the store).
 func runFromCR(cr *wrenv1.AgentRun, prior *store.Run) *store.Run {
 	rec := &store.Run{
-		ID:           cr.Name,
-		Project:      cr.Spec.Project,
-		User:         cr.Spec.User,
-		Prompt:       cr.Spec.Task.Prompt,
-		Harness:      string(cr.Spec.Harness.Kind),
-		Model:        cr.Spec.Harness.Model,
-		BaseRef:      cr.Spec.Task.BaseRef,
-		Interactive:  cr.Spec.Interactive,
-		Runtime:      string(cr.Spec.Sandbox.RuntimeClass),
-		Namespace:    cr.Namespace,
-		Phase:        string(cr.Status.Phase),
-		PRURL:        cr.Status.PR.URL,
-		RestartCount: cr.Status.RestartCount,
-		CreatedAt:    cr.CreationTimestamp.Time,
+		ID:             cr.Name,
+		Project:        cr.Spec.Project,
+		User:           cr.Spec.User,
+		Prompt:         cr.Spec.Task.Prompt,
+		Harness:        string(cr.Spec.Harness.Kind),
+		Model:          cr.Spec.Harness.Model,
+		BaseRef:        cr.Spec.Task.BaseRef,
+		Interactive:    cr.Spec.Interactive,
+		Runtime:        string(cr.Spec.Sandbox.RuntimeClass),
+		Namespace:      cr.Namespace,
+		Phase:          string(cr.Status.Phase),
+		PRURL:          cr.Status.PR.URL,
+		RestartCount:   cr.Status.RestartCount,
+		LastCheckpoint: checkpointFromStatus(cr.Status.LastCheckpoint),
+		Conditions:     conditionsFromStatus(cr.Status.Conditions),
+		CreatedAt:      cr.CreationTimestamp.Time,
 	}
 	if prior != nil {
 		if rec.Phase == "" {
@@ -372,6 +443,12 @@ func runFromCR(cr *wrenv1.AgentRun, prior *store.Run) *store.Run {
 		}
 		if rec.PRURL == "" {
 			rec.PRURL = prior.PRURL
+		}
+		if rec.LastCheckpoint == nil {
+			rec.LastCheckpoint = prior.LastCheckpoint
+		}
+		if len(rec.Conditions) == 0 {
+			rec.Conditions = append([]store.RunCondition(nil), prior.Conditions...)
 		}
 		if !prior.CreatedAt.IsZero() {
 			rec.CreatedAt = prior.CreatedAt // keep the true submission time
@@ -381,6 +458,21 @@ func runFromCR(cr *wrenv1.AgentRun, prior *store.Run) *store.Run {
 		rec.CreatedAt = time.Now()
 	}
 	return rec
+}
+
+func checkpointFromStatus(in *wrenv1.CheckpointRef) *store.RunCheckpoint {
+	if in == nil {
+		return nil
+	}
+	return &store.RunCheckpoint{ID: in.ID, URI: in.URI, At: in.At.Time, SHA256: in.SHA256, SizeBytes: in.SizeBytes, FormatVersion: in.FormatVersion, Trigger: in.Trigger}
+}
+
+func conditionsFromStatus(in []metav1.Condition) []store.RunCondition {
+	out := make([]store.RunCondition, 0, len(in))
+	for _, c := range in {
+		out = append(out, store.RunCondition{Type: c.Type, Status: string(c.Status), Reason: c.Reason, Message: c.Message, LastTransitionTime: c.LastTransitionTime.Time})
+	}
+	return out
 }
 
 // --- internals ---
@@ -484,17 +576,35 @@ func (s *Service) credentialHint(ns string) string {
 
 // buildAgentRun maps the effective config onto an AgentRun custom resource.
 func buildAgentRun(id, ns string, req CreateRunRequest, eff effectiveConfig) (*wrenv1.AgentRun, error) {
+	if !validHarness(eff.harness) {
+		return nil, fmt.Errorf("%w: unsupported harness %q", ErrValidation, eff.harness)
+	}
+	if !validRuntime(eff.runtime) {
+		return nil, fmt.Errorf("%w: unsupported runtime class %q", ErrValidation, eff.runtime)
+	}
+	if eff.harness != "mock" && strings.TrimSpace(eff.image) == "" {
+		return nil, fmt.Errorf("%w: harness image is required for %q", ErrValidation, eff.harness)
+	}
 	cpu, err := resource.ParseQuantity(eff.cpu)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid cpu %q", ErrValidation, eff.cpu)
+	}
+	if cpu.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: cpu must be positive, got %q", ErrValidation, eff.cpu)
 	}
 	mem, err := resource.ParseQuantity(eff.memory)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid memory %q", ErrValidation, eff.memory)
 	}
+	if mem.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: memory must be positive, got %q", ErrValidation, eff.memory)
+	}
 	disk, err := resource.ParseQuantity(eff.disk)
 	if err != nil {
 		return nil, fmt.Errorf("%w: invalid disk %q", ErrValidation, eff.disk)
+	}
+	if disk.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: disk must be positive, got %q", ErrValidation, eff.disk)
 	}
 	return &wrenv1.AgentRun{
 		ObjectMeta: metav1.ObjectMeta{
@@ -527,6 +637,31 @@ func buildAgentRun(id, ns string, req CreateRunRequest, eff effectiveConfig) (*w
 			Egress: wrenv1.EgressSpec{Allowlist: eff.allowlist},
 		},
 	}, nil
+}
+
+var repoPart = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+
+func validRepo(repo string) bool {
+	parts := strings.Split(repo, "/")
+	return len(parts) == 2 && repoPart.MatchString(parts[0]) && repoPart.MatchString(parts[1])
+}
+
+func validHarness(h string) bool {
+	switch h {
+	case "mock", "claude-code", "codex", "opencode", "byo":
+		return true
+	default:
+		return false
+	}
+}
+
+func validRuntime(runtime string) bool {
+	switch runtime {
+	case "runc", "gvisor", "kata":
+		return true
+	default:
+		return false
+	}
 }
 
 func firstNonEmpty(vals ...string) string {

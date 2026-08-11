@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +38,17 @@ func TestCreateProjectValidation(t *testing.T) {
 	if _, err := svc.CreateProject(ctx, &store.Project{Repo: "x/y"}); !errors.Is(err, ErrValidation) {
 		t.Errorf("missing name = %v", err)
 	}
+	for _, p := range []*store.Project{
+		{Name: "bad/name", DefaultHarness: "mock"},
+		{Name: "UPPER", DefaultHarness: "mock"},
+		{Name: "valid", Repo: "not-owner-and-name", DefaultHarness: "mock"},
+		{Name: "valid", Namespace: "Bad Namespace", DefaultHarness: "mock"},
+		{Name: "valid", DefaultHarness: "unknown"},
+	} {
+		if _, err := svc.CreateProject(ctx, p); !errors.Is(err, ErrValidation) {
+			t.Errorf("invalid project %+v = %v, want ErrValidation", p, err)
+		}
+	}
 	// repo is OPTIONAL: a keyless (repo-less) project creates successfully.
 	keyless, err := svc.CreateProject(ctx, &store.Project{Name: "keyless", DefaultHarness: "mock"})
 	if err != nil {
@@ -57,6 +69,45 @@ func TestCreateProjectValidation(t *testing.T) {
 		t.Error("CreatedAt not set")
 	}
 }
+
+func TestCreateRunPublishesOnlyAfterPersistence(t *testing.T) {
+	ctx := context.Background()
+	fl := launcher.NewFake()
+	base := store.NewMemory()
+	failing := createRunFailStore{Store: base, err: errors.New("database unavailable")}
+	svc := New(failing, fl, DefaultDefaults())
+	svc.idgen = func() string { return "r-store-fail" }
+	if err := base.CreateProject(ctx, &store.Project{Name: "demo", DefaultHarness: "mock"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"}); err == nil {
+		t.Fatal("CreateRun succeeded with failing store")
+	}
+	if len(fl.Runs) != 0 {
+		t.Fatalf("store failure published AgentRun(s): %+v", fl.Runs)
+	}
+}
+
+func TestCreateRunRollsBackStoreWhenClusterPublishFails(t *testing.T) {
+	svc, st, fl := newService(t)
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	fl.CreateRunErr = errors.New("cluster unavailable")
+
+	if _, err := svc.CreateRun(context.Background(), CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"}); err == nil {
+		t.Fatal("CreateRun succeeded with failing launcher")
+	}
+	if _, err := st.GetRun(context.Background(), "r-fixed"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("store row survived failed publication: %v", err)
+	}
+}
+
+type createRunFailStore struct {
+	store.Store
+	err error
+}
+
+func (s createRunFailStore) CreateRun(context.Context, *store.Run) error { return s.err }
 
 // TestCreateRunMissingCredentialSecret is WS-15 Part A: a run resolved to a
 // namespace that lacks the harness's credential Secret is rejected up front with
@@ -183,6 +234,51 @@ func TestStopRun(t *testing.T) {
 	}
 	if err := svc.StopRun(ctx, "ghost"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("stop missing = %v, want ErrNotFound", err)
+	}
+}
+
+func TestPauseRunValidatesLivePhaseAndIsIdempotent(t *testing.T) {
+	svc, _, fl := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.PauseRun(ctx, run.ID); !errors.Is(err, ErrValidation) {
+		t.Fatalf("pause Pending = %v, want validation", err)
+	}
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning, Conditions: []metav1.Condition{{Type: "CheckpointStorage", Status: metav1.ConditionTrue}}})
+	if err := svc.PauseRun(ctx, run.ID); err != nil {
+		t.Fatalf("pause Running: %v", err)
+	}
+	cr := fl.Runs[run.Namespace+"/"+run.ID]
+	if cr.Annotations[wrenv1.PauseAnnotation] != "true" {
+		t.Fatalf("pause annotation = %v", cr.Annotations)
+	}
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhasePausing})
+	if err := svc.PauseRun(ctx, run.ID); err != nil {
+		t.Fatalf("duplicate pause: %v", err)
+	}
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhasePaused})
+	if err := svc.ResumeRun(ctx, run.ID); err != nil {
+		t.Fatalf("resume Paused: %v", err)
+	}
+}
+
+func TestPauseRunRequiresCheckpointStorage(t *testing.T) {
+	svc, _, fl := newService(t)
+	ctx := context.Background()
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock", CheckpointBucket: "disabled"})
+	run, err := svc.CreateRun(ctx, CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cr := fl.Runs[run.Namespace+"/"+run.ID]
+	cr.Spec.Workspace.Checkpoint.Bucket = ""
+	fl.SetStatus(run.Namespace, run.ID, wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning})
+	if err := svc.PauseRun(ctx, run.ID); !errors.Is(err, ErrValidation) {
+		t.Fatalf("pause without storage = %v", err)
 	}
 }
 
@@ -359,6 +455,21 @@ func TestCreateRunInvalidResourceOverride(t *testing.T) {
 	})
 	if !errors.Is(err, ErrValidation) {
 		t.Fatalf("err = %v, want validation", err)
+	}
+}
+
+func TestCreateRunRejectsNonPositiveResourcesAndUnknownOverrides(t *testing.T) {
+	svc, _, _ := newService(t)
+	seedProject(t, svc, &store.Project{Name: "p", DefaultHarness: "mock"})
+	for _, req := range []CreateRunRequest{
+		{Project: "p", User: "u@x", Prompt: "hi", CPU: "0"},
+		{Project: "p", User: "u@x", Prompt: "hi", Memory: "-1Gi"},
+		{Project: "p", User: "u@x", Prompt: "hi", Harness: "mystery"},
+		{Project: "p", User: "u@x", Prompt: "hi", Runtime: "host"},
+	} {
+		if _, err := svc.CreateRun(context.Background(), req); !errors.Is(err, ErrValidation) {
+			t.Errorf("CreateRun(%+v) = %v, want ErrValidation", req, err)
+		}
 	}
 }
 

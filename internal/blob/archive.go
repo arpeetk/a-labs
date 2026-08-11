@@ -8,15 +8,15 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // Archive walks srcDir and writes a gzip-compressed tar stream of its full
 // tree (including dotfiles like ".git") to dst, preserving relative paths,
-// regular files, and directories. Symlinks are followed: a broken symlink
-// (its target does not resolve) is silently skipped rather than failing the
-// whole archive — the workspace is agent-written repo content, not a place
-// symlink edge cases need special handling.
+// regular files, directories, and safe relative symlinks. Symlinks are archived
+// as links and never followed: the workspace is controlled by the untrusted
+// harness, while the checkpointer can see mounts the harness cannot. Following
+// a workspace link here would let the harness make the trusted checkpointer
+// copy data from those mounts into its own checkpoint.
 func Archive(dst io.Writer, srcDir string) error {
 	gz := gzip.NewWriter(dst)
 	tw := tar.NewWriter(gz)
@@ -37,11 +37,19 @@ func Archive(dst io.Writer, srcDir string) error {
 			return err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			resolved, statErr := os.Stat(p) // follows the link
-			if statErr != nil {
-				return nil // broken symlink: skip
+			target, err := os.Readlink(p)
+			if err != nil {
+				return fmt.Errorf("blob: archive read symlink %q: %w", rel, err)
 			}
-			info = resolved
+			hdr, err := tar.FileInfoHeader(info, target)
+			if err != nil {
+				return fmt.Errorf("blob: archive symlink header for %q: %w", rel, err)
+			}
+			hdr.Name = filepath.ToSlash(rel)
+			if err := tw.WriteHeader(hdr); err != nil {
+				return fmt.Errorf("blob: archive write symlink header for %q: %w", rel, err)
+			}
+			return nil
 		}
 		hdr, err := tar.FileInfoHeader(info, "")
 		if err != nil {
@@ -61,9 +69,12 @@ func Archive(dst io.Writer, srcDir string) error {
 		if err != nil {
 			return fmt.Errorf("blob: archive open %q: %w", rel, err)
 		}
-		defer f.Close()
 		if _, err := io.Copy(tw, f); err != nil {
+			_ = f.Close()
 			return fmt.Errorf("blob: archive copy %q: %w", rel, err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("blob: archive close %q: %w", rel, err)
 		}
 		return nil
 	})
@@ -90,6 +101,11 @@ func Unarchive(src io.Reader, destDir string) error {
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
+	root, err := os.OpenRoot(destDir)
+	if err != nil {
+		return fmt.Errorf("blob: open archive destination: %w", err)
+	}
+	defer root.Close()
 
 	for {
 		hdr, err := tr.Next()
@@ -99,31 +115,55 @@ func Unarchive(src io.Reader, destDir string) error {
 		if err != nil {
 			return fmt.Errorf("blob: unarchive tar read: %w", err)
 		}
-		target, err := resolveArchivePath(destDir, hdr.Name)
+		target, err := resolveArchivePath(hdr.Name)
 		if err != nil {
 			return err
 		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
+			if err := root.MkdirAll(target, 0o755); err != nil {
 				return fmt.Errorf("blob: unarchive mkdir %q: %w", hdr.Name, err)
 			}
 		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return fmt.Errorf("blob: unarchive mkdir parent of %q: %w", hdr.Name, err)
 			}
-			if err := writeArchiveFile(target, hdr, tr); err != nil {
+			if err := writeArchiveFile(root, target, hdr, tr); err != nil {
 				return err
 			}
+		case tar.TypeSymlink:
+			if err := validateArchiveSymlink(target, hdr.Linkname); err != nil {
+				return fmt.Errorf("blob: unarchive symlink %q: %w", hdr.Name, err)
+			}
+			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+				return fmt.Errorf("blob: unarchive mkdir parent of symlink %q: %w", hdr.Name, err)
+			}
+			if err := root.Symlink(hdr.Linkname, target); err != nil {
+				return fmt.Errorf("blob: unarchive create symlink %q: %w", hdr.Name, err)
+			}
 		default:
-			// Anything else (symlinks, devices, ...) is not expected in a
+			// Anything else (hard links, devices, ...) is not expected in a
 			// workspace archive; skip rather than fail the whole restore.
 		}
 	}
 }
 
-func writeArchiveFile(target string, hdr *tar.Header, r io.Reader) error {
-	f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, hdr.FileInfo().Mode().Perm())
+// validateArchiveSymlink accepts only relative links whose cleaned destination
+// remains inside the extraction root. os.Root is the load-bearing boundary: it
+// also rejects a later archive entry that tries to traverse through a symlink.
+func validateArchiveSymlink(linkPath, linkTarget string) error {
+	if filepath.IsAbs(linkTarget) {
+		return fmt.Errorf("absolute target %q is not allowed", linkTarget)
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(linkPath), filepath.FromSlash(linkTarget)))
+	if !filepath.IsLocal(resolved) {
+		return fmt.Errorf("target %q escapes destination", linkTarget)
+	}
+	return nil
+}
+
+func writeArchiveFile(root *os.Root, target string, hdr *tar.Header, r io.Reader) error {
+	f, err := root.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, hdr.FileInfo().Mode().Perm())
 	if err != nil {
 		return fmt.Errorf("blob: unarchive create %q: %w", hdr.Name, err)
 	}
@@ -134,11 +174,12 @@ func writeArchiveFile(target string, hdr *tar.Header, r io.Reader) error {
 	return f.Close()
 }
 
-// resolveArchivePath maps a tar entry name to an absolute path under destDir,
-// rejecting any name that would escape it (e.g. "../../etc/passwd").
-func resolveArchivePath(destDir, name string) (string, error) {
-	clean := filepath.Join(destDir, filepath.FromSlash(name))
-	if clean != destDir && !strings.HasPrefix(clean, destDir+string(os.PathSeparator)) {
+// resolveArchivePath converts a portable tar name into a local relative path.
+// The caller then uses it only with os.Root, which enforces the same boundary
+// even when an earlier entry created a symlink in the destination tree.
+func resolveArchivePath(name string) (string, error) {
+	clean := filepath.Clean(filepath.FromSlash(name))
+	if !filepath.IsLocal(clean) {
 		return "", fmt.Errorf("blob: archive entry %q escapes destination", name)
 	}
 	return clean, nil

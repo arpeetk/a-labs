@@ -181,3 +181,106 @@ func TestArchiveDeterministicEntryCount(t *testing.T) {
 		t.Fatal("archive contained no entries")
 	}
 }
+
+func TestArchivePreservesSymlinkWithoutReadingTarget(t *testing.T) {
+	src := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(outside, []byte("must-not-enter-checkpoint"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(src, "agent-link")); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := blob.Archive(&buf, src); err != nil {
+		t.Fatal(err)
+	}
+	gz, err := gzip.NewReader(&buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hdr, err := tar.NewReader(gz).Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdr.Typeflag != tar.TypeSymlink || hdr.Linkname != outside || hdr.Size != 0 {
+		t.Fatalf("symlink header = type %d target %q size %d", hdr.Typeflag, hdr.Linkname, hdr.Size)
+	}
+}
+
+func TestArchiveUnarchiveSafeRelativeSymlink(t *testing.T) {
+	src := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(src, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "real", "file"), []byte("ok"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real/file", filepath.Join(src, "link")); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := blob.Archive(&buf, src); err != nil {
+		t.Fatal(err)
+	}
+	dst := t.TempDir()
+	if err := blob.Unarchive(&buf, dst); err != nil {
+		t.Fatal(err)
+	}
+	target, err := os.Readlink(filepath.Join(dst, "link"))
+	if err != nil || target != "real/file" {
+		t.Fatalf("restored link = %q, %v", target, err)
+	}
+}
+
+func TestUnarchiveRejectsUnsafeSymlink(t *testing.T) {
+	for _, target := range []string{"/mnt/checkpoints/runs/other-run/checkpoint", "../../outside"} {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gz)
+		if err := tw.WriteHeader(&tar.Header{Name: "link", Typeflag: tar.TypeSymlink, Linkname: target, Mode: 0o777}); err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := blob.Unarchive(&buf, t.TempDir()); err == nil {
+			t.Errorf("Unarchive accepted unsafe symlink target %q", target)
+		}
+	}
+}
+
+func TestUnarchiveRejectsWriteThroughEscapingSymlink(t *testing.T) {
+	dst := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dst, "pivot")); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "pivot/escaped", Typeflag: tar.TypeReg, Mode: 0o644, Size: 4}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("evil")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := blob.Unarchive(&buf, dst); err == nil {
+		t.Fatal("Unarchive accepted a write through an escaping symlink")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "escaped")); !os.IsNotExist(err) {
+		t.Fatalf("outside file exists after rejected extraction: %v", err)
+	}
+}

@@ -63,7 +63,7 @@ func (m *Memory) CreateRun(_ context.Context, r *Run) error {
 	if _, ok := m.runs[r.ID]; ok {
 		return ErrExists
 	}
-	cp := *r
+	cp := cloneRun(r)
 	m.runs[r.ID] = &cp
 	return nil
 }
@@ -75,7 +75,7 @@ func (m *Memory) GetRun(_ context.Context, id string) (*Run, error) {
 	if !ok {
 		return nil, ErrNotFound
 	}
-	cp := *r
+	cp := cloneRun(r)
 	return &cp, nil
 }
 
@@ -90,7 +90,7 @@ func (m *Memory) ListRuns(_ context.Context, f RunFilter) ([]*Run, error) {
 		if f.Project != "" && r.Project != f.Project {
 			continue
 		}
-		cp := *r
+		cp := cloneRun(r)
 		out = append(out, &cp)
 	}
 	// Newest first, tie-break by ID for determinism.
@@ -109,7 +109,7 @@ func (m *Memory) UpdateRun(_ context.Context, r *Run) error {
 	if _, ok := m.runs[r.ID]; !ok {
 		return ErrNotFound
 	}
-	cp := *r
+	cp := cloneRun(r)
 	m.runs[r.ID] = &cp
 	return nil
 }
@@ -131,7 +131,17 @@ var _ upserter = (*Memory)(nil)
 func (m *Memory) UpsertRun(_ context.Context, r *Run) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cp := *r
+	cp := cloneRun(r)
 	m.runs[r.ID] = &cp
 	return nil
+}
+
+func cloneRun(r *Run) Run {
+	cp := *r
+	if r.LastCheckpoint != nil {
+		ck := *r.LastCheckpoint
+		cp.LastCheckpoint = &ck
+	}
+	cp.Conditions = append([]RunCondition(nil), r.Conditions...)
+	return cp
 }

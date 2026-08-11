@@ -62,8 +62,8 @@ func TestPostgresMigrateIdempotent(t *testing.T) {
 	if err := pg2.pool.QueryRow(ctx, `SELECT COUNT(*) FROM schema_version`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 1 {
-		t.Errorf("schema_version rows = %d, want 1 (one migration, applied once)", versions)
+	if versions != 2 {
+		t.Errorf("schema_version rows = %d, want 2 (each migration applied once)", versions)
 	}
 }
 

@@ -75,6 +75,10 @@ type RunSpec struct {
 	// restoring would overwrite live, still-present work. False (the default)
 	// is every ModeResume case today.
 	RestoreRequired bool `json:"restoreRequired,omitempty"`
+	// RestoreCheckpoint identifies a checkpoint manifest that hydrate must
+	// restore exactly. It is set for pause/resume after workspace loss; unlike
+	// ordinary recovery, hydrate must not silently fall back to another object.
+	RestoreCheckpoint string `json:"restoreCheckpoint,omitempty"`
 	// BranchPrefix is the git branch namespace for the PR the harness opens.
 	BranchPrefix string `json:"branchPrefix,omitempty"`
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/summiteight/wren/internal/runspec"
 )
@@ -41,6 +42,22 @@ func (m Mock) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (Resul
 		return Result{}, fmt.Errorf("write workspace marker: %w", err)
 	}
 	em.Message("mock harness: wrote " + marker)
+	// A bounded delay is an explicit dev/E2E seam used to exercise lifecycle
+	// operations against a deterministic keyless run. Production installs leave
+	// it unset, so ordinary mock runs remain instant.
+	if raw := os.Getenv("WREN_MOCK_DELAY"); raw != "" {
+		d, err := time.ParseDuration(raw)
+		if err != nil || d <= 0 {
+			return Result{}, fmt.Errorf("invalid WREN_MOCK_DELAY %q", raw)
+		}
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return Result{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
 
 	em.Usage(1234, 567)
 	em.CheckpointHint()

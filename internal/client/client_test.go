@@ -90,6 +90,22 @@ func TestListAndGetRun(t *testing.T) {
 	}
 }
 
+func TestPauseRunEscapesIDAndPosts(t *testing.T) {
+	var method, path string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.EscapedPath()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	c := New(&config.Context{Server: srv.URL})
+	if err := c.PauseRun(context.Background(), "r/with space"); err != nil {
+		t.Fatal(err)
+	}
+	if method != http.MethodPost || path != "/v1/runs/r%2Fwith%20space/pause" {
+		t.Fatalf("request = %s %s", method, path)
+	}
+}
+
 func TestCreateAndListProject(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

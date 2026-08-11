@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -32,7 +33,7 @@ func TestFilterByPhase(t *testing.T) {
 	original := append([]client.Run{}, runs...)
 	_ = filterByPhase(runs, "Running")
 	for i := range runs {
-		if runs[i] != original[i] {
+		if !reflect.DeepEqual(runs[i], original[i]) {
 			t.Fatalf("filterByPhase mutated its input at index %d: %+v vs original %+v", i, runs[i], original[i])
 		}
 	}

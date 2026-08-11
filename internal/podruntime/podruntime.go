@@ -15,7 +15,6 @@
 package podruntime
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,6 +26,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/summiteight/wren/internal/blob"
@@ -325,37 +325,24 @@ func restoreFromCheckpoint(ctx context.Context, em *harness.Emitter, spec runspe
 		return err
 	}
 	store := blob.NewMountStore(mountPath, blob.RunPrefix(spec.CheckpointBucket, spec.RunID))
-	objs, err := store.List(ctx, "checkpoints/")
+	manifest, rc, err := blob.LoadCheckpoint(ctx, store, spec.RestoreCheckpoint)
 	if err != nil {
-		werr := fmt.Errorf("hydrate: list checkpoints: %w", err)
-		em.Errorf(werr.Error())
-		return werr
-	}
-	if len(objs) == 0 {
-		err := fmt.Errorf("hydrate: workspace restore required but no checkpoint exists for run %s — cannot resume", spec.RunID)
-		em.Errorf(err.Error())
-		return err
-	}
-	latest := objs[0]
-	for _, o := range objs[1:] {
-		if o.Modified.After(latest.Modified) {
-			latest = o
+		which := "latest valid checkpoint"
+		if spec.RestoreCheckpoint != "" {
+			which = "exact checkpoint " + spec.RestoreCheckpoint
 		}
-	}
-	rc, err := store.Get(ctx, latest.Key)
-	if err != nil {
-		werr := fmt.Errorf("hydrate: get checkpoint %s: %w", latest.Key, err)
+		werr := fmt.Errorf("hydrate: load %s for run %s: %w", which, spec.RunID, err)
 		em.Errorf(werr.Error())
 		return werr
 	}
 	defer rc.Close()
 	if err := blob.Unarchive(rc, spec.WorkspacePath); err != nil {
-		werr := fmt.Errorf("hydrate: restore checkpoint %s: %w", latest.Key, err)
+		werr := fmt.Errorf("hydrate: restore checkpoint %s: %w", manifest.ManifestKey, err)
 		em.Errorf(werr.Error())
 		return werr
 	}
-	em.Message(fmt.Sprintf("hydrate: restore-from-checkpoint PASSED — restored %s (%d bytes) into %s",
-		latest.Key, latest.Size, spec.WorkspacePath))
+	em.Message(fmt.Sprintf("hydrate: restore-from-checkpoint PASSED — restored %s (%d bytes, sha256=%s) into %s",
+		manifest.ManifestKey, manifest.SizeBytes, manifest.SHA256, spec.WorkspacePath))
 	return nil
 }
 
@@ -558,18 +545,45 @@ var checkpointWorkspacePath = runspec.WorkspacePath
 // hook the live-verification proof asserts on, same pattern as the self-check's
 // PASSED line — or a loud FAILED line on any error.
 func takeCheckpoint(ctx context.Context, em *harness.Emitter, role string, store blob.Store) {
-	var buf bytes.Buffer
-	if err := blob.Archive(&buf, checkpointWorkspacePath); err != nil {
-		em.Message(fmt.Sprintf("%s: checkpoint snapshot FAILED: archive %s: %v", role, checkpointWorkspacePath, err))
+	m, err := blob.PublishCheckpoint(ctx, store, checkpointWorkspacePath, os.Getenv("WREN_RUN_ID"), "periodic", checkpointRetention(), time.Now())
+	if err != nil {
+		em.Message(fmt.Sprintf("%s: checkpoint snapshot FAILED: %v", role, err))
 		return
 	}
-	key := "checkpoints/ck-" + strconv.FormatInt(time.Now().UnixNano(), 10) + ".tar.gz"
-	size := buf.Len()
-	if err := store.Put(ctx, key, &buf); err != nil {
-		em.Message(fmt.Sprintf("%s: checkpoint snapshot FAILED: put %s: %v", role, key, err))
-		return
+	em.CheckpointReady(harness.CheckpointInfo{ID: m.ID, URI: m.ManifestKey, SHA256: m.SHA256, SizeBytes: m.SizeBytes, FormatVersion: int32(m.FormatVersion), Trigger: m.Trigger, At: m.CreatedAt})
+	em.Message(fmt.Sprintf("%s: checkpoint snapshot PASSED — published %s (%d bytes, sha256=%s)", role, m.ManifestKey, m.SizeBytes, m.SHA256))
+}
+
+func checkpointRetention() int {
+	n, err := strconv.Atoi(os.Getenv("WREN_CHECKPOINT_RETAIN"))
+	if err != nil || n <= 0 {
+		return 5
 	}
-	em.Message(fmt.Sprintf("%s: checkpoint snapshot PASSED — wrote %s (%d bytes)", role, key, size))
+	return n
+}
+
+// RunCheckpointOnce is invoked through pods/exec in the trusted checkpointer
+// container after the harness has been stopped. It emits exactly one manifest
+// JSON object so the operator can commit that proof into AgentRun status.
+func RunCheckpointOnce(ctx context.Context, out io.Writer) error {
+	bucket, mountPath, runID := os.Getenv("WREN_CHECKPOINT_BUCKET"), os.Getenv("WREN_CHECKPOINT_MOUNT_PATH"), os.Getenv("WREN_RUN_ID")
+	if bucket == "" || mountPath == "" {
+		return errors.New("forced checkpoint requires a configured checkpoint mount")
+	}
+	m, err := blob.PublishCheckpoint(ctx, blob.NewMountStore(mountPath, blob.RunPrefix(bucket, runID)), checkpointWorkspacePath, runID, "pause", checkpointRetention(), time.Now())
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(m)
+}
+
+var signalProcess = syscall.Kill
+
+func quiesceHarness(sig syscall.Signal) error {
+	if err := signalProcess(1, sig); err != nil {
+		return fmt.Errorf("signal harness pid 1 with %s: %w", sig, err)
+	}
+	return nil
 }
 
 // mountSelfCheck writes, reads back, and lists a small self-check object through
@@ -618,6 +632,9 @@ const (
 	RoleEgressLockdown = "egress-lockdown"
 	RoleCheckpointer   = "checkpointer"
 	RoleGateway        = "agent-gateway"
+	RoleCheckpointOnce = "checkpoint-once"
+	RoleQuiesce        = "quiesce"
+	RoleUnquiesce      = "unquiesce"
 )
 
 // Dispatch runs the named role to completion.
@@ -633,6 +650,12 @@ func Dispatch(ctx context.Context, out io.Writer, role, specPath string) error {
 		return RunLockdown(ctx, out, DefaultLockdownConfig())
 	case RoleCheckpointer:
 		return RunCheckpointer(ctx, out, role)
+	case RoleCheckpointOnce:
+		return RunCheckpointOnce(ctx, out)
+	case RoleQuiesce:
+		return quiesceHarness(syscall.SIGSTOP)
+	case RoleUnquiesce:
+		return quiesceHarness(syscall.SIGCONT)
 	case RoleGateway:
 		return RunSidecar(ctx, out, role)
 	default:

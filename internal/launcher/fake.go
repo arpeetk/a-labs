@@ -33,6 +33,9 @@ type Fake struct {
 	AssumeSecretsPresent bool
 	// SecretErr, when set, is returned by every SecretHasKey call (error path).
 	SecretErr error
+	// CreateRunErr injects a cluster publication failure for service rollback
+	// tests. No run is recorded when it is set.
+	CreateRunErr error
 }
 
 var _ Launcher = (*Fake)(nil)
@@ -60,6 +63,9 @@ func (f *Fake) EnsureNamespace(_ context.Context, ns string) error {
 func (f *Fake) CreateRun(_ context.Context, run *wrenv1.AgentRun) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.CreateRunErr != nil {
+		return f.CreateRunErr
+	}
 	k := key(run.Namespace, run.Name)
 	if _, ok := f.Runs[k]; ok {
 		return apierrors.NewAlreadyExists(schema.GroupResource{Group: "wren.dev", Resource: "agentruns"}, run.Name)
@@ -107,6 +113,20 @@ func (f *Fake) RequestCancel(_ context.Context, ns, name string) error {
 		run.Annotations = map[string]string{}
 	}
 	run.Annotations[wrenv1.CancelAnnotation] = "true"
+	return nil
+}
+
+func (f *Fake) RequestPause(_ context.Context, ns, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	run, ok := f.Runs[key(ns, name)]
+	if !ok {
+		return apierrors.NewNotFound(schema.GroupResource{Group: "wren.dev", Resource: "agentruns"}, name)
+	}
+	if run.Annotations == nil {
+		run.Annotations = map[string]string{}
+	}
+	run.Annotations[wrenv1.PauseAnnotation] = "true"
 	return nil
 }
 

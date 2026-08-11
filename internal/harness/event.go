@@ -17,13 +17,14 @@ import (
 type EventType string
 
 const (
-	EventStatus         EventType = "status"
-	EventMessage        EventType = "message"
-	EventTokenUsage     EventType = "token_usage"
-	EventToolCall       EventType = "tool_call"
-	EventCheckpointHint EventType = "checkpoint_hint"
-	EventPRReady        EventType = "pr_ready"
-	EventError          EventType = "error"
+	EventStatus          EventType = "status"
+	EventMessage         EventType = "message"
+	EventTokenUsage      EventType = "token_usage"
+	EventToolCall        EventType = "tool_call"
+	EventCheckpointHint  EventType = "checkpoint_hint"
+	EventCheckpointReady EventType = "checkpoint_ready"
+	EventPRReady         EventType = "pr_ready"
+	EventError           EventType = "error"
 )
 
 // PRInfo describes the pull request the harness opened (or intends to).
@@ -33,17 +34,28 @@ type PRInfo struct {
 	Title  string `json:"title,omitempty"`
 }
 
+type CheckpointInfo struct {
+	ID            string    `json:"id"`
+	URI           string    `json:"uri"`
+	SHA256        string    `json:"sha256"`
+	SizeBytes     int64     `json:"sizeBytes"`
+	FormatVersion int32     `json:"formatVersion"`
+	Trigger       string    `json:"trigger"`
+	At            time.Time `json:"at"`
+}
+
 // Event is one item in the harness output stream.
 type Event struct {
-	Type         EventType `json:"type"`
-	Time         time.Time `json:"time"`
-	Phase        string    `json:"phase,omitempty"`
-	Message      string    `json:"message,omitempty"`
-	InputTokens  int64     `json:"inputTokens,omitempty"`
-	OutputTokens int64     `json:"outputTokens,omitempty"`
-	Tool         string    `json:"tool,omitempty"`
-	PR           *PRInfo   `json:"pr,omitempty"`
-	Error        string    `json:"error,omitempty"`
+	Type         EventType       `json:"type"`
+	Time         time.Time       `json:"time"`
+	Phase        string          `json:"phase,omitempty"`
+	Message      string          `json:"message,omitempty"`
+	InputTokens  int64           `json:"inputTokens,omitempty"`
+	OutputTokens int64           `json:"outputTokens,omitempty"`
+	Tool         string          `json:"tool,omitempty"`
+	PR           *PRInfo         `json:"pr,omitempty"`
+	Checkpoint   *CheckpointInfo `json:"checkpoint,omitempty"`
+	Error        string          `json:"error,omitempty"`
 }
 
 // Emitter serializes Events as newline-delimited JSON to a writer. Safe for
@@ -75,6 +87,9 @@ func (e *Emitter) Status(phase string)  { e.Emit(Event{Type: EventStatus, Phase:
 func (e *Emitter) Message(msg string)   { e.Emit(Event{Type: EventMessage, Message: msg}) }
 func (e *Emitter) ToolCall(tool string) { e.Emit(Event{Type: EventToolCall, Tool: tool}) }
 func (e *Emitter) CheckpointHint()      { e.Emit(Event{Type: EventCheckpointHint}) }
+func (e *Emitter) CheckpointReady(info CheckpointInfo) {
+	e.Emit(Event{Type: EventCheckpointReady, Checkpoint: &info})
+}
 
 func (e *Emitter) Usage(in, out int64) {
 	e.Emit(Event{Type: EventTokenUsage, InputTokens: in, OutputTokens: out})
