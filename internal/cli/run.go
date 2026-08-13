@@ -29,22 +29,12 @@ func newRunCmd() *cobra.Command {
 }
 
 func newRunPauseCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "pause <run-id>",
-		Short: "Pause a Running run after publishing a verified checkpoint",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := clientFromFlags(cmd)
-			if err != nil {
-				return err
-			}
-			if err := c.PauseRun(context.Background(), args[0]); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "run %s pausing (waiting for verified checkpoint)\n", args[0])
-			return nil
-		},
-	}
+	return newRunActionCmd(
+		"pause <run-id>",
+		"Pause a Running run after publishing a verified checkpoint",
+		"run %s pausing (waiting for verified checkpoint)\n",
+		func(ctx context.Context, c *client.Client, runID string) error { return c.PauseRun(ctx, runID) },
+	)
 }
 
 func newRunCreateCmd() *cobra.Command {
@@ -67,11 +57,11 @@ func newRunCreateCmd() *cobra.Command {
 			if opts.Task == "" {
 				return fmt.Errorf("--task or --file is required")
 			}
-			// gvisor/kata are wired end-to-end in the operator but no v1 cluster
-			// provisions those RuntimeClasses — reject them here with a clear M4
-			// pointer instead of letting the pod fail admission downstream.
+			// gvisor/kata are wired through the operator, but current install paths
+			// do not provision those RuntimeClasses. Reject them here instead of
+			// letting the pod fail admission downstream.
 			if opts.Runtime != "" && opts.Runtime != "runc" {
-				return fmt.Errorf("--runtime %q is not available yet: only runc works today; gvisor/kata sandboxes land in M4 (technical-spec §5.6)", opts.Runtime)
+				return fmt.Errorf("--runtime %q is not available: current install paths support only runc", opts.Runtime)
 			}
 			c, err := clientFromFlags(cmd)
 			if err != nil {
@@ -95,62 +85,51 @@ func newRunCreateCmd() *cobra.Command {
 	f.StringVar(&opts.BaseRef, "base", "", "base git ref (default: repo default branch)")
 	f.StringVar(&opts.CPU, "cpu", "", "CPU request override (e.g. 2)")
 	f.StringVar(&opts.Memory, "mem", "", "memory request override (e.g. 4Gi)")
-	f.StringVar(&opts.Runtime, "runtime", "", "sandbox runtime override (only runc works today; gvisor/kata land in M4)")
+	f.StringVar(&opts.Runtime, "runtime", "", "sandbox runtime override (current install paths support only runc)")
 	return cmd
 }
 
 func newRunStopCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "stop <run-id>",
-		Short: "Stop a run: cancel it (no auto-resume) and delete its pod",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := clientFromFlags(cmd)
-			if err != nil {
-				return err
-			}
-			if err := c.StopRun(context.Background(), args[0]); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "run %s stopping (will reach Canceled)\n", args[0])
-			return nil
-		},
-	}
+	return newRunActionCmd(
+		"stop <run-id>",
+		"Stop a run: cancel it (no auto-resume) and delete its pod",
+		"run %s stopping (will reach Canceled)\n",
+		func(ctx context.Context, c *client.Client, runID string) error { return c.StopRun(ctx, runID) },
+	)
 }
 
 func newRunResumeCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "resume <run-id>",
-		Short: "Resume a Paused or Failed run from its durable workspace state",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			c, err := clientFromFlags(cmd)
-			if err != nil {
-				return err
-			}
-			if err := c.ResumeRun(context.Background(), args[0]); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "run %s resuming\n", args[0])
-			return nil
-		},
-	}
+	return newRunActionCmd(
+		"resume <run-id>",
+		"Resume a Paused or Failed run from its durable workspace state",
+		"run %s resuming\n",
+		func(ctx context.Context, c *client.Client, runID string) error { return c.ResumeRun(ctx, runID) },
+	)
 }
 
 func newRunRmCmd() *cobra.Command {
+	return newRunActionCmd(
+		"rm <run-id>",
+		"Delete a run and its cluster resources (pod, workspace)",
+		"run %s deleted\n",
+		func(ctx context.Context, c *client.Client, runID string) error { return c.DeleteRun(ctx, runID) },
+	)
+}
+
+func newRunActionCmd(use, short, confirmation string, action func(context.Context, *client.Client, string) error) *cobra.Command {
 	return &cobra.Command{
-		Use:   "rm <run-id>",
-		Short: "Delete a run and its cluster resources (pod, workspace)",
+		Use:   use,
+		Short: short,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c, err := clientFromFlags(cmd)
 			if err != nil {
 				return err
 			}
-			if err := c.DeleteRun(context.Background(), args[0]); err != nil {
+			if err := action(context.Background(), c, args[0]); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "run %s deleted\n", args[0])
+			fmt.Fprintf(cmd.OutOrStdout(), confirmation, args[0])
 			return nil
 		},
 	}

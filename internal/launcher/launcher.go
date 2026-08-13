@@ -1,7 +1,7 @@
 // Package launcher is the control plane's bridge to Kubernetes: it creates and
 // reads AgentRun custom resources. The Runs service depends on the Launcher
-// interface, never on a Kubernetes client directly, so the control-plane logic
-// stays unit-testable (spec §5.2: "a stable API that hides Kubernetes").
+// interface, never on a Kubernetes client directly, so control-plane logic
+// stays unit-testable.
 package launcher
 
 import (
@@ -62,7 +62,7 @@ type Launcher interface {
 	// RequestCancel marks a run for cancellation by setting the cancel annotation
 	// on its AgentRun; the operator observes it, deletes the current pod, and
 	// drives the run to Canceled (terminal — no auto-resume). Distinct from
-	// DeleteRun, which removes the run entirely (`wren run stop`, WS-15 Part C).
+	// DeleteRun, which removes the run entirely (`wren run rm`).
 	RequestCancel(ctx context.Context, ns, name string) error
 	// RequestPause sets the one-shot pause annotation. Core API validation
 	// ensures the run is Running and checkpoint-capable before this call.
@@ -76,7 +76,7 @@ type Launcher interface {
 	RequestResume(ctx context.Context, ns, name string) error
 	// SecretHasKey reports whether Secret `name` in namespace `ns` exists and
 	// carries a non-empty value for `key`. It backs the control plane's
-	// pre-flight credential check (coreapi, WS-15 Part A): a run whose namespace
+	// preflight credential check: a run whose namespace
 	// lacks its harness's credential Secret is rejected before a doomed pod is
 	// scheduled. A missing namespace or Secret is (false, nil), not an error.
 	SecretHasKey(ctx context.Context, ns, name, key string) (bool, error)
@@ -173,11 +173,23 @@ func (k *K8s) DeleteRun(ctx context.Context, ns, name string) error {
 }
 
 func (k *K8s) RequestCancel(ctx context.Context, ns, name string) error {
+	return k.requestAnnotation(ctx, ns, name, wrenv1.CancelAnnotation)
+}
+
+func (k *K8s) RequestPause(ctx context.Context, ns, name string) error {
+	return k.requestAnnotation(ctx, ns, name, wrenv1.PauseAnnotation)
+}
+
+func (k *K8s) RequestResume(ctx context.Context, ns, name string) error {
+	return k.requestAnnotation(ctx, ns, name, wrenv1.ResumeAnnotation)
+}
+
+func (k *K8s) requestAnnotation(ctx context.Context, ns, name, annotation string) error {
 	var run wrenv1.AgentRun
 	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &run); err != nil {
 		return err // NotFound → 404 at the transport
 	}
-	if run.Annotations[wrenv1.CancelAnnotation] == "true" {
+	if run.Annotations[annotation] == "true" {
 		return nil // already requested
 	}
 	// Patch ONLY the annotation (merge patch, no resourceVersion): the operator
@@ -187,42 +199,7 @@ func (k *K8s) RequestCancel(ctx context.Context, ns, name string) error {
 	if run.Annotations == nil {
 		run.Annotations = map[string]string{}
 	}
-	run.Annotations[wrenv1.CancelAnnotation] = "true"
-	return k.c.Patch(ctx, &run, client.MergeFrom(base))
-}
-
-func (k *K8s) RequestPause(ctx context.Context, ns, name string) error {
-	var run wrenv1.AgentRun
-	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &run); err != nil {
-		return err
-	}
-	if run.Annotations[wrenv1.PauseAnnotation] == "true" {
-		return nil
-	}
-	base := run.DeepCopy()
-	if run.Annotations == nil {
-		run.Annotations = map[string]string{}
-	}
-	run.Annotations[wrenv1.PauseAnnotation] = "true"
-	return k.c.Patch(ctx, &run, client.MergeFrom(base))
-}
-
-func (k *K8s) RequestResume(ctx context.Context, ns, name string) error {
-	var run wrenv1.AgentRun
-	if err := k.c.Get(ctx, client.ObjectKey{Namespace: ns, Name: name}, &run); err != nil {
-		return err // NotFound → 404 at the transport
-	}
-	if run.Annotations[wrenv1.ResumeAnnotation] == "true" {
-		return nil // already requested
-	}
-	// Merge patch, no resourceVersion — same race the RequestCancel comment
-	// above documents: the operator writes run status concurrently, so a
-	// read-modify-write Update here would lose that race.
-	base := run.DeepCopy()
-	if run.Annotations == nil {
-		run.Annotations = map[string]string{}
-	}
-	run.Annotations[wrenv1.ResumeAnnotation] = "true"
+	run.Annotations[annotation] = "true"
 	return k.c.Patch(ctx, &run, client.MergeFrom(base))
 }
 

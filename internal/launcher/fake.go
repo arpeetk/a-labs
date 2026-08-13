@@ -29,7 +29,7 @@ type Fake struct {
 	// AssumeSecretsPresent is true (the default), SecretHasKey reports any secret
 	// not explicitly tracked as present — so the many tests that create
 	// credentialed runs need no secret wiring. Tests exercising the
-	// missing-credential guard (WS-15 Part A) set AssumeSecretsPresent=false and
+	// missing-credential guard set AssumeSecretsPresent=false and
 	// seed the secrets that DO exist via SetSecret.
 	SecretKeys           map[string]bool
 	AssumeSecretsPresent bool
@@ -112,34 +112,18 @@ func (f *Fake) DeleteRun(_ context.Context, ns, name string) error {
 }
 
 func (f *Fake) RequestCancel(_ context.Context, ns, name string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	run, ok := f.Runs[key(ns, name)]
-	if !ok {
-		return apierrors.NewNotFound(schema.GroupResource{Group: "wren.dev", Resource: "agentruns"}, name)
-	}
-	if run.Annotations == nil {
-		run.Annotations = map[string]string{}
-	}
-	run.Annotations[wrenv1.CancelAnnotation] = "true"
-	return nil
+	return f.requestAnnotation(ns, name, wrenv1.CancelAnnotation)
 }
 
 func (f *Fake) RequestPause(_ context.Context, ns, name string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	run, ok := f.Runs[key(ns, name)]
-	if !ok {
-		return apierrors.NewNotFound(schema.GroupResource{Group: "wren.dev", Resource: "agentruns"}, name)
-	}
-	if run.Annotations == nil {
-		run.Annotations = map[string]string{}
-	}
-	run.Annotations[wrenv1.PauseAnnotation] = "true"
-	return nil
+	return f.requestAnnotation(ns, name, wrenv1.PauseAnnotation)
 }
 
 func (f *Fake) RequestResume(_ context.Context, ns, name string) error {
+	return f.requestAnnotation(ns, name, wrenv1.ResumeAnnotation)
+}
+
+func (f *Fake) requestAnnotation(ns, name, annotation string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	run, ok := f.Runs[key(ns, name)]
@@ -149,7 +133,7 @@ func (f *Fake) RequestResume(_ context.Context, ns, name string) error {
 	if run.Annotations == nil {
 		run.Annotations = map[string]string{}
 	}
-	run.Annotations[wrenv1.ResumeAnnotation] = "true"
+	run.Annotations[annotation] = "true"
 	return nil
 }
 
