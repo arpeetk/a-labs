@@ -33,8 +33,9 @@ found a live bypass of the security boundary that two earlier passes
 
 5. **Split must-fix from follow-up, explicitly.** Reviews end with a verdict
    (approve / approve-with-comments / request-changes) and two lists:
-   merge-blocking vs. ticketed. Follow-ups go into `docs/tasks/STATUS.md`'s
-   ledger in the same motion — a follow-up that isn't written down is lost.
+   merge-blocking vs. ticketed. Follow-ups become GitHub issues in the same
+   motion; product-level gaps also belong in [`../roadmap.md`](../roadmap.md).
+   A follow-up that isn't written down is lost.
 
 6. **Cross-review findings get folded in, not re-litigated.** When two
    reviews cover the same ground (rounds 1–3 on PR #16), reconcile them into
@@ -47,7 +48,7 @@ found a live bypass of the security boundary that two earlier passes
    evidence, runs the gate on the result, and only then merges. A fix you
    didn't re-verify is a finding you reopened.
 
-8. **Hand-offs are part of the review surface.** "NOT verified" and
-   "questions" sections are read line by line and triaged into STATUS.md —
-   they are how the PVC-vs-clean-`Failed` semantic gap and the `run list`
-   N+1 tradeoff got captured instead of lost.
+8. **Hand-offs are part of the review surface.** "Not verified" and
+   "questions" sections are read line by line and triaged into issues or the
+   roadmap. That is how uncertain behavior becomes explicit follow-up instead
+   of disappearing after merge.
