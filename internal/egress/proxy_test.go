@@ -243,6 +243,10 @@ func TestOpenAIRouteInjectsBearerAndScrubs(t *testing.T) {
 // Even with no key configured (Auth injects nothing), the Director's scrub —
 // not the overwrite — is what keeps a runner-smuggled credential off the
 // upstream. This is the assertion that pins the scrub itself.
+type noAuth struct{}
+
+func (noAuth) Apply(*http.Request) {}
+
 func TestOpenAIRouteNoAuthStillScrubs(t *testing.T) {
 	var gotAuth string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -253,7 +257,7 @@ func TestOpenAIRouteNoAuthStillScrubs(t *testing.T) {
 	p, err := New(Config{Routes: []Route{{
 		Prefix:   RouteOpenAI,
 		Upstream: upstream.URL,
-		Auth:     NoAuth{},
+		Auth:     noAuth{},
 	}}})
 	if err != nil {
 		t.Fatal(err)

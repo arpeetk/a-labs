@@ -2,10 +2,6 @@ package github
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
-	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,47 +97,5 @@ func TestRESTOpenPRReturnsExisting(t *testing.T) {
 	}
 	if pr.Number != 7 {
 		t.Fatalf("expected existing PR #7, got %+v", pr)
-	}
-}
-
-func TestInstallationToken(t *testing.T) {
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
-
-	var gotAuth string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAuth = r.Header.Get("Authorization")
-		if r.URL.Path == "/app/installations/99/access_tokens" {
-			w.WriteHeader(http.StatusCreated)
-			_, _ = w.Write([]byte(`{"token":"ghs_realtoken","expires_at":"2099-01-01T00:00:00Z"}`))
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer srv.Close()
-
-	creds := AppCredentials{AppID: 123, InstallationID: 99, PrivateKeyPEM: pemBytes}
-	tok, exp, err := creds.InstallationToken(context.Background(), srv.URL, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tok != "ghs_realtoken" {
-		t.Errorf("token = %q", tok)
-	}
-	if exp.Year() != 2099 {
-		t.Errorf("expiry = %v", exp)
-	}
-	if !strings.HasPrefix(gotAuth, "Bearer ") {
-		t.Errorf("expected App JWT bearer auth, got %q", gotAuth)
-	}
-}
-
-func TestInstallationTokenBadKey(t *testing.T) {
-	creds := AppCredentials{AppID: 1, InstallationID: 2, PrivateKeyPEM: []byte("not a key")}
-	if _, _, err := creds.InstallationToken(context.Background(), "", nil); err == nil {
-		t.Fatal("expected error on bad key")
 	}
 }

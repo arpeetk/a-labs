@@ -12,11 +12,6 @@ type Authorizer interface {
 	Apply(*http.Request)
 }
 
-// NoAuth injects nothing.
-type NoAuth struct{}
-
-func (NoAuth) Apply(*http.Request) {}
-
 // BasicAuth injects an HTTP Basic Authorization header (used for git over HTTPS:
 // GitHub accepts the token as the password with username "x-access-token").
 type BasicAuth struct {

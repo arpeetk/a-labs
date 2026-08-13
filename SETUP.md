@@ -325,8 +325,7 @@ instead of building locally.
 ## Later milestones (not yet built)
 
 - **GitHub App** instead of a PAT: per-run, repo-scoped installation tokens
-  minted by the control plane and injected at the proxy (the minter exists in
-  `internal/github`; wiring is WS-2).
+  minted by the control plane and injected at the proxy.
 - **SSO/OIDC** for the apiserver front-door (replacing the `X-Wren-User`
   header) and managed **Postgres** provisioning + a **Helm chart** (WS-5).
 - **Workload Identity** for the operator/pods → GCP. First use landed in WS-18:

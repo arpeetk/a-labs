@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// FakeKube is the in-memory Kube for tests. It records every mutation in call
+// FakeKube is the in-memory Kube test double. It records every mutation in call
 // order (Calls) so tests can assert the install's sequencing, and lets a test
 // inject a server version or a failure on any operation.
 type FakeKube struct {

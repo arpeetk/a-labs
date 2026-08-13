@@ -14,12 +14,12 @@ import (
 
 func TestNewNormalizesServer(t *testing.T) {
 	c := New(&config.Context{Server: "wren.corp.internal:443", User: "me@x"})
-	if c.Server() != "http://wren.corp.internal:443" {
-		t.Errorf("Server() = %q", c.Server())
+	if c.base != "http://wren.corp.internal:443" {
+		t.Errorf("base = %q", c.base)
 	}
 	c2 := New(&config.Context{Server: "https://host/", User: "me@x"})
-	if c2.Server() != "https://host" {
-		t.Errorf("Server() = %q", c2.Server())
+	if c2.base != "https://host" {
+		t.Errorf("base = %q", c2.base)
 	}
 }
 

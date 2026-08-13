@@ -65,7 +65,7 @@ internal/
   harness/             harness adapters (mock, claude-code, codex, opencode) + event protocol
   podruntime/          in-pod role runners (harness/hydrate/sidecars) + dispatch
   egress/              the credential-injecting allowlist proxy (github/anthropic/openai routes)
-  github/              GitHub PR client + App installation-token minter + Fake
+  github/              GitHub PR client + test fake
   gitwork/             go-git clone/commit/push (no git binary needed)
   finalize/            commit → push branch → open PR (+ rubric)
   install/             wren install/uninstall (embedded config/default render + assets)

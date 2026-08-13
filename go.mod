@@ -4,7 +4,6 @@ go 1.26.0
 
 require (
 	github.com/go-git/go-git/v5 v5.19.1
-	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/go-github/v66 v66.0.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/spf13/cobra v1.10.2

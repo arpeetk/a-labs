@@ -43,9 +43,6 @@ func New(ctx *config.Context) *Client {
 	}
 }
 
-// Server returns the control-plane base URL this client targets.
-func (c *Client) Server() string { return c.base }
-
 // RunCreateOptions is a request to start a new agent run.
 type RunCreateOptions struct {
 	Project     string `json:"project"`

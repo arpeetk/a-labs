@@ -150,7 +150,7 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Auth | `X-Wren-User` header | OIDC / SSO |
 | Isolation | hardened `runc` pods | + gVisor/Kata (deferred, M4) |
 
-Next up: per-run **GitHub App** tokens (the minter is built; wiring is next),
+Next up: per-run **GitHub App** tokens,
 incremental snapshots, and transcript continuity for every harness.
 
 ## Repository layout
