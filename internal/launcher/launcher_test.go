@@ -66,6 +66,38 @@ func TestFakeLauncher(t *testing.T) {
 	if _, err := f.GetRun(ctx, "ns", "missing"); !apierrors.IsNotFound(err) {
 		t.Errorf("missing GetRun = %v", err)
 	}
+	listed, err := f.ListRuns(ctx)
+	if err != nil || len(listed) != 1 || listed[0].Name != "r-1" {
+		t.Fatalf("ListRuns = %+v, %v", listed, err)
+	}
+
+	for name, request := range map[string]func(context.Context, string, string) error{
+		"cancel": f.RequestCancel,
+		"pause":  f.RequestPause,
+		"resume": f.RequestResume,
+	} {
+		if err := request(ctx, "ns", "r-1"); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	got, _ = f.GetRun(ctx, "ns", "r-1")
+	for _, annotation := range []string{wrenv1.CancelAnnotation, wrenv1.PauseAnnotation, wrenv1.ResumeAnnotation} {
+		if got.Annotations[annotation] != "true" {
+			t.Errorf("annotation %s missing from %v", annotation, got.Annotations)
+		}
+	}
+	if err := f.RequestPause(ctx, "ns", "missing"); !apierrors.IsNotFound(err) {
+		t.Errorf("pause missing run = %v", err)
+	}
+
+	f.AssumeSecretsPresent = false
+	f.SetSecret("ns", "provider", "key", true)
+	if ok, err := f.SecretHasKey(ctx, "ns", "provider", "key"); err != nil || !ok {
+		t.Fatalf("SecretHasKey present = %v, %v", ok, err)
+	}
+	if ok, err := f.SecretHasKey(ctx, "ns", "missing", "key"); err != nil || ok {
+		t.Fatalf("SecretHasKey missing = %v, %v", ok, err)
+	}
 
 	f.SetStatus("ns", "r-1", wrenv1.AgentRunStatus{Phase: wrenv1.PhaseRunning})
 	got, _ = f.GetRun(ctx, "ns", "r-1")

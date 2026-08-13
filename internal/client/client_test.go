@@ -106,6 +106,44 @@ func TestPauseRunEscapesIDAndPosts(t *testing.T) {
 	}
 }
 
+func TestRunLifecycleAndEventEndpoints(t *testing.T) {
+	var requests []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.Method+" "+r.URL.RequestURI())
+		if strings.HasSuffix(r.URL.Path, "/events") {
+			_ = json.NewEncoder(w).Encode([]RunEvent{{ID: 8, RunID: "r-1", Type: "status"}})
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	c := New(&config.Context{Server: srv.URL})
+	events, err := c.ListRunEvents(context.Background(), "r-1", 7, 3)
+	if err != nil || len(events) != 1 || events[0].ID != 8 {
+		t.Fatalf("ListRunEvents = %+v, %v", events, err)
+	}
+	for name, call := range map[string]func(context.Context, string) error{
+		"delete": c.DeleteRun,
+		"stop":   c.StopRun,
+		"resume": c.ResumeRun,
+	} {
+		if err := call(context.Background(), "r-1"); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+
+	want := []string{
+		"GET /v1/runs/r-1/events?after=7&limit=3",
+		"DELETE /v1/runs/r-1",
+		"POST /v1/runs/r-1/stop",
+		"POST /v1/runs/r-1/resume",
+	}
+	if strings.Join(requests, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("requests = %#v, want %#v", requests, want)
+	}
+}
+
 func TestCreateAndListProject(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +154,8 @@ func TestCreateAndListProject(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(Project{Name: "demo", Repo: "acme/api"})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects":
 			_ = json.NewEncoder(w).Encode([]Project{{Name: "demo"}, {Name: "keyless"}})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/projects/demo":
+			_ = json.NewEncoder(w).Encode(Project{Name: "demo", Repo: "acme/api"})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -136,6 +176,10 @@ func TestCreateAndListProject(t *testing.T) {
 	projects, err := c.ListProjects(context.Background())
 	if err != nil || len(projects) != 2 || projects[1].Name != "keyless" {
 		t.Fatalf("ListProjects = %+v, %v", projects, err)
+	}
+	got, err := c.GetProject(context.Background(), "demo")
+	if err != nil || got.Repo != "acme/api" {
+		t.Fatalf("GetProject = %+v, %v", got, err)
 	}
 }
 
