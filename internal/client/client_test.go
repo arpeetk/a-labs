@@ -123,13 +123,16 @@ func TestRunLifecycleAndEventEndpoints(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].ID != 8 {
 		t.Fatalf("ListRunEvents = %+v, %v", events, err)
 	}
-	for name, call := range map[string]func(context.Context, string) error{
-		"delete": c.DeleteRun,
-		"stop":   c.StopRun,
-		"resume": c.ResumeRun,
+	for _, action := range []struct {
+		name string
+		call func(context.Context, string) error
+	}{
+		{name: "delete", call: c.DeleteRun},
+		{name: "stop", call: c.StopRun},
+		{name: "resume", call: c.ResumeRun},
 	} {
-		if err := call(context.Background(), "r-1"); err != nil {
-			t.Fatalf("%s: %v", name, err)
+		if err := action.call(context.Background(), "r-1"); err != nil {
+			t.Fatalf("%s: %v", action.name, err)
 		}
 	}
 
