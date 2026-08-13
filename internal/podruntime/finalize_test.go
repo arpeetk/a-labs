@@ -20,6 +20,7 @@ import (
 	gh "github.com/google/go-github/v66/github"
 
 	"github.com/summiteight/wren/internal/github"
+	"github.com/summiteight/wren/internal/github/githubtest"
 	"github.com/summiteight/wren/internal/gitwork"
 	"github.com/summiteight/wren/internal/runspec"
 )
@@ -125,7 +126,7 @@ func TestRunHarnessOpensPR(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fake := &github.Fake{}
+	fake := &githubtest.Fake{}
 	orig := newGitHubClient
 	newGitHubClient = func(string) github.Client { return fake }
 	defer func() { newGitHubClient = orig }()
@@ -183,7 +184,7 @@ func TestRunHarnessFinalizeRetryClassification(t *testing.T) {
 			if _, err := gitwork.Clone("file://"+origin, "main", ws, ""); err != nil {
 				t.Fatal(err)
 			}
-			fake := &github.Fake{Err: tc.openPRErr}
+			fake := &githubtest.Fake{Err: tc.openPRErr}
 			orig := newGitHubClient
 			newGitHubClient = func(string) github.Client { return fake }
 			defer func() { newGitHubClient = orig }()

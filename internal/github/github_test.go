@@ -29,20 +29,6 @@ func TestSplitRepo(t *testing.T) {
 	}
 }
 
-func TestFakeOpenPR(t *testing.T) {
-	f := &Fake{}
-	pr, err := f.OpenPR(context.Background(), PRRequest{Owner: "o", Repo: "r", HeadBranch: "b"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pr.Number != 1 || !strings.Contains(pr.URL, "o/r/pull/1") {
-		t.Errorf("pr = %+v", pr)
-	}
-	if len(f.PRs) != 1 {
-		t.Error("PR not recorded")
-	}
-}
-
 func TestRESTOpenPR(t *testing.T) {
 	var gotBody string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

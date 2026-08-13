@@ -1,7 +1,6 @@
-// Package github is Wren's GitHub integration (spec §5.7): minting short-lived
-// GitHub App installation tokens and opening pull requests. The Client interface
-// keeps callers testable; RESTClient is the go-github implementation and Fake is
-// an in-memory double.
+// Package github opens pull requests through GitHub's REST API. Its Client
+// interface keeps callers testable; test doubles live in the githubtest
+// subpackage so they are not shipped in production binaries.
 package github
 
 import (

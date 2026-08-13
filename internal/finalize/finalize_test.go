@@ -14,7 +14,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 	gh "github.com/google/go-github/v66/github"
 
-	"github.com/summiteight/wren/internal/github"
+	"github.com/summiteight/wren/internal/github/githubtest"
 	"github.com/summiteight/wren/internal/gitwork"
 	"github.com/summiteight/wren/internal/runspec"
 )
@@ -70,7 +70,7 @@ func TestFinalizeOpensPR(t *testing.T) {
 		Prompt: "Add idempotency keys", BaseRef: "main",
 		WorkspacePath: ws, BranchPrefix: "wren/arpeet", Harness: "mock",
 	}
-	fake := &github.Fake{}
+	fake := &githubtest.Fake{}
 	pr, err := Run(context.Background(), spec, "", fake)
 	if err != nil {
 		t.Fatalf("finalize: %v", err)
@@ -105,7 +105,7 @@ func TestFinalizeNoChanges(t *testing.T) {
 	origin := makeOrigin(t)
 	ws := cloneInto(t, origin)
 	spec := runspec.RunSpec{RunID: "r-1", Repo: "corp/payments", WorkspacePath: ws}
-	fake := &github.Fake{}
+	fake := &githubtest.Fake{}
 	if _, err := Run(context.Background(), spec, "", fake); !errors.Is(err, ErrNoChanges) {
 		t.Fatalf("err = %v, want ErrNoChanges", err)
 	}
@@ -152,7 +152,7 @@ func TestFinalizeHarnessCreatedCommit(t *testing.T) {
 		RunID: "r-committed", Repo: "corp/payments", Prompt: "x", BaseRef: "main",
 		WorkspacePath: ws, BranchPrefix: "wren/me",
 	}
-	fake := &github.Fake{}
+	fake := &githubtest.Fake{}
 	if _, err := Run(context.Background(), spec, "", fake); err != nil {
 		t.Fatalf("finalize pre-committed work: %v", err)
 	}
@@ -194,7 +194,7 @@ func TestFinalizeResumeAfterCommit(t *testing.T) {
 	}
 
 	// Resume pod: finalize re-runs end to end.
-	fake := &github.Fake{}
+	fake := &githubtest.Fake{}
 	pr, err := Run(context.Background(), spec, "", fake)
 	if err != nil {
 		t.Fatalf("resume finalize: %v", err)
@@ -222,7 +222,7 @@ func TestFinalizeRunTwice(t *testing.T) {
 		RunID: "r-1", Repo: "corp/payments", Prompt: "x", BaseRef: "main",
 		WorkspacePath: ws, BranchPrefix: "wren/me",
 	}
-	fake := &github.Fake{}
+	fake := &githubtest.Fake{}
 	if _, err := Run(context.Background(), spec, "", fake); err != nil {
 		t.Fatalf("first finalize: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestFinalizeRejectsRunBranchUnrelatedToBase(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fake := &github.Fake{}
+	fake := &githubtest.Fake{}
 	if _, err := Run(context.Background(), spec, "", fake); err == nil || !strings.Contains(err.Error(), "not descended") {
 		t.Fatalf("err = %v, want unrelated-history rejection", err)
 	}
@@ -300,7 +300,7 @@ func TestFinalizeMissingRequestedBaseDoesNotPublish(t *testing.T) {
 		RunID: "r-missing-base", Repo: "corp/payments", BaseRef: "release/missing",
 		WorkspacePath: ws,
 	}
-	fake := &github.Fake{}
+	fake := &githubtest.Fake{}
 	if _, err := Run(context.Background(), spec, "", fake); err == nil || !strings.Contains(err.Error(), "resolve requested base") {
 		t.Fatalf("err = %v, want missing-base error", err)
 	}
@@ -329,12 +329,12 @@ func TestFinalizeRetryableOpenPRError(t *testing.T) {
 		}
 	}
 
-	transient := &github.Fake{Err: &gh.ErrorResponse{Response: httpResp(http.StatusBadGateway)}}
+	transient := &githubtest.Fake{Err: &gh.ErrorResponse{Response: httpResp(http.StatusBadGateway)}}
 	if _, err := Run(context.Background(), newSpec(t), "", transient); !errors.Is(err, ErrRetryable) {
 		t.Errorf("err = %v, want ErrRetryable", err)
 	}
 
-	permanent := &github.Fake{Err: &gh.ErrorResponse{Response: httpResp(http.StatusUnprocessableEntity)}}
+	permanent := &githubtest.Fake{Err: &gh.ErrorResponse{Response: httpResp(http.StatusUnprocessableEntity)}}
 	if _, err := Run(context.Background(), newSpec(t), "", permanent); err == nil || errors.Is(err, ErrRetryable) {
 		t.Errorf("err = %v, want deterministic failure (not ErrRetryable)", err)
 	}
@@ -342,7 +342,7 @@ func TestFinalizeRetryableOpenPRError(t *testing.T) {
 
 func TestFinalizeInvalidRepo(t *testing.T) {
 	spec := runspec.RunSpec{RunID: "r-1", Repo: "not-a-repo", WorkspacePath: t.TempDir()}
-	if _, err := Run(context.Background(), spec, "", &github.Fake{}); err == nil {
+	if _, err := Run(context.Background(), spec, "", &githubtest.Fake{}); err == nil {
 		t.Fatal("expected invalid repo error")
 	}
 }
