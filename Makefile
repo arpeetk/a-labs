@@ -84,13 +84,13 @@ e2e-pause-resume: ## Keyless pause/resume chaos gate on kind; E2E_KEEP=1 keeps t
 e2e-gke: ## Egress-enforcement e2e on a GKE Standard cluster (existing cluster; push images first with docker-push-gke)
 	./hack/e2e-gke.sh
 
-e2e-gke-provisioned: ## Provision a disposable GKE cluster with zone/machine fallback, run e2e-gke, then delete it
+e2e-gke-provisioned: ## Build/push images, provision disposable GKE, run egress gate, then delete it
 	./hack/e2e-gke-provisioned.sh
 
 e2e-gke-checkpoint: ## Checkpoint/restore e2e on a GKE Standard cluster (existing cluster; push images first with docker-push-gke)
 	./hack/e2e-gke-checkpoint.sh
 
-e2e-gke-checkpoint-provisioned: ## Provision disposable GKE Standard, run checkpoint/restore gate, and verify cluster deletion
+e2e-gke-checkpoint-provisioned: ## Build/push images, provision disposable GKE, run checkpoint gate, then delete it
 	GKE_E2E_GATE=checkpoint ./hack/e2e-gke-provisioned.sh
 
 cover: ## Run tests and print per-package coverage

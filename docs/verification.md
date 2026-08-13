@@ -47,9 +47,12 @@ make e2e-gke-checkpoint-provisioned
 ```
 
 The provisioned runner refuses to adopt an existing cluster with the same
-name, tries explicit capacity pools, and verifies cluster deletion. Run these
-only for cloud-sensitive changes: pod admission, egress lockdown, Workload
-Identity, GCS FUSE, checkpoint restore, image architecture, or scheduling.
+name, publishes linux/amd64 images for the exact commit before starting the
+billable cluster, tries explicit capacity pools, and verifies cluster deletion.
+Set `GKE_BUILD_IMAGES=0` only when those images are already present under the
+configured `GKE_AR` and `GKE_TAG`. Run these gates only for cloud-sensitive
+changes: pod admission, egress lockdown, Workload Identity, GCS FUSE,
+checkpoint restore, image architecture, or scheduling.
 
 ## Native workflow
 

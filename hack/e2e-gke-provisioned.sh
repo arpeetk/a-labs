@@ -11,14 +11,16 @@ cd "$REPO_ROOT"
 # shellcheck source=hack/lib/e2e-common.sh
 source "$REPO_ROOT/hack/lib/e2e-common.sh"
 
-need gcloud
+need gcloud; need docker; need make
 
 GKE_PROJECT="${GKE_PROJECT:-wren-gke-fdea81}"
 GKE_CLUSTER="${GKE_CLUSTER:-wren-e2e}"
 GKE_TAG="${GKE_TAG:-$(git rev-parse --short HEAD 2>/dev/null || echo dev)}"
+GKE_AR="${GKE_AR:-us-central1-docker.pkg.dev/${GKE_PROJECT}/wren}"
 GKE_CANDIDATES="${GKE_CANDIDATES:-us-west1-b:n2-standard-2 us-west1-c:n2-standard-2 us-central1-c:n2-standard-2}"
 GKE_DISK_SIZE="${GKE_DISK_SIZE:-40}"
 GKE_E2E_GATE="${GKE_E2E_GATE:-egress}"
+GKE_BUILD_IMAGES="${GKE_BUILD_IMAGES:-1}"
 
 case "$GKE_E2E_GATE" in
   egress) gate_script="$REPO_ROOT/hack/e2e-gke.sh" ;;
@@ -48,6 +50,19 @@ trap cleanup_cluster EXIT
 if gcloud container clusters list --project="$GKE_PROJECT" \
   --format='value(name)' | grep -Fxq "$GKE_CLUSTER"; then
   die "cluster ${GKE_CLUSTER} already exists; refusing to adopt or delete it"
+fi
+
+# Publish the exact commit under test before starting a billable cluster. Set
+# GKE_BUILD_IMAGES=0 only when the caller has already pushed all three images
+# under GKE_AR/GKE_TAG; the existing-cluster gates intentionally retain that
+# faster, explicit workflow.
+if [ "$GKE_BUILD_IMAGES" = "1" ]; then
+  registry_host="${GKE_AR%%/*}"
+  log "building and publishing linux/amd64 images tagged ${GKE_TAG}"
+  gcloud auth configure-docker "$registry_host" --quiet >/dev/null
+  make docker-push-gke GKE_PROJECT="$GKE_PROJECT" GKE_AR="$GKE_AR" GKE_TAG="$GKE_TAG"
+elif [ "$GKE_BUILD_IMAGES" != "0" ]; then
+  die "GKE_BUILD_IMAGES must be 0 or 1, got '${GKE_BUILD_IMAGES}'"
 fi
 
 for candidate in $GKE_CANDIDATES; do
@@ -81,6 +96,6 @@ done
 
 log "running the ${GKE_E2E_GATE} GKE gate on ${created_zone} with image tag ${GKE_TAG}"
 GKE_PROJECT="$GKE_PROJECT" GKE_CLUSTER="$GKE_CLUSTER" GKE_ZONE="$created_zone" \
-  GKE_TAG="$GKE_TAG" E2E_PROVISIONED=1 "$gate_script"
+  GKE_AR="$GKE_AR" GKE_TAG="$GKE_TAG" E2E_PROVISIONED=1 "$gate_script"
 
 log "GKE PROVISIONED E2E PASSED — ${GKE_E2E_GATE} gate succeeded on ${created_zone}"
