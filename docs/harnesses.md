@@ -33,6 +33,10 @@ required. Use `--harness-images=claude-code,codex` to restrict the set (faster
 iterative installs) or `--harness-images=none` to skip harness images
 entirely (a keyless/mock-only eval install).
 
+The installer reads `GITHUB_TOKEN`, `ANTHROPIC_API_KEY`, and `OPENAI_API_KEY`
+(or prompts without echo on an interactive terminal) and writes only the
+corresponding proxy Secrets. `--skip-credentials` disables this step.
+
 | Harness | Image (`build/`) | Model API route (proxy) | Secret → proxy env | `RunSpec.Model` → CLI flag |
 |---|---|---|---|---|
 | `mock` | `Dockerfile.runtime` (no CLI) | none — deterministic, keyless | none | ignored |

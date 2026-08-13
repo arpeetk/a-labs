@@ -15,6 +15,7 @@ The design behind this is [`docs/technical-spec.md`](docs/technical-spec.md)
 | `docker` (daemon running) | `wren install` builds the control-plane images + the harness images |
 | A **GitHub token** (PAT, or just `gh` logged in) | agents push branches + open PRs |
 | An **Anthropic API key** | the Claude agent does the work |
+| An **OpenAI API key** | the Codex agent does the work |
 | For GKE: `gcloud` + an Artifact Registry repo | cluster auth + image publishing |
 | The `wren` CLI | see [Getting the CLI](#getting-the-cli) |
 
@@ -25,10 +26,10 @@ confusion:
 
 1. **You → the cluster.** Your `kubectl` context (for GKE: `gcloud container
    clusters get-credentials`). Used once, by `wren install`.
-2. **Agents → GitHub + the model.** The GitHub token and Anthropic key, stored
-   as Kubernetes Secrets and read **only by the egress-proxy sidecar** — never
-   the agent container. The agent routes through the proxy, which injects them,
-   so a compromised agent never sees a raw credential.
+2. **Agents → GitHub + the model.** GitHub and model-provider credentials are
+   stored as Kubernetes Secrets and read **only by the egress-proxy sidecar** —
+   never the agent container. The agent routes through the proxy, which injects
+   them, so a compromised agent never sees a raw credential.
 3. **The control plane → the cluster.** The operator + apiserver run in-cluster
    (Deployments in `wren-system`) with their own ServiceAccounts (RBAC shipped
    in `config/`).
@@ -45,14 +46,14 @@ gcloud auth configure-docker us-central1-docker.pkg.dev
 # 3. install: preflight → apply CRDs/RBAC/Deployments → build+push linux/amd64
 #    control-plane images + harness images (claude-code, codex, opencode by
 #    default) → store credentials as proxy Secrets → wait for Ready
-GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
+GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... OPENAI_API_KEY=sk-... \
   wren install --registry us-central1-docker.pkg.dev/my-proj/wren
 ```
 
 `wren install` is idempotent — re-run it to rotate credentials or re-push
 images. Without the env vars it falls back to `gh auth token` and then asks
 interactively (input is never echoed); `--skip-credentials` installs keyless
-(mock harness works; claude-code runs and PRs need the Secrets).
+(mock harness works; model-backed runs and PRs need the relevant Secrets).
 
 By default `wren install` builds/pushes **all** harness images
 (`claude-code`, `codex`, `opencode`) so any of them is ready to use
@@ -88,7 +89,7 @@ eval — or a genuinely brand-new GCP project — `--create-cluster` provisions
 one for you in a single command, the cloud equivalent of `--kind`:
 
 ```sh
-GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
+GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... OPENAI_API_KEY=sk-... \
   wren install --create-cluster \
     --gcp-project my-proj \
     --registry us-central1-docker.pkg.dev/my-proj/wren
@@ -173,11 +174,10 @@ wren run create --project payments-api-codex --task "Add input validation to the
 
 Swap `codex`/`OPENAI_API_KEY` for `opencode` the same way (opencode rides the
 Anthropic route, so it reuses the same `wren-anthropic-key` Secret `wren
-install` already wrote — no extra credential needed). Codex/opencode are
-**not yet validated against the live providers** in CI — see
-[docs/harnesses.md](docs/harnesses.md) for what's tested (command
-construction, event parsing, credential wiring) versus what still needs a
-live-key smoke run.
+install` already wrote — no extra credential needed). Codex has been validated
+through Wren against the live Responses API; OpenCode still needs a
+live-provider smoke run. See [docs/harnesses.md](docs/harnesses.md) for the
+exact validation and recovery status.
 
 ## Checkpoint and restore (GCS; WS-18–WS-21)
 

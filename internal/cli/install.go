@@ -40,6 +40,9 @@ func newInstallCmd() *cobra.Command {
 			if opts.AnthropicKey == "" {
 				opts.AnthropicKey = os.Getenv("ANTHROPIC_API_KEY")
 			}
+			if opts.OpenAIKey == "" {
+				opts.OpenAIKey = os.Getenv("OPENAI_API_KEY")
+			}
 			in, err := install.New(installKubeContext(opts), cmd.OutOrStdout())
 			if err != nil {
 				return err
@@ -67,7 +70,7 @@ func newInstallCmd() *cobra.Command {
 	f.StringVar(&opts.SrcDir, "src", ".", "repo checkout to build images from")
 	f.StringVar(&opts.Expose, "expose", "", "expose the apiserver Service as this type (LoadBalancer) for team setups; default stays port-forward-only")
 	f.StringVar(&opts.RunNamespace, "run-namespace", "wren-runs", "namespace for the proxy credential Secrets; credentialed projects point their namespace here")
-	f.BoolVar(&opts.SkipCredentials, "skip-credentials", false, "do not collect GITHUB_TOKEN/ANTHROPIC_API_KEY (keyless eval)")
+	f.BoolVar(&opts.SkipCredentials, "skip-credentials", false, "do not collect GITHUB_TOKEN/ANTHROPIC_API_KEY/OPENAI_API_KEY (keyless eval)")
 	return cmd
 }
 

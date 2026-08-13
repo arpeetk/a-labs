@@ -282,6 +282,7 @@ func TestInstallCredentialsFromEnv(t *testing.T) {
 	opts.SkipCredentials = false
 	opts.GitHubToken = "ghp_supersecret"
 	opts.AnthropicKey = "sk-ant-supersecret"
+	opts.OpenAIKey = "sk-openai-supersecret"
 	// PromptSecret nil: env values must suffice with no prompt.
 	if err := in.Install(context.Background(), opts); err != nil {
 		t.Fatal(err)
@@ -292,8 +293,11 @@ func TestInstallCredentialsFromEnv(t *testing.T) {
 	if got := k.Secrets["wren-runs/"+AnthropicKeySecret]["key"]; got != "sk-ant-supersecret" {
 		t.Errorf("anthropic secret = %q", got)
 	}
+	if got := k.Secrets["wren-runs/"+OpenAIKeySecret]["key"]; got != "sk-openai-supersecret" {
+		t.Errorf("openai secret = %q", got)
+	}
 	// The whole point of the step: values never appear in the output.
-	if strings.Contains(out.String(), "ghp_supersecret") || strings.Contains(out.String(), "sk-ant-supersecret") {
+	if strings.Contains(out.String(), "ghp_supersecret") || strings.Contains(out.String(), "sk-ant-supersecret") || strings.Contains(out.String(), "sk-openai-supersecret") {
 		t.Errorf("credential value leaked into output:\n%s", out.String())
 	}
 }
@@ -324,11 +328,17 @@ func TestInstallCredentialsPrompt(t *testing.T) {
 	if err := in.Install(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	if prompts == 0 {
-		t.Error("expected the interactive prompt to be used")
+	if prompts != 3 {
+		t.Errorf("expected GitHub, Anthropic, and OpenAI prompts, got %d", prompts)
 	}
 	if got := k.Secrets["wren-runs/"+GitHubTokenSecret]["token"]; got != "from-prompt" {
 		t.Errorf("github token from prompt = %q", got)
+	}
+	if got := k.Secrets["wren-runs/"+AnthropicKeySecret]["key"]; got != "from-prompt" {
+		t.Errorf("anthropic key from prompt = %q", got)
+	}
+	if got := k.Secrets["wren-runs/"+OpenAIKeySecret]["key"]; got != "from-prompt" {
+		t.Errorf("openai key from prompt = %q", got)
 	}
 }
 

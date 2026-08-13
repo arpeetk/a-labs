@@ -89,7 +89,7 @@ a Ready wait in one idempotent step:
 
 ```sh
 # GKE: build + push linux/amd64 images to your registry, install in-cluster
-GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... \
+GITHUB_TOKEN=$(gh auth token) ANTHROPIC_API_KEY=sk-ant-... OPENAI_API_KEY=sk-... \
   wren install --registry us-central1-docker.pkg.dev/<proj>/wren
 
 # kind (local eval): build + kind load, zero credentials

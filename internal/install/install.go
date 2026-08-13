@@ -7,7 +7,7 @@
 // Onboarding is product surface (code standards rule 8): the flow lives here as
 // a first-class CLI command, not in hack/. The orchestration depends on two
 // seams — Kube (cluster operations) and Runner (local tools: docker/kind/gh) —
-// with real implementations in kube.go/run.go and fakes in fake.go.
+// with real implementations in kube.go/run.go and test fakes in fake_test.go.
 package install
 
 import (
@@ -33,11 +33,11 @@ const (
 	ApiserverDeployment = "wren-apiserver"
 	// ApiserverService is the control-plane front door (port-forward target).
 	ApiserverService = "wren-apiserver"
-	// GitHubTokenSecret / AnthropicKeySecret mirror the operator's
-	// --github-token-secret / --anthropic-key-secret defaults; the egress-proxy
-	// reads them in the run namespace (keys "token"/"key").
+	// Credential Secret names mirror the operator flag defaults; the
+	// egress-proxy reads them in the run namespace (keys "token"/"key").
 	GitHubTokenSecret  = "wren-github-token"
 	AnthropicKeySecret = "wren-anthropic-key"
+	OpenAIKeySecret    = "wren-openai-key"
 	GatewayTokenSecret = "wren-gateway-token"
 )
 
@@ -99,10 +99,11 @@ type Options struct {
 	// RunNamespace is where the proxy credential Secrets are created and where
 	// credentialed projects should point their `namespace` field.
 	RunNamespace string
-	// GitHubToken / AnthropicKey are pre-resolved credentials (env). When
-	// empty and a Prompter is available the installer asks interactively.
+	// Credentials are pre-resolved from the environment by the CLI. When empty
+	// and a Prompter is available the installer asks interactively.
 	GitHubToken  string
 	AnthropicKey string
+	OpenAIKey    string
 	// SkipCredentials turns the credential step off entirely (keyless eval).
 	SkipCredentials bool
 	// WaitTimeout bounds the wait for the control-plane Deployments.
@@ -243,27 +244,7 @@ type Installer struct {
 // credentials → wait → hand-off. Safe to re-run (idempotent throughout).
 func (in *Installer) Install(ctx context.Context, opts Options) error {
 	opts.defaults()
-	if opts.Registry != "" && opts.KindCluster != "" {
-		return errors.New("--registry and --kind are mutually exclusive")
-	}
-	if opts.CreateCluster {
-		if opts.KindCluster != "" {
-			return errors.New("--create-cluster and --kind are mutually exclusive (--create-cluster provisions a GKE cluster; --kind is local)")
-		}
-		if opts.GCPProject == "" {
-			return errors.New("--create-cluster requires --gcp-project <project>")
-		}
-		if opts.Registry == "" {
-			return errors.New("--create-cluster requires --registry <prefix> (the cluster is created, but images still need somewhere to push to)")
-		}
-	}
-	if opts.Registry == "" && opts.KindCluster == "" {
-		return errors.New("one of --registry (build + push images for a real cluster) or --kind (build + load into kind) is required")
-	}
-	if opts.Expose != "" && opts.Expose != "LoadBalancer" {
-		return fmt.Errorf("--expose must be LoadBalancer or empty, got %q", opts.Expose)
-	}
-	harnesses, err := resolveHarnessImages(opts.HarnessImages)
+	harnesses, err := validateInstallOptions(opts)
 	if err != nil {
 		return err
 	}
@@ -295,7 +276,7 @@ func (in *Installer) Install(ctx context.Context, opts Options) error {
 	}
 	// Make the install's run-namespace the apiserver's actual default, so a
 	// project registered with no --namespace lands runs where the credentials
-	// just went (WS-15 Part A) — not in a per-user namespace with no Secrets.
+	// just went — not in a per-user namespace with no Secrets.
 	if err := in.Kube.SetApiserverRunNamespace(ctx, opts.RunNamespace); err != nil {
 		return fmt.Errorf("set apiserver default run namespace: %w", err)
 	}
@@ -312,6 +293,30 @@ func (in *Installer) Install(ctx context.Context, opts Options) error {
 	}
 	st.handOff()
 	return nil
+}
+
+func validateInstallOptions(opts Options) ([]string, error) {
+	if opts.Registry != "" && opts.KindCluster != "" {
+		return nil, errors.New("--registry and --kind are mutually exclusive")
+	}
+	if opts.CreateCluster {
+		if opts.KindCluster != "" {
+			return nil, errors.New("--create-cluster and --kind are mutually exclusive (--create-cluster provisions a GKE cluster; --kind is local)")
+		}
+		if opts.GCPProject == "" {
+			return nil, errors.New("--create-cluster requires --gcp-project <project>")
+		}
+		if opts.Registry == "" {
+			return nil, errors.New("--create-cluster requires --registry <prefix> (the cluster is created, but images still need somewhere to push to)")
+		}
+	}
+	if opts.Registry == "" && opts.KindCluster == "" {
+		return nil, errors.New("one of --registry (build + push images for a real cluster) or --kind (build + load into kind) is required")
+	}
+	if opts.Expose != "" && opts.Expose != "LoadBalancer" {
+		return nil, fmt.Errorf("--expose must be LoadBalancer or empty, got %q", opts.Expose)
+	}
+	return resolveHarnessImages(opts.HarnessImages)
 }
 
 // Uninstall removes the install: the system + run namespaces and every

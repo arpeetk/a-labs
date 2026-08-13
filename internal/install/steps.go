@@ -194,17 +194,57 @@ func (s *steps) resolveTag(ctx context.Context) (string, error) {
 	return "dev", nil
 }
 
-// credentials collects the GitHub token + Anthropic key and stores them as the
-// Secrets the egress-proxy injects. Resolution order per credential: env (the
-// CLI fills Options) → `gh auth token` (GitHub only) → interactive prompt →
-// skip with a note. Values are only ever passed to the Secret write — never
-// logged, never echoed.
+// credentials collects provider credentials and stores them as the Secrets the
+// egress-proxy injects. Values are only passed to Secret writes—never logged.
 func (s *steps) credentials(ctx context.Context) error {
 	if s.opts.SkipCredentials {
 		s.logf("skipping credentials (--skip-credentials); runs will be keyless (mock harness / no PRs)")
 		return nil
 	}
-	gh := s.opts.GitHubToken
+	gh, err := s.resolveGitHubToken(ctx)
+	if err != nil {
+		return err
+	}
+	ak, err := s.resolveProviderKey(s.opts.AnthropicKey, "Anthropic API key (input hidden; Enter to skip)", "Anthropic API key")
+	if err != nil {
+		return err
+	}
+	openAI, err := s.resolveProviderKey(s.opts.OpenAIKey, "OpenAI API key (input hidden; Enter to skip)", "OpenAI API key")
+	if err != nil {
+		return err
+	}
+	if gh == "" && ak == "" && openAI == "" {
+		s.logf("no credentials provided — continuing keyless (mock harness works; model-backed runs and PRs need secrets)")
+		s.logf("  add them later with kubectl in namespace %s; see docs/harnesses.md", s.opts.RunNamespace)
+		return nil
+	}
+	if err := s.in.Kube.EnsureNamespace(ctx, s.opts.RunNamespace); err != nil {
+		return fmt.Errorf("ensure run namespace %s: %w", s.opts.RunNamespace, err)
+	}
+	credentials := []struct {
+		name  string
+		key   string
+		value string
+		label string
+	}{
+		{name: GitHubTokenSecret, key: "token", value: gh, label: "GitHub token"},
+		{name: AnthropicKeySecret, key: "key", value: ak, label: "Anthropic key"},
+		{name: OpenAIKeySecret, key: "key", value: openAI, label: "OpenAI key"},
+	}
+	for _, credential := range credentials {
+		if credential.value == "" {
+			continue
+		}
+		if err := s.in.Kube.UpsertSecret(ctx, s.opts.RunNamespace, credential.name, map[string]string{credential.key: credential.value}); err != nil {
+			return fmt.Errorf("write %s secret: %w", credential.name, err)
+		}
+		s.logf("stored %s in secret %s/%s (value never displayed)", credential.label, s.opts.RunNamespace, credential.name)
+	}
+	return nil
+}
+
+func (s *steps) resolveGitHubToken(ctx context.Context) (string, error) {
+	gh := strings.TrimSpace(s.opts.GitHubToken)
 	if gh == "" && s.in.Runner.LookPath("gh") {
 		if tok, err := s.in.Runner.Output(ctx, "gh", "auth", "token"); err == nil {
 			gh = strings.TrimSpace(tok)
@@ -213,41 +253,23 @@ func (s *steps) credentials(ctx context.Context) error {
 	if gh == "" && s.in.PromptSecret != nil {
 		tok, err := s.in.PromptSecret("GitHub token (PAT, repo scope — input hidden; Enter to skip)")
 		if err != nil {
-			return fmt.Errorf("read GitHub token: %w", err)
+			return "", fmt.Errorf("read GitHub token: %w", err)
 		}
 		gh = strings.TrimSpace(tok)
 	}
-	ak := s.opts.AnthropicKey
-	if ak == "" && s.in.PromptSecret != nil {
-		key, err := s.in.PromptSecret("Anthropic API key (input hidden; Enter to skip)")
+	return gh, nil
+}
+
+func (s *steps) resolveProviderKey(value, prompt, label string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" && s.in.PromptSecret != nil {
+		key, err := s.in.PromptSecret(prompt)
 		if err != nil {
-			return fmt.Errorf("read Anthropic API key: %w", err)
+			return "", fmt.Errorf("read %s: %w", label, err)
 		}
-		ak = strings.TrimSpace(key)
+		value = strings.TrimSpace(key)
 	}
-	if gh == "" && ak == "" {
-		s.logf("no credentials provided — continuing keyless (mock harness works; claude-code runs and PRs need secrets)")
-		s.logf("  add them later: kubectl -n %s create secret generic %s --from-literal=token=…", s.opts.RunNamespace, GitHubTokenSecret)
-		return nil
-	}
-	// The proxy reads these Secrets in the run's namespace, so they live in the
-	// install's RunNamespace; credentialed projects point their namespace there.
-	if err := s.in.Kube.EnsureNamespace(ctx, s.opts.RunNamespace); err != nil {
-		return fmt.Errorf("ensure run namespace %s: %w", s.opts.RunNamespace, err)
-	}
-	if gh != "" {
-		if err := s.in.Kube.UpsertSecret(ctx, s.opts.RunNamespace, GitHubTokenSecret, map[string]string{"token": gh}); err != nil {
-			return fmt.Errorf("write %s secret: %w", GitHubTokenSecret, err)
-		}
-		s.logf("stored GitHub token in secret %s/%s (value never displayed)", s.opts.RunNamespace, GitHubTokenSecret)
-	}
-	if ak != "" {
-		if err := s.in.Kube.UpsertSecret(ctx, s.opts.RunNamespace, AnthropicKeySecret, map[string]string{"key": ak}); err != nil {
-			return fmt.Errorf("write %s secret: %w", AnthropicKeySecret, err)
-		}
-		s.logf("stored Anthropic key in secret %s/%s (value never displayed)", s.opts.RunNamespace, AnthropicKeySecret)
-	}
-	return nil
+	return value, nil
 }
 
 // handOff prints the engineer-facing next steps: reach the control plane, log
