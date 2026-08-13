@@ -21,72 +21,8 @@ func Archive(dst io.Writer, srcDir string) error {
 	gz := gzip.NewWriter(dst)
 	tw := tar.NewWriter(gz)
 
-	err := filepath.WalkDir(srcDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(srcDir, p)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			target, err := os.Readlink(p)
-			if err != nil {
-				return fmt.Errorf("blob: archive read symlink %q: %w", rel, err)
-			}
-			// Archive and Unarchive must accept the same link set. Tooling such as
-			// Codex creates disposable absolute links to binaries outside the
-			// workspace; retaining one makes an otherwise valid checkpoint
-			// impossible to restore, while following it would cross the trust
-			// boundary described above.
-			if err := validateArchiveSymlink(rel, target); err != nil {
-				return nil
-			}
-			hdr, err := tar.FileInfoHeader(info, target)
-			if err != nil {
-				return fmt.Errorf("blob: archive symlink header for %q: %w", rel, err)
-			}
-			hdr.Name = filepath.ToSlash(rel)
-			if err := tw.WriteHeader(hdr); err != nil {
-				return fmt.Errorf("blob: archive write symlink header for %q: %w", rel, err)
-			}
-			return nil
-		}
-		hdr, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return fmt.Errorf("blob: archive header for %q: %w", rel, err)
-		}
-		hdr.Name = filepath.ToSlash(rel)
-		if info.IsDir() {
-			hdr.Name += "/"
-		}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return fmt.Errorf("blob: archive write header for %q: %w", rel, err)
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		f, err := os.Open(p)
-		if err != nil {
-			return fmt.Errorf("blob: archive open %q: %w", rel, err)
-		}
-		if _, err := io.Copy(tw, f); err != nil {
-			_ = f.Close()
-			return fmt.Errorf("blob: archive copy %q: %w", rel, err)
-		}
-		if err := f.Close(); err != nil {
-			return fmt.Errorf("blob: archive close %q: %w", rel, err)
-		}
-		return nil
-	})
-	if err != nil {
+	writer := archiveWriter{root: srcDir, tar: tw}
+	if err := filepath.WalkDir(srcDir, writer.writeEntry); err != nil {
 		return err
 	}
 	if err := tw.Close(); err != nil {
@@ -94,6 +30,79 @@ func Archive(dst io.Writer, srcDir string) error {
 	}
 	if err := gz.Close(); err != nil {
 		return fmt.Errorf("blob: close gzip writer: %w", err)
+	}
+	return nil
+}
+
+type archiveWriter struct {
+	root string
+	tar  *tar.Writer
+}
+
+func (w archiveWriter) writeEntry(path string, entry fs.DirEntry, walkErr error) error {
+	if walkErr != nil {
+		return walkErr
+	}
+	rel, err := filepath.Rel(w.root, path)
+	if err != nil || rel == "." {
+		return err
+	}
+	info, err := entry.Info()
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return w.writeSymlink(path, rel, info)
+	}
+	if err := w.writeHeader(rel, info, ""); err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	return w.writeFile(path, rel)
+}
+
+func (w archiveWriter) writeSymlink(path, rel string, info fs.FileInfo) error {
+	target, err := os.Readlink(path)
+	if err != nil {
+		return fmt.Errorf("blob: archive read symlink %q: %w", rel, err)
+	}
+	// Tooling may create disposable absolute links outside the workspace. Skip
+	// links that cannot safely be restored; never follow them across the trusted
+	// checkpointer boundary.
+	if err := validateArchiveSymlink(rel, target); err != nil {
+		return nil
+	}
+	return w.writeHeader(rel, info, target)
+}
+
+func (w archiveWriter) writeHeader(rel string, info fs.FileInfo, link string) error {
+	hdr, err := tar.FileInfoHeader(info, link)
+	if err != nil {
+		return fmt.Errorf("blob: archive header for %q: %w", rel, err)
+	}
+	hdr.Name = filepath.ToSlash(rel)
+	if info.IsDir() {
+		hdr.Name += "/"
+	}
+	if err := w.tar.WriteHeader(hdr); err != nil {
+		return fmt.Errorf("blob: archive write header for %q: %w", rel, err)
+	}
+	return nil
+}
+
+func (w archiveWriter) writeFile(path, rel string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("blob: archive open %q: %w", rel, err)
+	}
+	if _, err := io.Copy(w.tar, f); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("blob: archive copy %q: %w", rel, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("blob: archive close %q: %w", rel, err)
 	}
 	return nil
 }
@@ -123,37 +132,42 @@ func Unarchive(src io.Reader, destDir string) error {
 		if err != nil {
 			return fmt.Errorf("blob: unarchive tar read: %w", err)
 		}
-		target, err := resolveArchivePath(hdr.Name)
-		if err != nil {
+		if err := extractArchiveEntry(root, hdr, tr); err != nil {
 			return err
 		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := root.MkdirAll(target, 0o755); err != nil {
-				return fmt.Errorf("blob: unarchive mkdir %q: %w", hdr.Name, err)
-			}
-		case tar.TypeReg:
-			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return fmt.Errorf("blob: unarchive mkdir parent of %q: %w", hdr.Name, err)
-			}
-			if err := writeArchiveFile(root, target, hdr, tr); err != nil {
-				return err
-			}
-		case tar.TypeSymlink:
-			if err := validateArchiveSymlink(target, hdr.Linkname); err != nil {
-				return fmt.Errorf("blob: unarchive symlink %q: %w", hdr.Name, err)
-			}
-			if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return fmt.Errorf("blob: unarchive mkdir parent of symlink %q: %w", hdr.Name, err)
-			}
-			if err := root.Symlink(hdr.Linkname, target); err != nil {
-				return fmt.Errorf("blob: unarchive create symlink %q: %w", hdr.Name, err)
-			}
-		default:
-			// Anything else (hard links, devices, ...) is not expected in a
-			// workspace archive; skip rather than fail the whole restore.
-		}
 	}
+}
+
+func extractArchiveEntry(root *os.Root, hdr *tar.Header, tr io.Reader) error {
+	target, err := resolveArchivePath(hdr.Name)
+	if err != nil {
+		return err
+	}
+	switch hdr.Typeflag {
+	case tar.TypeDir:
+		if err := root.MkdirAll(target, 0o755); err != nil {
+			return fmt.Errorf("blob: unarchive mkdir %q: %w", hdr.Name, err)
+		}
+	case tar.TypeReg:
+		if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("blob: unarchive mkdir parent of %q: %w", hdr.Name, err)
+		}
+		return writeArchiveFile(root, target, hdr, tr)
+	case tar.TypeSymlink:
+		if err := validateArchiveSymlink(target, hdr.Linkname); err != nil {
+			return fmt.Errorf("blob: unarchive symlink %q: %w", hdr.Name, err)
+		}
+		if err := root.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return fmt.Errorf("blob: unarchive mkdir parent of symlink %q: %w", hdr.Name, err)
+		}
+		if err := root.Symlink(hdr.Linkname, target); err != nil {
+			return fmt.Errorf("blob: unarchive create symlink %q: %w", hdr.Name, err)
+		}
+	default:
+		// Hard links, devices, and other special entries are not valid
+		// workspace content. Ignore them without creating anything.
+	}
+	return nil
 }
 
 // validateArchiveSymlink accepts only relative links whose cleaned destination
