@@ -173,7 +173,7 @@ func TestFinalizeHarnessCreatedCommit(t *testing.T) {
 // before the push: the run branch (with its commit) already exists on the
 // durable workspace. The resume's finalize must not fail "branch already
 // exists" and must not mistake the committed state for a no-change run — it
-// pushes the branch and opens the PR (WS-11).
+// pushes the branch and opens the PR.
 func TestFinalizeResumeAfterCommit(t *testing.T) {
 	origin := makeOrigin(t)
 	ws := cloneInto(t, origin)
@@ -315,7 +315,7 @@ func TestFinalizeMissingRequestedBaseDoesNotPublish(t *testing.T) {
 
 // TestFinalizeRetryableOpenPRError: a transient OpenPR failure (GitHub 502)
 // surfaces as ErrRetryable so podruntime can exit ExitRetryable; a permanent
-// one (422) does not (WS-11).
+// one (422) does not.
 func TestFinalizeRetryableOpenPRError(t *testing.T) {
 	newSpec := func(t *testing.T) runspec.RunSpec {
 		t.Helper()

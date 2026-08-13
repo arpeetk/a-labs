@@ -11,7 +11,7 @@ import (
 )
 
 // newProjectCreateCmd registers a repo (or a repo-less keyless project) against
-// the control plane — the real POST /v1/projects (WS-13; was a placeholder).
+// the control plane through POST /v1/projects.
 func newProjectCreateCmd() *cobra.Command {
 	var p client.Project
 	cmd := &cobra.Command{

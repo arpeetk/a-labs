@@ -157,7 +157,7 @@ func TestRunHarnessOpensPR(t *testing.T) {
 	}
 }
 
-// TestRunHarnessFinalizeRetryClassification drives the WS-11 contract at the
+// TestRunHarnessFinalizeRetryClassification drives the retry contract at the
 // pod boundary: a transient finalize failure (GitHub 5xx, a dropped
 // connection) comes out of RunHarness as ErrRetryable — cmd/wren-runtime exits
 // runspec.ExitRetryable and the operator resumes on a fresh pod — while a

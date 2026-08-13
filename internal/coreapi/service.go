@@ -1,5 +1,5 @@
 // Package coreapi is the control plane's business logic: the Projects and Runs
-// services (spec §5.2). It validates requests, resolves effective run config
+// services. It validates requests, resolves effective run configuration
 // (project defaults ⊕ request overrides), maps a submission onto an AgentRun
 // custom resource, and mirrors CR status back into the store.
 package coreapi
@@ -48,14 +48,14 @@ type Defaults struct {
 	// registered without an explicit --namespace. `wren install` sets it (via
 	// the apiserver's WREN_DEFAULT_RUN_NAMESPACE env) to its --run-namespace, so
 	// the common single-shared-namespace case lands runs where install wrote the
-	// credential Secrets. Empty falls back to NamespacePrefix (WS-15 Part A).
+	// credential Secrets. Empty falls back to NamespacePrefix.
 	DefaultNamespace string
 	NamespacePrefix  string // e.g. "user-" → namespace "user-<sanitized-user>"
 	// GitHubTokenSecret / AnthropicKeySecret / OpenAIKeySecret name the proxy
 	// credential Secrets the run's namespace must hold before a pod is worth
 	// scheduling. They mirror the operator's --github-token-secret /
 	// --anthropic-key-secret / --openai-key-secret defaults; the pre-flight
-	// credential check (WS-15 Part A) reads them.
+	// credential check reads them.
 	GitHubTokenSecret  string
 	AnthropicKeySecret string
 	OpenAIKeySecret    string
@@ -203,7 +203,7 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (*store.R
 		return nil, fmt.Errorf("%w: user is required", ErrValidation)
 	}
 	if req.BaseRef == "" {
-		req.BaseRef = "main" // M0: PR base defaults to main
+		req.BaseRef = "main" // PR base defaults to main when the project omits it.
 	}
 
 	proj, err := s.store.GetProject(ctx, req.Project)
@@ -216,7 +216,7 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (*store.R
 	// Fail loud, not silent: a run resolved to a namespace missing the harness's
 	// credential Secret would otherwise start a pod that gets no credential
 	// injected (the egress-proxy mounts them Optional) and fail minutes later,
-	// far from the real cause (WS-15 Part A).
+	// far from the real cause.
 	if err := s.checkCredentials(ctx, req, eff); err != nil {
 		return nil, err
 	}
@@ -307,7 +307,7 @@ func (s *Service) GetRun(ctx context.Context, id string) (*store.Run, error) {
 // DeleteRun removes a run entirely: its AgentRun CR (whose owner references
 // cascade the pod/PVC/ConfigMap cleanup) and its store record. The store record
 // must exist (ErrNotFound otherwise); a CR already gone is tolerated by the
-// launcher (`wren run rm`, WS-15 Part C).
+// launcher (`wren run rm`).
 func (s *Service) DeleteRun(ctx context.Context, id string) error {
 	rec, err := s.store.GetRun(ctx, id)
 	if err != nil {
@@ -322,7 +322,7 @@ func (s *Service) DeleteRun(ctx context.Context, id string) error {
 // StopRun cancels a run without deleting it: it asks the operator (via the
 // cancel annotation) to delete the pod and drive the run to Canceled — a
 // terminal state the reconciler does NOT auto-resume, unlike a crash. The store
-// record is kept (the run stays visible in `wren run list/get`). WS-15 Part C.
+// record is kept, so the run stays visible in `wren run list/get`.
 func (s *Service) StopRun(ctx context.Context, id string) error {
 	rec, err := s.store.GetRun(ctx, id)
 	if err != nil {
@@ -398,14 +398,11 @@ func (s *Service) ResumeRun(ctx context.Context, id string) error {
 
 // ListRuns returns runs for a scope, optionally narrowed to one project.
 // scope "mine" filters to user; "all"/"team" return everything (team RBAC
-// narrowing lands in M1).
+// narrowing is not implemented).
 //
-// Before reading, it syncs the store from the live AgentRun CRs via
-// ReconcileFromCluster (WS-20) — the same merge ReconcileFromCluster already
-// does once at apiserver boot (WS-3), just re-run on every list instead of
-// only at startup. This is one bulk List of CRs, not a per-run read, so it
-// doesn't turn into N+1: reusing that path is what fixes fleet-visibility
-// staleness without adding a new read pattern. Best-effort: a sync error
+// Before reading, it syncs the store from live AgentRun CRs through the same
+// bulk reconciliation used at apiserver boot. This avoids an N+1 read pattern
+// while keeping fleet results current. Best-effort: a sync error
 // doesn't fail the list — callers get the store's last-known state rather
 // than an error for what is fundamentally a read endpoint.
 func (s *Service) ListRuns(ctx context.Context, scope, user, project string) ([]*store.Run, error) {
@@ -423,8 +420,8 @@ func (s *Service) ListRuns(ctx context.Context, scope, user, project string) ([]
 // ReconcileFromCluster re-learns in-flight runs from the AgentRun CRs into the
 // store at apiserver boot. The CR is the source of truth for run status, so a
 // restarted apiserver (especially one backed by a store it just migrated to)
-// re-derives its worklist here instead of forgetting runs (implementation-plan
-// §WS-3). It upserts every CR's store row and returns the number reconciled;
+// re-derives its worklist here instead of forgetting runs. It upserts every
+// CR's store row and returns the number reconciled;
 // individual failures are logged by the caller via the returned error slice.
 func (s *Service) ReconcileFromCluster(ctx context.Context) (int, error) {
 	crs, err := s.launcher.ListRuns(ctx)
@@ -579,7 +576,7 @@ type effectiveConfig struct {
 
 func (s *Service) resolve(p *store.Project, req CreateRunRequest) effectiveConfig {
 	// Namespace resolution: an explicit per-project --namespace wins (multi-tenant
-	// isolation), then the install-configured shared default (WS-15 Part A), then
+	// isolation), then the install-configured shared default, then
 	// the per-user prefix fallback for installs that set neither.
 	ns := firstNonEmpty(p.Namespace, s.defaults.DefaultNamespace, s.defaults.NamespacePrefix+sanitizeLabel(req.User))
 	return effectiveConfig{
@@ -633,7 +630,7 @@ func (s *Service) requiredSecrets(eff effectiveConfig) []secretNeed {
 
 // checkCredentials rejects a submission whose resolved namespace is missing a
 // Secret the run needs, turning a silent multi-minute downstream failure into an
-// immediate, actionable 400 (WS-15 Part A). It is best-effort: a transient API
+// immediate, actionable validation response. It is best-effort: a transient API
 // error checking a Secret does not block the run (the pod path still has the
 // egress-proxy's Optional-secret behavior as a backstop).
 func (s *Service) checkCredentials(ctx context.Context, req CreateRunRequest, eff effectiveConfig) error {

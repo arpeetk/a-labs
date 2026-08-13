@@ -26,11 +26,10 @@ const logScrapeTailLines = 10000
 // implementation keeps a typed clientset — the same split as
 // internal/launcher's K8s.
 //
-// This is the v0.1 run-results channel (WS-11): the pod holds no SA token by
-// design, so the runner cannot write its own status; the operator scrapes the
-// harness container's event stream instead. It adds no credentials, endpoints,
-// or attack surface. The gateway event bridge (spec §5.4) remains the v0.2
-// target — the event schema does not change, so the swap is internal.
+// The pod holds no service-account token by design, so the runner cannot write
+// its own status. The gateway durably forwards the event stream, while this log
+// reader remains the operator's terminal-state safety net. It adds no runner
+// credentials or control-plane endpoint.
 type LogReader interface {
 	ReadLogs(ctx context.Context, namespace, pod, container string, tailLines int64) (io.ReadCloser, error)
 }
@@ -96,8 +95,8 @@ func (r *AgentRunReconciler) scrapeCheckpointStatus(ctx context.Context, run *wr
 
 // parseResultEvents scans newline-delimited harness events (the schema in
 // internal/harness/event.go) out of a container log stream and extracts the
-// run's results. The LAST pr_ready and token_usage win — v0.1 records terminal
-// values only; mid-run usage increments are superseded by the final one.
+// run's results. The LAST pr_ready and token_usage win because status records
+// terminal values only; mid-run usage increments are superseded by the final one.
 // Non-JSON lines (cmd/wren-runtime's own log.Printf shares the stream) are
 // tolerated, as are blank lines.
 func parseResultEvents(r io.Reader) resultEvents {

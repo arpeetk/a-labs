@@ -29,7 +29,7 @@ spec:
         # Default run namespace for projects registered without an explicit
         # --namespace. It matches the install's default --run-namespace (where
         # `wren install` writes the proxy credential Secrets); `wren install`
-        # patches this to a custom --run-namespace (WS-15 Part A).
+        # patches this to a custom --run-namespace.
         - name: WREN_DEFAULT_RUN_NAMESPACE
           value: wren-runs
         - name: WREN_GATEWAY_TOKEN
@@ -66,9 +66,9 @@ metadata:
   labels:
     app.kubernetes.io/name: wren-apiserver
 spec:
-  # ClusterIP by default: reach it with `kubectl port-forward` (M0). The apiserver
-  # has only the X-Wren-User stand-in for auth, so do NOT expose it publicly until
-  # OIDC lands (M1). For a trusted network, switch to type: LoadBalancer.
+  # ClusterIP by default: reach it with `kubectl port-forward`. The apiserver
+  # trusts X-Wren-User, so do NOT expose it publicly. Put an authenticated
+  # gateway in front, or use LoadBalancer only on a trusted network.
   type: ClusterIP
   selector:
     app.kubernetes.io/name: wren-apiserver

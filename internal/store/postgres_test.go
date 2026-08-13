@@ -20,9 +20,8 @@ import (
 //   - otherwise → spin an ephemeral postgres via testcontainers-go (needs
 //     Docker). Zero setup, hermetic, self-cleaning.
 //
-// If neither a DSN nor Docker is available the test SKIPS with a clear message
-// — the suite never fails for lack of infrastructure (implementation-plan
-// §WS-3).
+// If neither a DSN nor Docker is available the test skips with a clear message;
+// the suite never fails merely because local infrastructure is absent.
 func TestPostgresConformance(t *testing.T) {
 	dsn := resolvePostgresDSN(t)
 

@@ -271,7 +271,7 @@ func TestReconcileResumePausedPreservesRetryBudgetAndAdvancesOnce(t *testing.T) 
 	}
 }
 
-// TestReconcileWorkspacePVCLostFailsDeterministically is WS-16 A.4: once a run
+// TestReconcileWorkspacePVCLostFailsDeterministically verifies that once a run
 // has progressed past Pending (meaning its workspace PVC was already created
 // once), a PVC that later comes back NotFound is a disk-destroying loss — not
 // this run's first-ever provisioning — and must fail the run with a clear
@@ -356,11 +356,11 @@ func TestReconcileWorkspaceLostDeletesAlreadyCreatedReplacementPod(t *testing.T)
 	}
 }
 
-// TestReconcileWorkspaceRestore_FullFlow is the WS-21 recovery path: a run
+// TestReconcileWorkspaceRestore_FullFlow covers the complete recovery path: a run
 // that HAS opted into checkpointing (CheckpointGCSMount + a bucket) survives a
 // lost workspace PVC by recreating it and telling hydrate to restore, instead
 // of failing outright like TestReconcileWorkspacePVCLostFailsDeterministically.
-// Exercises DoD items (b)-(e) as one continuous flow.
+// It exercises checkpoint discovery through restored execution as one flow.
 func TestReconcileWorkspaceRestore_FullFlow(t *testing.T) {
 	run := testRun() // bucket already set (gs://wren-ckpt)
 	r, c := newReconciler(t, run)
@@ -446,7 +446,7 @@ func TestReconcileWorkspaceRestore_FullFlow(t *testing.T) {
 	}
 }
 
-// TestReconcileOrdinaryCrashResume_DoesNotReTriggerRestore is DoD item (f): a
+// TestReconcileOrdinaryCrashResume_DoesNotReTriggerRestore verifies that a
 // later, ordinary pod crash (the PVC stays intact — a harness OOM, say) on a
 // checkpointing-enabled run must resume exactly like any other crash, WITHOUT
 // re-triggering a checkpoint restore into a workspace that's still there.
@@ -497,7 +497,7 @@ func TestReconcileOrdinaryCrashResume_DoesNotReTriggerRestore(t *testing.T) {
 	}
 }
 
-// TestReconcileCancelStopsRun is WS-15 Part C: the cancel annotation deletes the
+// TestReconcileCancelStopsRun verifies that the cancel annotation deletes the
 // current pod and drives the run to Canceled (terminal — not auto-resumed).
 func TestReconcileCancelStopsRun(t *testing.T) {
 	run := testRun()

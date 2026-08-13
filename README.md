@@ -18,8 +18,8 @@ ever holding a credential.
 
 ## What works today
 
-The core of milestone **M0 — submit a task, get a pull request** — is complete and
-**validated end-to-end on both a local `kind` cluster and real GKE**:
+The task-to-pull-request path is complete and validated end to end on both a
+local `kind` cluster and real GKE:
 
 ```
 $ wren run create --project payments-api \
@@ -42,7 +42,7 @@ checkpoint mount, atomic checksummed workspace snapshots also allow recovery
 after the PVC is destroyed. A running agent can be safely paused only after a
 forced snapshot is verified and recorded; its pod is then removed until resume.
 Without a checkpoint mount, destructive PVC loss ends cleanly as `Failed` with
-diagnostics (spec §5.5).
+diagnostics (spec: checkpoint storage and recovery).
 
 ## How a run flows
 
@@ -58,15 +58,15 @@ flowchart LR
 The **credential boundary** is the heart of the security model: the agent
 (untrusted, running model-generated code) routes all network access through the
 in-pod **egress-proxy**, which enforces a domain allowlist and injects the
-GitHub/Anthropic credentials on the way out. See the full sequence diagram and
-threat model in the [spec](docs/technical-spec.md#25-end-to-end-workflow-journey-a).
+GitHub and model-provider credentials on the way out. See the security design
+in the [technical specification](docs/technical-spec.md#8-egress-and-credentials).
 
 ## Using Wren (engineer)
 
 ```sh
-wren login --control-plane wren.corp.internal --user you   # SSO lands in M1
+wren login --control-plane wren.corp.internal --user you   # trusted-header identity today
 wren run create --project payments-api --task "Fix the flaky retry in checkout"
-wren run get    r-9d4c09a          # phase, PR url, restart count (token/cost usage reporting is roadmap, M1)
+wren run get    r-9d4c09a          # phase, PR URL, restart count
 wren run list   --scope mine        # table by default; --project/--phase filter, --watch keeps it live
 wren run logs   r-9d4c09a -f        # tail the agent's live logs (--container to pick a sidecar)
 wren run pause  r-9d4c09a          # quiesce, verify a durable checkpoint, remove compute
@@ -77,9 +77,9 @@ wren fleet                          # every run across every project, at a glanc
 ```
 
 Each run is attributable, resumable, and produces a reviewable PR — not a mystery
-diff. Interactive steering and token/cost usage reporting are roadmap items
-(M1–M2) — the CLI doesn't ship them as stub commands in the meantime, see
-[`SETUP.md`](SETUP.md#later-milestones-not-yet-built).
+diff. Interactive steering and token/cost usage reporting are roadmap items.
+The CLI doesn't ship them as stub commands in the meantime; see the
+[roadmap](docs/roadmap.md).
 
 ## Installing Wren (admin / handover)
 
@@ -132,26 +132,19 @@ Engineers then port-forward, `wren login`, `wren project create`,
 Full architecture, domain model, lifecycle state machine, security/threat model,
 and module map: [`docs/technical-spec.md`](docs/technical-spec.md).
 
-## Status (built vs. designed)
+## Current capabilities
 
-The spec (§1–§9) describes the **target** design; M0 is the first working slice.
+The [technical specification](docs/technical-spec.md) describes the current
+implementation. Intentional gaps live in the [roadmap](docs/roadmap.md).
 
-| Area | M0 (as built) | Target |
+| Area | Shipped | Remaining |
 |---|---|---|
-| Task → PR (Journey A) | ✅ real Claude agent → PR, on kind **and** GKE | same |
-| Onboarding | ✅ one command (`wren install --kind`/`--registry`/`--create-cluster`) builds+delivers all 6 images, optionally provisions the GKE Standard cluster itself, deploys the control plane, and hands off a **minimal** `wren project create`/`wren run create` — install-configured namespace closes a silent credential footgun; a stuck image pull gets diagnosed with the exact fix, not a dead end; zero placeholder CLI commands ([SETUP.md](SETUP.md)) | same |
-| Harnesses | ✅ `claude-code` (proven e2e) + `mock` (keyless gate); `codex` + `opencode` adapters, images, and the `/openai/` egress route built — **not yet run against live providers** ([docs/harnesses.md](docs/harnesses.md)) | + BYO conformance suite |
-| Recovery + pause | ✅ infra crashes resume via PVC reattach; mounted checkpoints use manifest-last atomic publication, SHA-256 read-back verification, bounded retention and corruption fallback; pause/resume pins an exact verified checkpoint and removes compute; status is visible in CLI/desktop/Postgres | + incremental/git-aware snapshots, transcript mirroring, graceful shutdown flush |
-| Egress-proxy | ✅ injects creds (github.com, api.github.com, api.anthropic.com, api.openai.com) + allowlist; runner holds no secret; **bypass enforced** (iptables uid-lockdown + per-run canary; `--egress-enforcement=off` escape hatch with `config/netpol/` FQDN policies) + a DNS-rebinding-closed CONNECT path — **verified on real GKE Standard**, not just kind | — |
-| Control plane | ✅ crash-safe launch outbox + immutable event journal; HA Postgres/Cloud SQL deployment shape in `config/production-gcp`; process-replacement chaos gate | managed Cloud SQL provisioning + Ingress/OIDC front-door |
-| GitHub creds | ✅ PAT in the proxy secret | per-run **GitHub App** tokens |
-| API transport | HTTP/JSON | gRPC + Connect |
-| Store | ✅ in-memory (default, dev) **or** Postgres with atomic run+launch intent, leased replay, serialized HA migrations, and deduplicated run events | managed Cloud SQL lifecycle (instance/database/IAM provisioning) |
-| Auth | `X-Wren-User` header | OIDC / SSO |
-| Isolation | hardened `runc` pods | + gVisor/Kata (deferred, M4) |
-
-Next up: per-run **GitHub App** tokens,
-incremental snapshots, and transcript continuity for every harness.
+| Task → PR | Claude Code and Codex live-provider paths; deterministic mock gate | OpenCode live-provider validation and BYO conformance suite |
+| Installation | kind, existing Kubernetes, and optional GKE Standard provisioning | managed database lifecycle and GitOps packaging |
+| Recovery | PVC crash resume; verified checkpoints; exact pause/resume; bounded retention | incremental snapshots, transcript continuity, termination flush |
+| Egress | credential-injecting proxy, uid lockdown, startup canary, DNS-rebinding defense | stronger kernel isolation and short-lived GitHub credentials |
+| Control plane | memory or Postgres store, transactional launch outbox, durable events, HA deployment overlay | OIDC/SSO and managed Cloud SQL provisioning |
+| Interfaces | working CLI and native desktop app over HTTP/JSON | attach/steer, policy views, and a versioned Connect/gRPC API |
 
 ## Repository layout
 
@@ -162,6 +155,7 @@ cmd/
   wren-apiserver/     control-plane HTTP API
   wren-operator/      Kubernetes operator (controller-runtime manager)
   wren-runtime/       multi-call in-pod binary (harness + sidecars)
+  wren-desktop/       Wails native app and React frontend
 internal/
   cli/ client/ config/     CLI command tree, HTTP client, local config
   install/                  wren install/uninstall (embedded config/default render)
@@ -173,10 +167,11 @@ internal/
   blob/                     checkpoint Store + mounted implementation + safe archive/restore
   github/ gitwork/ finalize/  GitHub PR client, go-git ops, commit→push→PR
   runspec/                  the RunSpec contract handed to each harness
+  desktop/                  native app backend and control-plane binding
 build/                Dockerfiles (runtime, claude-code, codex, opencode, generic gobin)
 config/               kustomize manifests (crd, rbac, manager) + samples
 hack/                 dev/test tooling only (e2e gates) — onboarding lives in the CLI
-docs/                 technical specification
+docs/                 architecture, operations, verification, and standards
 ```
 
 ## Build, test, run
@@ -193,13 +188,12 @@ make build-desktop    # -> native Wren desktop app (Wails v2 + npm)
 
 make test             # unit tests (fake k8s client, httptest, local git repos)
 make cover            # per-package coverage
-make vet fmt tidy
+make vet
 make manifests generate   # regenerate CRD/RBAC YAML + DeepCopy from code
 ```
 
 The native fleet/run/project management app lives in `cmd/wren-desktop`; see
 [`docs/desktop.md`](docs/desktop.md) for its current surface and development loop.
 
-For a full local end-to-end (kind + operator + apiserver + a real task), see the
-recipe in [`AGENTS.md`](AGENTS.md#7-local-end-to-end-on-kind) and
-[`SETUP.md`](SETUP.md).
+For local and cloud end-to-end gates, see
+[`docs/verification.md`](docs/verification.md).

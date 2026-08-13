@@ -197,7 +197,7 @@ func TestReverseRouteScrubsInboundCreds(t *testing.T) {
 	}
 }
 
-// The /openai/ route (WS-12, Codex) must behave like every credentialed
+// The /openai/ Codex route must behave like every credentialed
 // reverse route: the proxy injects the Bearer key AND scrubs any credential
 // the untrusted runner tried to smuggle upstream.
 func TestOpenAIRouteInjectsBearerAndScrubs(t *testing.T) {
@@ -350,7 +350,7 @@ func TestNoMatchingRoute(t *testing.T) {
 	}
 }
 
-// --- WS-1: proxy tightening ---
+// --- Proxy hardening ---
 
 func TestConnectPortRestrictedTo443(t *testing.T) {
 	// Host is allowed, but the port is not 443 → forbidden (no arbitrary-port
@@ -364,7 +364,7 @@ func TestConnectPortRestrictedTo443(t *testing.T) {
 	}
 }
 
-// TestConnectResolvesOnceAgainstRebinding proves the WS-16 A.3 fix: the proxy
+// TestConnectResolvesOnceAgainstRebinding proves the DNS-rebinding defense: the proxy
 // resolves an allowlisted CONNECT hostname exactly ONCE and dials that
 // resolved IP literal — it never re-resolves at connect time. That single-
 // resolution property is what defeats DNS rebinding: an attacker who controls

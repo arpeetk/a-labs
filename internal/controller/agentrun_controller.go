@@ -37,9 +37,9 @@ type AgentRunReconciler struct {
 	// PodConfig is the operator-level pod configuration (images, credential
 	// Secrets injected into the egress-proxy, egress port).
 	PodConfig PodConfig
-	// Logs reads pod container logs (pods/log). It backs the v0.1 run-results
+	// Logs reads pod container logs (pods/log). It backs the terminal run-results
 	// channel: terminal harness events are scraped into Status.PR/Usage/
-	// SessionID (WS-11). Nil disables the scrape (tests, bring-up).
+	// SessionID. Nil disables the scrape (tests, bring-up).
 	Logs LogReader
 	// Executor backs the pause critical section (quiesce/checkpoint/unquiesce).
 	// A nil executor makes pause fail safely without deleting the live pod.
@@ -167,7 +167,7 @@ func (r *AgentRunReconciler) ensurePrerequisites(ctx context.Context, run *wrenv
 }
 
 // egressEnforcementConditionType is the condition type recording the egress
-// bypass-prevention posture (spec §5.6, WS-1).
+// bypass-prevention posture (spec: egress and security).
 const egressEnforcementConditionType = "EgressEnforcement"
 const checkpointStorageConditionType = "CheckpointStorage"
 
@@ -231,9 +231,8 @@ func findCondition(run *wrenv1.AgentRun, condType string) *metav1.Condition {
 // standards rule #4: sentinels, mapped deliberately at the boundary).
 var errWorkspaceLost = errors.New("workspace PVC lost after provisioning")
 
-// errWorkspaceRestoring is ensurePVC's sentinel for the same disk-destroying
-// loss, but on a run that HAS opted into checkpointing (WS-21): unlike
-// errWorkspaceLost this is recoverable — the PVC is being recreated so hydrate
+// errWorkspaceRestoring is ensurePVC's sentinel for a recoverable workspace
+// loss on a run with checkpointing. The PVC is recreated so hydrate
 // can restore the latest checkpoint into it before the harness starts. Mapped
 // to a requeue (not a failure) at the Reconcile call site.
 var errWorkspaceRestoring = errors.New("workspace PVC lost; recreating for checkpoint-restore")
@@ -245,11 +244,11 @@ var errWorkspaceRestoring = errors.New("workspace PVC lost; recreating for check
 var errPodDisappeared = errors.New("recorded run pod disappeared")
 
 // workspaceRestoreConditionType marks a run whose workspace PVC was lost and
-// is being recreated for checkpoint-restore (WS-21). It is set True the
-// reconcile the loss is first observed, stays True across the requeued
+// is being recreated for checkpoint restore. It becomes True when the loss is
+// first observed and stays True across the requeued
 // reconcile that actually creates the fresh PVC (buildRunSpec reads it to set
 // RestoreRequired=true for the pod about to be built), and is cleared only
-// once that pod reaches Running (reconcilePodState) — proof hydrate
+// once that pod reaches Running (reconcilePodState), proving hydrate
 // completed, whether or not this particular run ever needed a restore. That
 // stops it from lingering True into this run's later, ordinary crash-resumes,
 // where the PVC will have survived and a restore must NOT be re-attempted
@@ -276,8 +275,8 @@ const pauseResumeConditionType = "PauseResumePending"
 // For a run that has NOT opted into checkpointing (no bucket, or the
 // operator has no checkpoint mount enabled), silently creating a fresh,
 // empty PVC would resume the harness into a workspace with no signal that
-// everything on disk was lost (WS-8 truthing pass; WS-16 A.4) — so that case
-// still returns errWorkspaceLost, unchanged from before WS-21.
+// everything on disk was lost. Without durable checkpoint storage, that case
+// still returns errWorkspaceLost.
 //
 // For a run that HAS opted in (restoreEligible), the loss is recoverable: the
 // dead pod (if any) is deleted, the attempt/retry counters are advanced once
@@ -286,7 +285,7 @@ const pauseResumeConditionType = "PauseResumePending"
 // same call (errWorkspaceRestoring instead), so the just-deleted pod can't
 // race a same-generation PVC. The requeued follow-up reconcile calls ensurePVC
 // again, finds the condition already True, and creates the PVC then; hydrate
-// (told via RestoreRequired, §7) restores the latest checkpoint into it.
+// (told via RestoreRequired) restores the latest checkpoint into it.
 func (r *AgentRunReconciler) ensurePVC(ctx context.Context, run *wrenv1.AgentRun) error {
 	var existing corev1.PersistentVolumeClaim
 	err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: pvcName(run)}, &existing)

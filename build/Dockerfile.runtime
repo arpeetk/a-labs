@@ -3,7 +3,7 @@
 # the iptables-nft userspace tool. Every role runs under the operator's hardened
 # pod securityContext EXCEPT egress-lockdown, the one deliberately-privileged
 # init container: it runs as root with NET_ADMIN/NET_RAW to program iptables and
-# then exits (see internal/podruntime/lockdown.go, spec §5.6).
+# then exits (see internal/podruntime/lockdown.go, spec: egress and security).
 # Build stage runs on the host platform (arm64 Mac, amd64 CI) and cross-compiles
 # for TARGETPLATFORM. CGO_ENABLED=0 means no C toolchain is needed for the target,
 # so this works without qemu emulation regardless of host/target arch mismatch.

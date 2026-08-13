@@ -1,6 +1,6 @@
 // Command wren-apiserver is the Wren control-plane API: it accepts run and
 // project requests over HTTP/JSON and creates AgentRun custom resources in the
-// cluster for the operator to reconcile (spec §5.2).
+// cluster for the operator to reconcile (spec: control-plane API and persistence).
 package main
 
 import (
@@ -42,7 +42,7 @@ func main() {
 	}
 
 	// Store selection: memory (default, dev/tests) or durable Postgres. The DSN
-	// comes from DATABASE_URL (spec §5.2 / implementation-plan §WS-3).
+	// comes from DATABASE_URL (spec: control-plane API and persistence).
 	st, cleanup, err := buildStore(*storeKind)
 	if err != nil {
 		log.Fatalf("build store: %v", err)
@@ -51,7 +51,7 @@ func main() {
 
 	// `wren install` sets WREN_DEFAULT_RUN_NAMESPACE to its --run-namespace so a
 	// project registered with no --namespace lands runs where install wrote the
-	// credential Secrets (WS-15 Part A). Empty keeps the per-user-prefix fallback.
+	// credential Secrets. Empty keeps the per-user-prefix fallback.
 	defaults := coreapi.DefaultDefaults()
 	if ns := os.Getenv("WREN_DEFAULT_RUN_NAMESPACE"); ns != "" {
 		defaults.DefaultNamespace = ns
@@ -89,7 +89,7 @@ func main() {
 		// these explicitly — the zero value is "no timeout"). ReadTimeout/
 		// WriteTimeout are sized for the quick JSON request/response calls
 		// that make up the rest of this API; they'd truncate the long-lived
-		// `GET /v1/runs/{id}/logs?follow=true` stream (WS-4) if applied to
+		// `GET /v1/runs/{id}/logs?follow=true` stream if applied to
 		// it too, so that handler explicitly disables its own write deadline
 		// via http.ResponseController — see runLogs in internal/apiserver.
 		ReadTimeout:  30 * time.Second,

@@ -5,7 +5,7 @@ import "context"
 // upserter is the reconcile-on-boot seam: both Memory and Postgres can insert
 // or overwrite a Run by ID without the ErrExists / ErrNotFound distinction that
 // CreateRun / UpdateRun enforce. It is intentionally NOT part of the frozen
-// Store interface (spec §5.2 / implementation-plan §WS-3) — it is only used at
+// Store interface: it is only used at
 // apiserver start to re-learn in-flight runs from the AgentRun CRs, which are
 // the source of truth for status. Callers that need it type-assert.
 type upserter interface {

@@ -16,6 +16,9 @@ export PATH="/opt/homebrew/bin:$PATH"
 | `make cover` | Package-level coverage for review |
 | `golangci-lint run ./...` | Repository lint policy |
 | `govulncheck ./...` | Reachable Go vulnerability scan |
+| `shellcheck -x hack/*.sh hack/lib/*.sh` | E2E script correctness, including sourced helpers |
+| `kubectl kustomize config/default` and `kubectl kustomize config/production-gcp` | Kubernetes overlays render successfully |
+| `gitleaks git . --redact` | Tracked history contains no detected credentials |
 | `npm test && npm run build && npm audit` in `cmd/wren-desktop/frontend` | Frontend behavior, types, production bundle, dependencies |
 | `make build-desktop` | Native Wails packaging and bindings |
 

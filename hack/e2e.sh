@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wren keyless end-to-end test (the WS-0 merge gate).
+# Wren keyless end-to-end test (the keyless merge gate).
 #
 # hack/ is dev/test tooling ONLY (code standards rule 8): onboarding/install is
 # product surface and lives in the CLI — use `wren install --kind` to stand up
@@ -24,7 +24,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# shellcheck source=lib/e2e-common.sh
+# shellcheck source=hack/lib/e2e-common.sh
 source "$REPO_ROOT/hack/lib/e2e-common.sh"
 
 KIND_CLUSTER="${KIND_CLUSTER:-wren-e2e}"
@@ -97,7 +97,7 @@ if [ -n "$RUNTIME_IMAGE_OVERRIDE" ]; then
     -p="[{\"op\":\"add\",\"path\":\"/spec/template/spec/containers/0/args/-\",\"value\":\"--runtime-image=${RUNTIME_IMAGE_OVERRIDE}\"}]" >/dev/null
 fi
 
-# Egress-enforcement override (WS-1). Default (unset) leaves the operator's own
+# Egress-enforcement override. Default (unset) leaves the operator's own
 # default = iptables (the privileged egress-lockdown init container + canary).
 # Set E2E_EGRESS_ENFORCEMENT=off to exercise the escape hatch: no lockdown
 # container, canary skipped, and an EgressEnforcement=Disabled condition.
@@ -155,7 +155,7 @@ final="$("$WREN" run get "$RUN_ID" 2>/dev/null || true)"
 printf '%s' "$final" | grep -q '"phase"[[:space:]]*:[[:space:]]*"Succeeded"' || die "final phase not Succeeded"
 # The run JSON field is prUrl (store.Run); the old "url" grep matched nothing,
 # making this check vacuous. A keyless run must NOT open a PR — hard-fail if
-# one shows up (WS-11).
+# one shows up.
 pr_url="$(printf '%s' "$final" | sed -n 's/.*"prUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 [ -z "$pr_url" ] || die "expected no PR in keyless mode, got: $pr_url"
 

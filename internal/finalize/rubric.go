@@ -7,9 +7,8 @@ import (
 	"github.com/summiteight/wren/internal/runspec"
 )
 
-// Rubric renders the PR body from the project's rubric template. M0 ships a
-// default structured template (spec §5.7); per-project rubrics land with the
-// Projects service config work.
+// Rubric renders the default structured PR body. Per-project rubric editing is
+// not yet exposed by the project API.
 func Rubric(spec runspec.RunSpec) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "## Summary\n\n%s\n\n", strings.TrimSpace(spec.Prompt))

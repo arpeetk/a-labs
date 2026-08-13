@@ -14,11 +14,11 @@ import (
 
 // Codex runs a task with OpenAI's Codex CLI: it drives `codex exec` (the CLI's
 // non-interactive mode) inside the workspace and streams its --json JSONL
-// events onto the Wren event bus (spec §5.4). Model calls go to
+// events onto the Wren event bus. Model calls go to
 // OPENAI_BASE_URL — the operator points it at the egress-proxy's /openai/
 // route. The adapter selects a Responses-over-HTTP/SSE provider for that
 // route; the proxy injects the real Bearer token, so the runner holds no
-// credential (spec §5.6).
+// credential.
 type Codex struct{}
 
 // Name implements Harness.
@@ -65,7 +65,7 @@ func codexArgs(spec runspec.RunSpec, baseURL string) []string {
 			// here for the same reason as claude's --dangerously-skip-permissions:
 			// the pod IS the sandbox, and codex's landlock sandbox would otherwise
 			// also deny the agent's spawned commands their (proxied) network path
-			// (spec §5.6).
+			// (spec: egress and security).
 			"--sandbox", "danger-full-access",
 			// A repo-less run (no clone) has no .git; the pod boundary, not git,
 			// is what makes the workspace safe.

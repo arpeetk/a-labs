@@ -12,9 +12,9 @@ import (
 	"github.com/summiteight/wren/internal/runspec"
 )
 
-// This file is the shared headless-agent runner behind the claude-code, codex,
-// and opencode adapters (spec §5.4): each adapter supplies argv, environment,
-// and a line parser for its CLI's JSONL stdout; the subprocess lifecycle and
+// This file is the shared headless-agent runner behind the Claude Code, Codex,
+// and OpenCode adapters. Each supplies argv, environment, and a line parser for
+// its CLI's JSONL stdout; the subprocess lifecycle and
 // the contract's error/exit semantics live here exactly once.
 
 // cliEvent is the normalized subset of one agent-CLI stdout line that the
@@ -45,9 +45,9 @@ type agentCLI struct {
 // runAgentCLI launches the CLI with cwd = workspace, streams its stdout events
 // onto the bus, and maps the process outcome to the harness contract: a
 // non-zero exit or an agent-reported error is a deterministic failure (the
-// operator must NOT retry it — that would just re-spend the agent's tokens;
-// spec §5.4 exit-code semantics). A clean exit reports the branch + final
-// usage; the authoritative pr_ready is emitted later by the finalize step.
+// operator must NOT retry it because that would re-spend the agent's tokens).
+// A clean exit reports the branch and final usage; finalize later emits the
+// authoritative pr_ready event.
 func runAgentCLI(ctx context.Context, spec runspec.RunSpec, em *Emitter, cli agentCLI) (Result, error) {
 	bin, err := exec.LookPath(cli.bin)
 	if err != nil {
@@ -89,8 +89,8 @@ func runAgentCLI(ctx context.Context, spec runspec.RunSpec, em *Emitter, cli age
 }
 
 // streamCLI parses newline-delimited agent events, re-emitting them as Wren
-// events and returning the final token usage (last wins — v0.1 records
-// terminal values only, matching the operator's scrape in §5.4) and whether
+// events and returning the final token usage (last wins because status records
+// terminal values only, matching the operator's safety-net scrape) and whether
 // the run errored. token_usage is emitted as an event (not just returned)
 // because the operator reads run results from the harness's log stream — a
 // count that never becomes an event never reaches status.
@@ -132,7 +132,7 @@ func branchFor(spec runspec.RunSpec) string {
 // ensureEnv returns env with key=placeholder appended when the variable is
 // unset, so the agent CLI starts in API-key mode. The placeholder is never a
 // real credential: the egress-proxy is the sole credential authority and
-// overwrites the auth header on the way out (spec §5.6).
+// overwrites the auth header on the way out (spec: egress and security).
 func ensureEnv(env []string, key, placeholder string) []string {
 	if os.Getenv(key) == "" {
 		env = append(env, key+"="+placeholder)

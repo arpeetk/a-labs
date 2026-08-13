@@ -27,7 +27,7 @@ func httpResp(code int) *http.Response {
 	}
 }
 
-// TestClassifyErrorMatrix is the WS-11 retry contract: transport-class
+// TestClassifyErrorMatrix defines the retry contract: transport-class
 // finalize failures (network, HTTP 429/5xx, EOF/timeout) must come back
 // wrapped in ErrRetryable; permanent classes (401/403 auth, 422 validation,
 // non-fast-forward) must pass through untouched so the run fails

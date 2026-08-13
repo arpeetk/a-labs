@@ -233,7 +233,7 @@ func volumeMount(c corev1.Container, name string) *corev1.VolumeMount {
 	return nil
 }
 
-// --- WS-1: egress enforcement flag matrix, UIDs, caps ---
+// --- Egress enforcement flag matrix, UIDs, and capabilities ---
 
 func TestBuildAgentPod_EnforcementIptables_LockdownPresent(t *testing.T) {
 	for _, mode := range []EgressEnforcement{"", EgressEnforcementIptables} {
@@ -373,7 +373,7 @@ func TestBuildAgentPod_ProxyUIDSeparation(t *testing.T) {
 	}
 }
 
-// --- WS-18: GCS checkpoint mount ---
+// --- GCS checkpoint mount ---
 
 func podVolume(pod *corev1.Pod, name string) *corev1.Volume {
 	for i := range pod.Spec.Volumes {
@@ -438,7 +438,7 @@ func TestBuildAgentPod_GCSMount_Enabled(t *testing.T) {
 		t.Errorf("ServiceAccountName = %q, want %q", pod.Spec.ServiceAccountName, DefaultCheckpointKSA)
 	}
 	// Automounting the SA token stays off even with the mount + a KSA set; the
-	// CSI sidecar's Workload-Identity auth does not depend on it (WS-18 finding).
+	// CSI sidecar's Workload Identity authentication does not depend on it.
 	if pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken {
 		t.Error("AutomountServiceAccountToken must remain false with the GCS mount enabled")
 	}
@@ -552,7 +552,7 @@ func TestCheckpointMountEnabled(t *testing.T) {
 }
 
 // TestBuildAgentPod_GCSMount_HarnessNeverMounts is the load-bearing invariant
-// test (code standards rule #1, WS-18 item 3): the untrusted harness container
+// test: the untrusted harness container
 // must NEVER see the GCS checkpoint volume — neither its VolumeMounts nor any
 // mount at the checkpoints path — whether the feature is enabled or disabled.
 // It mirrors TestBuildAgentPod_ProxyUIDSeparation: pin the boundary in code, and
@@ -607,7 +607,7 @@ func hostAliasIP(pod *corev1.Pod, host string) string {
 	return ""
 }
 
-// TestBuildAgentPod_GCSMount_EgressExemption is the WS-19 wiring test: with the
+// TestBuildAgentPod_GCSMount_EgressExemption is the integration wiring test: with the
 // mount enabled under the default iptables lockdown, the egress-lockdown init
 // container is told to carve a narrow hole for the gcs-fuse sidecar — scoped to
 // its OWN uid (never the runner's) AND a fixed destination set — and the pod
@@ -651,7 +651,7 @@ func TestBuildAgentPod_GCSMount_EgressExemption(t *testing.T) {
 }
 
 // TestBuildAgentPod_GCSMount_NoExemptionWhenOff: without the mount, the lockdown
-// carries no gcs-fuse exemption and the pod sets no hostAliases — the WS-19
+// carries no gcs-fuse exemption and the pod sets no hostAliases—the
 // change is inert for every run that does not use the feature.
 func TestBuildAgentPod_GCSMount_NoExemptionWhenOff(t *testing.T) {
 	// Flag on but no bucket, and flag off entirely: both must stay inert.

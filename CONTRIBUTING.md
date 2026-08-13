@@ -70,7 +70,8 @@ make manifests        # config/crd/bases + config/rbac
 every change must pass. It stands up a kind cluster, deploys the control plane,
 runs a mock harness with **zero credentials and no repo**, asserts the run
 reaches `Succeeded`, and tears down. It needs Docker + kind and runs in
-< 10 min. See [`AGENTS.md`](AGENTS.md) §7 for the full local loop.
+< 10 min. See [`docs/verification.md`](docs/verification.md) for the complete
+gate matrix.
 
 ```sh
 make e2e                 # full run + teardown
@@ -79,7 +80,7 @@ E2E_KEEP=1 make e2e      # keep the cluster up for debugging
 
 ---
 
-## Conventions (the short version — see AGENTS.md §6 for depth)
+## Conventions
 
 **Standards, with the incidents that taught them:**
 [`docs/standards/testing.md`](docs/standards/testing.md) ·
@@ -98,10 +99,10 @@ first non-trivial PR.
   coverage high on logic packages. Only `cmd/*` wiring and real-network glue are
   intentionally uncovered; call out any new uncovered spot.
 - **Comments** explain *why*, not *what*, and reference the spec section a piece
-  implements (e.g. "spec §5.7").
+  implements (e.g. "spec: finalization").
 - **Security posture (do not regress).** The agent runner is untrusted: pods are
   hardened (non-root, read-only rootfs, dropped caps, seccomp, no SA token). See
-  [`SECURITY.md`](SECURITY.md) and AGENTS.md §6.
+  [`SECURITY.md`](SECURITY.md) and [`AGENTS.md`](AGENTS.md).
 
 ---
 
@@ -114,8 +115,8 @@ first non-trivial PR.
    [Developer Certificate of Origin](https://developercertificate.org/). PRs
    without sign-off will be blocked by the DCO check.
 3. **Definition of done:** `gofmt` clean, `go vet` clean, `go test ./...` green,
-   `golangci-lint run` clean, new code covered, and the spec's living
-   "Implementation status" block updated if behavior/scope changed.
+   `golangci-lint run` clean, new code covered, and affected architecture or
+   operational documentation updated when behavior changes.
 4. **Describe the change** using the PR template: *what*, *why*, and *how you
    validated it*. Link the issue if there is one.
 5. CI (build/test/vet/lint/govulncheck), the kind **e2e** gate, and CodeQL must

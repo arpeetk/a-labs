@@ -9,7 +9,7 @@
 # channel with zero functional cost.
 #
 # Revisit when the agent-gateway starts accepting control-plane connections
-# (interactive steering, M2): replace this with an allow scoped to the
+# (for example, interactive steering): replace this with an allow scoped to the
 # control-plane namespace.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

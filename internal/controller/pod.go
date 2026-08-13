@@ -22,7 +22,7 @@ const (
 	InitEgressLockdown    = "egress-lockdown"
 	InitHydrate           = "hydrate"
 
-	// UIDs (spec §5.6). Every runner-side container is pinned to runnerUID; the
+	// UIDs (spec: egress and security). Every runner-side container is pinned to runnerUID; the
 	// egress-proxy is pinned to proxyUID so the lockdown iptables rules can
 	// uid-match it (accept the proxy's egress, reject the runner's). Never
 	// collapse these two — the uid gap is the security boundary. The pin (not
@@ -50,11 +50,11 @@ const (
 	// gcsFuseCSIDriver is GKE's Cloud Storage FUSE CSI driver; it surfaces a GCS
 	// bucket as a POSIX filesystem inside the container. gcsFuseVolumeAnnotation
 	// is the pod annotation its sidecar-injection webhook requires — set only
-	// when the mount is actually added (WS-18, spec §5.5).
+	// when the mount is actually added (spec: checkpoint storage and recovery).
 	gcsFuseCSIDriver        = "gcsfuse.csi.storage.gke.io"
 	gcsFuseVolumeAnnotation = "gke-gcsfuse/volumes"
 
-	// GCS-FUSE checkpoint-mount egress under the default lockdown (WS-19). The
+	// GCS-FUSE checkpoint-mount egress under the default lockdown. The
 	// GKE-injected gke-gcsfuse-sidecar runs as gcsFuseSidecarUID — a uid GKE sets,
 	// verified live on GKE 1.35 / CSI driver v1.22.16 to be 65534 (non-root),
 	// distinct from runnerUID/proxyUID. Its traffic cannot be routed through the
@@ -81,7 +81,7 @@ const (
 	// that have the GCS checkpoint mount enabled. It is annotated
 	// iam.gke.io/gcp-service-account so the CSI sidecar authenticates to GCS via
 	// Workload Identity. Pods without the mount keep the namespace "default" KSA
-	// unchanged — no new identity, no behavior change (WS-18 item 4).
+	// unchanged — no new identity, no behavior change.
 	DefaultCheckpointKSA = "wren-checkpointer"
 
 	LabelRun       = "wren.dev/run"
@@ -100,7 +100,7 @@ type Images struct {
 }
 
 // EgressEnforcement selects how the runner is prevented from bypassing the
-// egress-proxy (spec §5.6, WS-1).
+// egress proxy (spec: egress and security).
 type EgressEnforcement string
 
 const (
@@ -137,9 +137,9 @@ type PodConfig struct {
 	EgressEnforcement EgressEnforcement
 	// CheckpointGCSMount enables mounting the run's checkpoint bucket into the
 	// trusted checkpointer/hydrate containers via the GCS FUSE CSI driver
-	// (WS-18–WS-21). Off by default; requires the CSI addon + a Workload Identity
-	// binding. The mount is added only when this is true AND the run sets a
-	// checkpoint bucket.
+	// (see the checkpoint storage design). Off by default; requires the CSI addon
+	// and a Workload Identity binding. The mount is added only when this is true
+	// and the run sets a checkpoint bucket.
 	CheckpointGCSMount bool
 	// CheckpointLocalPath mounts an operator-administered node directory into
 	// the trusted checkpointer/hydrate containers. It exists for kind and other
@@ -264,7 +264,7 @@ func resources(rs wrenv1.ResourceSpec) corev1.ResourceRequirements {
 }
 
 // hardened returns the per-container security context applied to every
-// container in the agent pod (spec §5.6, pod hardening). It pins the runner
+// container in the agent pod (spec: egress and security, pod hardening). It pins the runner
 // uid so the uid-match lockdown boundary holds by construction: no container
 // image can choose the egress-proxy's uid via its own USER. The egress-proxy
 // overrides the pin with proxyUID (see buildAgentPod).
@@ -285,7 +285,7 @@ func hardened(readOnlyRoot bool) *corev1.SecurityContext {
 // drops every other capability, keeps privilege-escalation off, and still uses
 // the runtime-default seccomp profile — so the blast radius is exactly "can edit
 // this pod's netfilter rules", nothing more. It runs to completion before any
-// runner-side container starts (spec §5.6, WS-1).
+// runner-side container starts (spec: egress and security).
 func lockdownSecurityContext() *corev1.SecurityContext {
 	return &corev1.SecurityContext{
 		RunAsNonRoot:             ptr(false),
@@ -345,7 +345,7 @@ func harnessImage(run *wrenv1.AgentRun, cfg PodConfig) string {
 
 // runtimeClassName maps the spec runtime to a pod RuntimeClassName. The default
 // runtime (runc / empty) leaves it nil so the node's default RuntimeClass runs;
-// gvisor/kata set an explicit class (deferred, but wired through — spec §5.6).
+// gvisor/kata set an explicit class (deferred, but wired through — spec: egress and security).
 func runtimeClassName(rc wrenv1.RuntimeClass) *string {
 	switch rc {
 	case wrenv1.RuntimeGVisor:
@@ -365,7 +365,7 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 	images := cfg.Images
 	proxyBase := cfg.proxyBaseURL()
 	// The runner routes GitHub/model traffic through the egress-proxy; it holds
-	// no credentials of its own (spec §5.6). Every harness gets both model base
+	// no credentials of its own (spec: egress and security). Every harness gets both model base
 	// URLs; the adapter uses the one its provider speaks (claude-code/opencode →
 	// Anthropic route, codex → OpenAI route).
 	proxyEnv := []corev1.EnvVar{
@@ -531,12 +531,11 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 	var hostAliases []corev1.HostAlias
 	gcsMount := cfg.CheckpointGCSMount && run.Spec.Workspace.Checkpoint.Bucket != ""
 	localCheckpointMount := !gcsMount && cfg.CheckpointLocalPath != "" && run.Spec.Workspace.Checkpoint.Bucket != ""
-	// GCS checkpoint mount (WS-18): a CSI volume backed by the run's checkpoint
-	// bucket, mounted into the checkpointer container ONLY. The checkpointer is a
-	// trusted native sidecar; the harness runs untrusted model-generated code and
-	// must never hold a credential or a writable path to durable storage outside
-	// its own workspace PVC. This is the same trust-tier reasoning as the
-	// egress-proxy/runner uid split (code standards rule #1) — the invariant is
+	// GCS checkpoint mount: a CSI volume backed by the run's checkpoint bucket,
+	// mounted only into the trusted checkpointer and hydrate containers. The
+	// untrusted harness must never hold the credential or a writable path to
+	// durable storage outside its own workspace PVC. This is the same trust-tier
+	// reasoning as the egress-proxy/runner uid split; the invariant is
 	// pinned here in code and asserted by TestBuildAgentPod_GCSMount_HarnessNever*.
 	if gcsMount {
 		volumes = append(volumes, corev1.Volume{
@@ -565,10 +564,10 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 		podAnnotations = map[string]string{gcsFuseVolumeAnnotation: "true"}
 		// The mount's GCS credentials come from Workload Identity bound to this
 		// dedicated KSA — applied only here, so pods without the mount keep the
-		// namespace default KSA untouched (WS-18 item 4).
+		// namespace default KSA untouched.
 		saName = cfg.checkpointKSA()
 		// Pin storage.googleapis.com to the restricted Google APIs VIP (a fixed
-		// /30) and metadata.google.internal to the GCE metadata IP (WS-19). This
+		// /30) and metadata.google.internal to the GCE metadata IP. This
 		// lets the lockdown's gcs-fuse exemption be destination-scoped to two small
 		// stable CIDRs instead of Storage's broad, rotating public ranges, and lets
 		// the credential fetch resolve with no DNS under lockdown. hostAliases
@@ -649,7 +648,7 @@ func buildLockdownContainer(cfg PodConfig, gcsMount bool) corev1.Container {
 		{Name: "WREN_PROXY_UID", Value: fmt.Sprintf("%d", proxyUID)},
 	}
 	if gcsMount {
-		// Narrow gcs-fuse exemption (WS-19): only the sidecar's uid, only the
+		// Narrow gcs-fuse exemption: only the sidecar's uid, only the
 		// restricted Google APIs VIP (where storage.googleapis.com is pinned) and
 		// the metadata server. The runner uid can never match it. See the
 		// gcsFuseSidecarUID comment and internal/podruntime/lockdown.go.

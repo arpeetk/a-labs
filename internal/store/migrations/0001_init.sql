@@ -1,4 +1,4 @@
--- 0001_init: the two control-plane tables (spec §5.2).
+-- 0001_init: the two control-plane tables (spec: control-plane API and persistence).
 --
 -- projects and runs mirror internal/store.Project and .Run. The egress
 -- allowlist is a text[] (a scalar list, not a relation — matches the Go slice

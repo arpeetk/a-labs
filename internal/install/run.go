@@ -9,7 +9,7 @@ import (
 )
 
 // execRunner is the real Runner: os/exec against the local machine. docker,
-// kind, and gh have no typed client, so they stay exec'd (per the WS-13 brief;
+// kind, and gh have no suitable typed client, so they stay exec'd;
 // the cluster itself is driven through the typed client in kube.go).
 type execRunner struct {
 	out io.Writer // command progress (docker build output) streams here

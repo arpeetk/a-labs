@@ -49,7 +49,7 @@ func TestParseResultEvents(t *testing.T) {
 	if !res.hasPR || res.prURL != "https://github.com/corp/payments/pull/7" || res.prBranch != "wren/me/r-abc" {
 		t.Errorf("pr = %+v", res)
 	}
-	// Last token_usage wins (v0.1 records terminal values only).
+	// Last token_usage wins because status records terminal values only.
 	if !res.hasUsage || res.inTok != 1234 || res.outTok != 567 {
 		t.Errorf("usage = %+v", res)
 	}

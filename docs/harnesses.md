@@ -1,7 +1,7 @@
 # Harnesses
 
-Wren treats the agent as a pluggable **harness adapter** behind one contract
-(spec §5.4): the pod hands the adapter a `RunSpec`, the adapter drives a
+Wren treats the agent as a pluggable **harness adapter** behind one contract.
+The pod hands the adapter a `RunSpec`, the adapter drives a
 headless coding CLI in the cloned workspace, and events flow back as the
 newline-delimited JSON stream (`status` / `message` / `tool_call` /
 `token_usage` / `pr_ready`). Exit codes decide retryability: a deterministic
@@ -15,8 +15,8 @@ Rewritten or unrelated history is rejected instead of pushed; a clean HEAD
 exactly at the requested base remains a genuine no-change run.
 
 Credentials are never in the harness image or the runner env: the in-pod
-egress-proxy injects them on credentialed reverse routes (spec §5.6). Each
-adapter passes only a **placeholder** API key so its CLI starts in API-key
+egress proxy injects them on credentialed reverse routes. Each adapter passes
+only a **placeholder** API key so its CLI starts in API-key
 mode; the proxy scrubs inbound credentials and overwrites the auth header on
 the way out.
 
@@ -43,7 +43,7 @@ corresponding proxy Secrets. `--skip-credentials` disables this step.
 | `claude-code` | `Dockerfile.claude-code` | `/anthropic/` → `api.anthropic.com` (`x-api-key`) | `wren-anthropic-key` (key `key`) → `ANTHROPIC_API_KEY` | `--model <model>` |
 | `codex` | `Dockerfile.codex` | `/openai/v1` → `api.openai.com/v1` (`Authorization: Bearer`) | `wren-openai-key` (key `key`) → `OPENAI_API_KEY` | `--model <model>` |
 | `opencode` | `Dockerfile.opencode` | rides `/anthropic/` (no new surface) | `wren-anthropic-key` (key `key`) → `ANTHROPIC_API_KEY` | `--model <provider/model>`; a bare name defaults to `anthropic/` |
-| `byo` | your own image speaking the §5.4 contract | your proxy config | your choice | your choice |
+| `byo` | your own image speaking the harness event contract | your proxy config | your choice | your choice |
 
 ## codex
 
@@ -102,16 +102,15 @@ therefore contain an arm64 `wren-runtime`, while the GKE path continues to use
 explicit `--platform linux/amd64`. The Codex image pins the CLI version for
 repeatable builds; override it with `--build-arg CODEX_VERSION=<version>`.
 
-## Known limitations
+## Validation and recovery status
 
-- **OpenCode is not yet validated against the live provider** — no keys in CI.
-  Codex's Responses HTTP/SSE proxy configuration has been proven by a live Wren
-  canary; both adapters' command construction, event parsing, and credential
-  wiring remain hermetically unit-tested.
-- **Resume parity is harness-specific:** Codex has durable session resume as
-  described above. Claude Code and OpenCode currently restart a fresh agent in
-  the surviving/restored workspace; native transcript resume for them remains
-  roadmap work.
-- **MCP config is not wired** into either CLI.
-- An unknown harness kind falls back to `mock` with a note in the event stream
-  (M0 behavior).
+Codex's Responses HTTP/SSE proxy configuration has been proven by a live Wren
+canary. OpenCode's command construction, event parsing, and credential wiring
+have hermetic coverage but no live-provider validation. Codex has native
+session resume; Claude Code and OpenCode restart a fresh model session in the
+surviving or restored workspace. The remaining gaps are tracked in the
+[roadmap](roadmap.md).
+
+Project and run APIs reject unknown harness values. A test-only
+`WREN_HARNESS` override with an unknown value degrades to mock and emits an
+explicit note.

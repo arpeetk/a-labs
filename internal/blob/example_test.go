@@ -12,9 +12,8 @@ import (
 	"github.com/summiteight/wren/internal/blob"
 )
 
-// exampleStore is test scaffolding that exists only to make the doc example
-// runnable. It is NOT the promised implementation: real S3-compatible / GCS
-// Stores (and MinIO for e2e) land with the post-launch checkpointer work.
+// exampleStore is in-memory scaffolding that keeps the documentation example
+// runnable. Production checkpointing uses MountStore over a mounted backend.
 type exampleStore struct {
 	objects map[string][]byte
 }

@@ -12,7 +12,7 @@ import (
 
 // Mock is a deterministic harness that simulates a run without any model or
 // network: it writes a marker file into the workspace and reports a PR. It
-// exercises the full pod lifecycle and operator completion path (spec §5.4).
+// exercises the full pod lifecycle and operator completion path.
 type Mock struct {
 	Note string
 }

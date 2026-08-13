@@ -166,7 +166,7 @@ func TestEgressConfigFromEnv(t *testing.T) {
 	}
 }
 
-// An OPENAI_API_KEY on the proxy adds the /openai/ credentialed route (WS-12).
+// An OPENAI_API_KEY on the proxy adds the /openai/ credentialed route.
 func TestEgressConfigOpenAIRoute(t *testing.T) {
 	t.Setenv("WREN_EGRESS_ALLOWLIST", "")
 	t.Setenv("GITHUB_TOKEN", "")

@@ -1,8 +1,9 @@
 # NetworkPolicies (belt-and-suspenders, NOT applied by default)
 
 These manifests are the **second layer** of containment. The **primary** control
-in Wren is the in-pod iptables uid-lockdown (`egress-lockdown` init container,
-WS-1 / spec §5.6): because the runner and the egress-proxy share a pod network
+in Wren is the in-pod iptables uid-lockdown (`egress-lockdown` init container;
+see the technical spec's egress and security section). Because the runner and
+the egress-proxy share a pod network
 namespace, only a uid-owner match can distinguish them, and NetworkPolicy
 operates at the pod (not container) level — so NetworkPolicy alone **cannot**
 stop the runner from bypassing the proxy inside the pod.
@@ -31,7 +32,7 @@ What these policies add:
   permitted (kubelet probes, future in-cluster streams). A connection initiated
   *into* the pod would give the runner a bidirectional channel the lockdown
   doesn't cut. Agent pods accept no inbound traffic by design today, so this
-  policy closes that channel at zero functional cost. Revisit at M2 when the
+  policy closes that channel at zero functional cost. Revisit when the
   agent-gateway begins accepting control-plane steering connections.
 
 **These are not applied by `config/default`.** Apply per run-namespace after

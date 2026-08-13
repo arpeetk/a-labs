@@ -33,18 +33,19 @@ Read with [testing.md](testing.md) and [review.md](review.md).
 
 5. **Status writes fill, never blank.** The CR is authoritative for status;
    the store mirrors it. Scraped/mirrored data only adds information
-   (`runFromCR`, the WS-11 log scrape). A consumer that can blank a field is
-   a data-loss bug waiting for a restart.
+   (`runFromCR`, the terminal-event log scrape). A consumer that can blank a
+   field is a data-loss bug waiting for a restart.
 
 6. **Comments explain *why*, not *what* — and carry the load-bearing
-   invariant.** Reference the spec section (e.g. "spec §5.6"); name the
-   invariant ("never collapse these two — the uid gap is the security
+   invariant.** Reference a stable spec section; name the invariant ("never
+   collapse these two — the uid gap is the security
    boundary"); document the escape hatch where the escape is. Match
    surrounding density.
 
 7. **Minimal, surgical diffs.** Do the thing the change is for. Drive-by
    refactors go in their own PR with "chore" in the title. When you must
-   exceed the brief to fix the root cause (WS-11's `ensureBranch`), fix the
+   exceed the brief to fix the root cause (for example, finalize's
+   `ensureBranch` idempotency), fix the
    root cause and flag the expansion in the hand-off.
 
 8. **Dead code dies.** Stubs that never ran (AgentPool), scripts superseded
@@ -54,12 +55,11 @@ Read with [testing.md](testing.md) and [review.md](review.md).
    first-class commands, never in `hack/` (`hack/` is dev/test tooling only:
    e2e gates, codegen helpers).
 
-9. **M0 stand-ins are labelled.** Every deliberate simplification gets an
-   explicit note in `AGENTS.md` §8 and the spec status block, with its
-   target. When you make one real, remove the note in the same PR (this is a
-   written repo rule — it has been forgotten twice).
+9. **Intentional gaps have one home.** Record future product work in
+   [`../roadmap.md`](../roadmap.md), not scattered status blocks or historical
+   workstream notes. When a gap becomes real, update the roadmap and the
+   affected operational documentation in the same change.
 
-10. **API stability once fields exist.** Accepted-but-unimplemented CRD
-    fields stay and are documented as no-op (checkpoint fields); they are not
-    removed on a whim. Removing any API surface is an orchestrator-level
-    decision, recorded in the PR.
+10. **Treat accepted API fields as contracts.** Do not remove or repurpose CRD,
+    HTTP, CLI, or configuration fields casually. Deprecate deliberately, retain
+    compatibility where practical, and record any breaking decision in the PR.

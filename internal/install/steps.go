@@ -273,7 +273,7 @@ func (s *steps) resolveProviderKey(value, prompt, label string) (string, error) 
 }
 
 // handOff prints the engineer-facing next steps: reach the control plane, log
-// in, register a project, submit a run — plus the M0 auth caveat (spec §7).
+// in, register a project, submit a run, and understand the current auth boundary.
 func (s *steps) handOff() {
 	kctl := "kubectl"
 	if c := s.opts.contextName(); c != "" {
@@ -292,7 +292,7 @@ Or via the LoadBalancer (team setups):
 `, kctl, SystemNamespace, ApiserverService)
 	}
 	// The credential Secrets live in --run-namespace, which install just made the
-	// apiserver's default (WS-15 Part A), and harness/model/cpu/memory/disk all
+	// apiserver's default, and harness/model/cpu/memory/disk all
 	// have control-plane defaults — so the minimum project is just a name + repo.
 	// On a registry install the default harness image (wren/claude-code:dev) is
 	// not on the cluster, so the project must still point at the pushed image.
@@ -327,10 +327,10 @@ harness image you built/pushed yourself.
 %s`, s.opts.HarnessImages, authNote)
 }
 
-// authNote is the shared M0 auth caveat printed at the end of the hand-off.
+// authNote is the shared authentication caveat printed at the end of hand-off.
 const authNote = `
 NOTE: the control plane authenticates callers with a trusted X-Wren-User header
-only (M0 stand-in; SSO/OIDC is a later milestone). Keep it on port-forward or a
+only; SSO/OIDC is not implemented. Keep it on port-forward or a
 trusted network — do NOT expose it publicly.
 `
 

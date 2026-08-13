@@ -181,7 +181,7 @@ type createRunFailStore struct {
 
 func (s createRunFailStore) CreateRun(context.Context, *store.Run) error { return s.err }
 
-// TestCreateRunMissingCredentialSecret is WS-15 Part A: a run resolved to a
+// TestCreateRunMissingCredentialSecret verifies that a run resolved to a
 // namespace that lacks the harness's credential Secret is rejected up front with
 // an actionable error, instead of scheduling a doomed pod.
 func TestCreateRunMissingCredentialSecret(t *testing.T) {
@@ -226,7 +226,7 @@ func TestCreateRunSecretPresentSucceeds(t *testing.T) {
 	}
 }
 
-// TestResolveNamespaceUsesDefaultNamespace is WS-15 Part A: with the install's
+// TestResolveNamespaceUsesDefaultNamespace verifies that with the install's
 // DefaultNamespace set, a project with no explicit --namespace lands there
 // (where credentials live), not in a per-user namespace. An explicit project
 // namespace still overrides it.
@@ -260,7 +260,7 @@ func TestResolveNamespaceUsesDefaultNamespace(t *testing.T) {
 	}
 }
 
-// TestDeleteRun removes both the store record and the AgentRun CR (WS-15 Part C).
+// TestDeleteRun removes both the store record and the AgentRun CR.
 func TestDeleteRun(t *testing.T) {
 	svc, st, fl := newService(t)
 	ctx := context.Background()
@@ -493,10 +493,9 @@ func TestCreateRunResolvesConfigAndCreatesCR(t *testing.T) {
 	}
 }
 
-// TestCreateRunFallsBackToDefaultHarnessImage guards against a repeat of the
-// WS-14 gap: a project registered with no --harness-image must resolve to a
-// real, buildable image (`wren install`'s kind zero-config default), never
-// the old dead "wren/claude-code-runner:latest" placeholder.
+// TestCreateRunFallsBackToDefaultHarnessImage verifies that a project with no
+// --harness-image resolves to the install's buildable kind default rather than
+// a stale image reference.
 func TestCreateRunFallsBackToDefaultHarnessImage(t *testing.T) {
 	svc, _, fl := newService(t)
 	ctx := context.Background()
@@ -617,11 +616,8 @@ func TestListRunsScope(t *testing.T) {
 	}
 }
 
-// TestListRunsProjectFilter proves --project is wired all the way to the
-// store filter (WS-20) — RunFilter.Project existed before this workstream but
-// nothing ever set it, so a query naming a project silently returned every
-// project's runs. Two projects, two runs, filtering to one must exclude the
-// other.
+// TestListRunsProjectFilter proves --project reaches the store filter. With two
+// projects and two runs, filtering to one must exclude the other.
 func TestListRunsProjectFilter(t *testing.T) {
 	svc, _, _ := newService(t)
 	ctx := context.Background()
@@ -653,9 +649,9 @@ func TestListRunsProjectFilter(t *testing.T) {
 	}
 }
 
-// TestReconcileFromCluster simulates a restarted apiserver with an empty store
-// (the durability hole WS-3 closes): the AgentRun CR still exists in the
-// cluster, so reconcile-on-boot must re-learn the run with the CR's phase.
+// TestReconcileFromCluster simulates a restarted apiserver with an empty store.
+// The AgentRun CR still exists, so reconcile-on-boot must re-learn the run with
+// the CR's phase.
 func TestReconcileFromCluster(t *testing.T) {
 	svc, _, fl := newService(t)
 	ctx := context.Background()

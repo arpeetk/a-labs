@@ -109,7 +109,7 @@ func TestCommitAllNoChanges(t *testing.T) {
 	}
 }
 
-// TestCommitAllTwiceIsIdempotent is the WS-11 resume regression: a pod that
+// TestCommitAllTwiceIsIdempotent covers resume idempotency: a pod that
 // crashes after `git commit` but before the push re-runs finalize on the same
 // durable workspace. The second CommitAll must check out the existing run
 // branch (never fail "branch already exists") and report ErrNoChanges — the

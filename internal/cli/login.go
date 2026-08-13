@@ -14,8 +14,8 @@ func newLoginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Authenticate to a Wren control plane",
-		Long: "Save a control-plane context. SSO/device-flow authentication lands in M1;\n" +
-			"for now this records the server address (and, for M0, your identity) so\n" +
+		Long: "Save a control-plane context. SSO/device-flow authentication is not implemented;\n" +
+			"this records the server address and trusted-header identity so\n" +
 			"other commands can target it.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if server == "" {
@@ -36,12 +36,12 @@ func newLoginCmd() *cobra.Command {
 			}
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "Saved context %q → %s\n", name, server)
-			fmt.Fprintln(out, "Note: SSO/device-flow auth is not implemented yet (M1); identity is taken from --user (M0).")
+			fmt.Fprintln(out, "Note: SSO/device-flow auth is not implemented; identity is taken from --user.")
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&server, "control-plane", "", "control plane address (host:port)")
 	cmd.Flags().StringVar(&org, "org", "", "organization / context name (default: \"default\")")
-	cmd.Flags().StringVar(&user, "user", "", "your identity (M0 stand-in for SSO; e.g. you@corp.com)")
+	cmd.Flags().StringVar(&user, "user", "", "trusted-header identity (e.g. you@corp.com)")
 	return cmd
 }

@@ -9,8 +9,8 @@ the incident is cited so the rule never becomes ceremony. Read with
 1. **Every assertion must be proven capable of failing.** A check that cannot
    fail is worse than no check — it documents a guarantee it doesn't make.
    `hack/e2e.sh` grepped `"url"` while the JSON field is `prUrl`, so the
-   "no PR in keyless mode" assertion was vacuous *from the day it was written*
-   (WS-0 → WS-11). For any assertion you add — e2e grep, test comparison,
+   "no PR in keyless mode" assertion was vacuous from the day it was written.
+   For any assertion you add—e2e grep, test comparison,
    canary probe — prove it fails: point it at a bogus value, watch it fail,
    revert. Record the proof in the PR.
 
@@ -37,12 +37,12 @@ the incident is cited so the rule never becomes ceremony. Read with
 5. **Idempotency is a tested property, not a hope.** Anything a resume,
    requeue, or retry can re-execute must have a "run it twice" test:
    `TestCommitAllTwiceIsIdempotent` exists because a crash between commit and
-   push turned "branch already exists" into a terminal failure (WS-11).
+   push once turned "branch already exists" into a terminal failure.
    Reconcilers, finalize, CreateOrUpdate paths — write the second-call test.
 
 6. **Error classification gets a matrix.** Retryable-vs-permanent is a
-   taxonomy, and taxonomies get table-driven tests (WS-11's 24-case
-   `retry_test.go`: network/429/5xx/EOF → retryable; 401/403/422/
+   taxonomy, and taxonomies get table-driven tests (`retry_test.go` covers
+   network/429/5xx/EOF → retryable; 401/403/422/
    non-fast-forward → deterministic). A misclassified transient error kills a
    run with budget to spare; a misclassified permanent one re-spends agent
    tokens.
@@ -53,7 +53,7 @@ the incident is cited so the rule never becomes ceremony. Read with
    factor the first's tests into a shared suite in the same change.
 
 8. **Security controls get tripwires with teeth.** The egress canary attempts
-   a direct connection that *must* fail, and a bypass fails the run (WS-1).
+   a direct connection that *must* fail, and a bypass fails the run.
    Enforcement code also fails closed on its own errors (missing ip6tables on
    a live v6 stack aborts the pod). Test both directions: the control holds,
    and the control's own failure is loud.
@@ -62,5 +62,5 @@ the incident is cited so the rule never becomes ceremony. Read with
    necessary, not sufficient. Every PR rides the keyless kind e2e in CI; run
    it locally before hand-off (`KIND_CLUSTER` / `APISERVER_LOCAL_PORT`
    overrides allow parallel runs on one machine). Coverage bar: logic
-   packages stay ≥ mid-70s and only move up; tests ship in the same change as
-   the code — never deferred.
+   packages should remain in the established mid-70s-to-mid-90s band; any
+   meaningful drop needs an explicit explanation. Tests ship with the code.

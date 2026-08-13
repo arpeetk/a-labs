@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Repeatable keyless pause/resume chaos gate (WS-22).
+# Repeatable keyless pause/resume chaos gate.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

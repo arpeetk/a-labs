@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wren GKE end-to-end test — validates egress enforcement (WS-1) on a real cluster.
+# Wren GKE end-to-end test — validates egress enforcement on a real cluster.
 #
 # hack/ is dev/test tooling ONLY (code standards rule 8): installing Wren on a
 # real cluster is product surface — use `wren install --registry <prefix>`.
@@ -31,7 +31,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# shellcheck source=lib/e2e-common.sh
+# shellcheck source=hack/lib/e2e-common.sh
 source "$REPO_ROOT/hack/lib/e2e-common.sh"
 
 GKE_PROJECT="${GKE_PROJECT:-wren-gke-fdea81}"
@@ -165,8 +165,8 @@ printf '%s' "$final" | grep -q '"phase"[[:space:]]*:[[:space:]]*"Succeeded"' \
 pr_url="$(printf '%s' "$final" | sed -n 's/.*"prUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
 [ -z "$pr_url" ] || die "expected no PR in keyless mode, got: $pr_url"
 
-# --- 9. WS-1 assertions: egress enforcement ---
-log "checking WS-1 egress enforcement assertions"
+# --- 9. egress-enforcement assertions ---
+log "checking egress-enforcement assertions"
 
 if [ -n "$RUN_NS" ]; then
   # 9a. EgressEnforcement condition on the AgentRun CR.

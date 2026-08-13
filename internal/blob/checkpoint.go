@@ -117,7 +117,7 @@ func LoadCheckpoint(ctx context.Context, store Store, key string) (CheckpointMan
 		}
 		invalid = append(invalid, obj.Key+": "+err.Error())
 	}
-	// Migration compatibility for WS-21 snapshots that predate manifests.
+	// Migration compatibility for snapshots that predate manifests.
 	for _, obj := range objs {
 		if strings.HasSuffix(obj.Key, ".tar.gz") && !strings.Contains(obj.Key, "/objects/") {
 			rc, err := store.Get(ctx, obj.Key)

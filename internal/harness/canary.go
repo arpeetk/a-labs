@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Egress canary (WS-1, spec §5.6).
+// Egress canary (spec: egress and security).
 //
 // When the operator runs with egress enforcement on it sets
 // WREN_EXPECT_ENFORCEMENT=1 in the harness env. podruntime.RunHarness runs the

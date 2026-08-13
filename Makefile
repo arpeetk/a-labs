@@ -69,7 +69,7 @@ docker-push-gke: ## Build linux/amd64 images and push to Artifact Registry (GKE_
 deploy: ## Install CRDs + RBAC + operator + apiserver in-cluster (current kube context)
 	kubectl apply -k config/default
 
-e2e: ## Keyless end-to-end test on kind (the WS-0 merge gate); E2E_KEEP=1 keeps the cluster
+e2e: ## Keyless end-to-end test on kind (the keyless merge gate); E2E_KEEP=1 keeps the cluster
 	./hack/e2e.sh
 
 e2e-install: ## Product onboarding gate: wren install -> CLI workflow -> wren uninstall on kind
@@ -87,7 +87,7 @@ e2e-gke: ## Egress-enforcement e2e on a GKE Standard cluster (existing cluster; 
 e2e-gke-provisioned: ## Provision a disposable GKE cluster with zone/machine fallback, run e2e-gke, then delete it
 	./hack/e2e-gke-provisioned.sh
 
-e2e-gke-checkpoint: ## Checkpoint/restore (WS-21) e2e on a GKE Standard cluster (existing cluster; push images first with docker-push-gke)
+e2e-gke-checkpoint: ## Checkpoint/restore e2e on a GKE Standard cluster (existing cluster; push images first with docker-push-gke)
 	./hack/e2e-gke-checkpoint.sh
 
 e2e-gke-checkpoint-provisioned: ## Provision disposable GKE Standard, run checkpoint/restore gate, and verify cluster deletion

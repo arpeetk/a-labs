@@ -8,7 +8,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# shellcheck source=lib/e2e-common.sh
+# shellcheck source=hack/lib/e2e-common.sh
 source "$REPO_ROOT/hack/lib/e2e-common.sh"
 
 need gcloud

@@ -120,8 +120,8 @@ func envValue(c *corev1.Container, name string) (corev1.EnvVar, bool) {
 	return corev1.EnvVar{}, false
 }
 
-// The credential belongs on the egress-proxy, never the runner (spec §5.6): the
-// harness/hydrate get only the proxy URL, and the token env lives on the proxy.
+// The credential belongs on the egress proxy, never the runner: harness and
+// hydrate receive only the proxy URL.
 func TestCredentialsGoToEgressProxyNotRunner(t *testing.T) {
 	run := testRun()
 	pod := buildAgentPod(run, PodConfig{
@@ -154,7 +154,7 @@ func TestCredentialsGoToEgressProxyNotRunner(t *testing.T) {
 	if e, ok := envValue(harness, "ANTHROPIC_BASE_URL"); !ok || e.Value != "http://127.0.0.1:8099/anthropic" {
 		t.Errorf("harness ANTHROPIC_BASE_URL = %q (ok=%v)", e.Value, ok)
 	}
-	// The codex adapter's provider route is wired the same way (WS-12).
+	// The codex adapter's provider route is wired the same way.
 	if e, ok := envValue(harness, "OPENAI_BASE_URL"); !ok || e.Value != "http://127.0.0.1:8099/openai" {
 		t.Errorf("harness OPENAI_BASE_URL = %q (ok=%v)", e.Value, ok)
 	}

@@ -192,7 +192,7 @@ func TestRunEventJournalAndGatewayReplay(t *testing.T) {
 	}
 }
 
-// TestListRunsProjectQueryParam proves the ?project= query param (WS-20)
+// TestListRunsProjectQueryParam proves the ?project= query param
 // actually reaches coreapi.ListRuns and narrows the result -- the apiserver
 // handler previously never read it at all, so it was silently ignored no
 // matter what a caller passed.
@@ -216,7 +216,7 @@ func TestListRunsProjectQueryParam(t *testing.T) {
 	}
 }
 
-// TestDeleteAndStopRun covers the WS-15 Part C endpoints.
+// TestDeleteAndStopRun covers both lifecycle endpoints.
 func TestDeleteAndStopRun(t *testing.T) {
 	h, lc, _ := newTestServerWithLauncher(t)
 	do(t, h, "POST", "/v1/projects", "u@x", `{"name":"p","repo":"x/y"}`)
@@ -333,10 +333,10 @@ func TestGetRunNotFound(t *testing.T) {
 	}
 }
 
-// TestGetRunSurfacesPRURLFromCRStatus is the WS-11 mirror assertion: once the
+// TestGetRunSurfacesPRURLFromCRStatus verifies status mirroring: once the
 // operator writes the run's results into the AgentRun CR status, a live
-// GET /v1/runs/{id} surfaces prUrl (the CR is authoritative for status; the
-// store row is refreshed at read time — same rule as WS-3's runFromCR).
+// GET /v1/runs/{id} surfaces prUrl. The CR is authoritative for status, and
+// runFromCR refreshes the store projection at read time.
 func TestGetRunSurfacesPRURLFromCRStatus(t *testing.T) {
 	h, lc, _ := newTestServerWithLauncher(t)
 	id, ns := createRunViaAPI(t, h)
@@ -481,7 +481,7 @@ func (r *slowReader) Read(p []byte) (int, error) {
 
 func (r *slowReader) Close() error { return nil }
 
-// TestRunLogsFollowSurvivesServerWriteTimeout proves the WS-16 A.2 fix: the
+// TestRunLogsFollowSurvivesServerWriteTimeout verifies that the
 // apiserver's blanket http.Server.WriteTimeout (added for slowloris
 // hardening; cmd/wren-apiserver/main.go) must not truncate the `?follow=true`
 // log-tail endpoint. It runs the real handler behind a REAL http.Server

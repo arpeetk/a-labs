@@ -322,7 +322,7 @@ func TestRunHydrate_RestoreRequired_PicksLatest(t *testing.T) {
 	}
 }
 
-// TestRunHydrate_ResumeNoRestore_Unchanged: the ordinary (pre-WS-21)
+// TestRunHydrate_ResumeNoRestore_Unchanged covers the ordinary
 // crash-resume path where the PVC survived stays a no-op, even with a
 // checkpoint mount configured — restoring into a non-empty workspace would be
 // wrong (it's not what RestoreRequired=false means).
@@ -477,7 +477,7 @@ func TestRunCheckpointer_SelfCheckFailsNonFatal(t *testing.T) {
 
 // TestRunCheckpointer_PeriodicSnapshots: with a short tick interval, the
 // checkpointer takes multiple real snapshots of the workspace and Puts each
-// one to the mount as a distinct object — not just the WS-18 self-check.
+// one to the mount as a distinct object — not just the startup self-check.
 func TestRunCheckpointer_PeriodicSnapshots(t *testing.T) {
 	ws := t.TempDir()
 	if err := os.WriteFile(filepath.Join(ws, "marker.txt"), []byte("hello workspace\n"), 0o644); err != nil {

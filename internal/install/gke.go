@@ -44,7 +44,7 @@ func checkGCloudAuth(ctx context.Context, r Runner) error {
 
 // deleteGKECluster permanently deletes the GKE cluster wren uninstall
 // --delete-cluster targets — the uninstall counterpart to Options.CreateCluster's
-// provisionGKE, closing the natural follow-up WS-17 flagged. Idempotent: an
+// provisionGKE. It is idempotent: an
 // already-absent cluster (checked the same way provisionGKE checks for reuse)
 // is treated as success rather than erroring, so a repeat --delete-cluster
 // uninstall converges.
@@ -77,7 +77,7 @@ func (in *Installer) deleteGKECluster(ctx context.Context, opts UninstallOptions
 // grant the node service account registry-pull access — closing the exact gap
 // diagnosePullFailure/imagePullRemedy (commit 84a4337) exist to catch on
 // bring-your-own clusters. GKE Standard only (never `clusters create-auto`):
-// Autopilot forbids the WS-1 egress-lockdown privileged init container. No-op
+// Autopilot forbids the egress-lockdown privileged init container. No-op
 // unless --create-cluster. Runs before checkServer so the cluster is reachable
 // by the time Install() talks to it. gcloud is driven through the same Runner
 // seam every other external tool uses — no GCP Go SDK.

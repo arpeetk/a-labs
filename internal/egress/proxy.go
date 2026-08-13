@@ -1,11 +1,11 @@
-// Package egress implements the agent pod's egress-proxy (spec §5.6): the pod's
-// controlled route to the internet. It (1) reverse-proxies specific upstreams
+// Package egress implements the agent pod's controlled route to the internet.
+// It (1) reverse-proxies specific upstreams
 // (github.com, api.github.com, api.anthropic.com, api.openai.com) injecting
 // per-run credentials so the untrusted runner never holds a secret, and (2)
 // enforces a domain allowlist for any other egress (HTTP forward + CONNECT
 // tunneling).
 //
-// Enforcement (WS-1): the runner is *physically* prevented from bypassing this
+// Enforcement: the runner is *physically* prevented from bypassing this
 // proxy by in-pod iptables uid-isolation — the `egress-lockdown` init container
 // rejects all OUTPUT except (a) traffic to the proxy's localhost port and (b)
 // traffic owned by the proxy's own uid (65533). The runner (uid 65532) can reach
@@ -186,7 +186,7 @@ func (p *Proxy) handleConnect(w http.ResponseWriter, r *http.Request) {
 	// connect-time) would silently redirect the tunnel. Resolving once and
 	// dialing that literal address closes the window: whatever address this
 	// request's tunnel reaches is the exact one that was just validated,
-	// full stop (WS-1 review follow-up, WS-16 A.3).
+	// full stop; resolution and dialing must use the same address.
 	host, port := stripPort(r.Host), portOf(r.Host)
 	ip, err := resolveHost(host)
 	if err != nil {

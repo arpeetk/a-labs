@@ -10,8 +10,8 @@
 # helpers below): PF_PID, RUN_ID, RUN_NS, WREN_CONFIG_DIR, STATUS, WREN, API.
 #
 # hack/ is dev/test tooling ONLY (code standards rule 8) — this lib has no
-# product-surface use, it only exists to keep the two e2e gates from drifting
-# (WS-16 A.1: they'd grown near-identical preamble/teardown/polling logic).
+# product-surface use. It keeps their shared preamble, teardown, and polling
+# behavior from drifting.
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }

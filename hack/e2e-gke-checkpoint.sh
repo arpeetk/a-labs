@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wren GKE checkpoint/restore end-to-end test (WS-21) — validates real periodic
+# Wren GKE checkpoint/restore end-to-end test — validates real periodic
 # checkpoint snapshots and restore-from-checkpoint on a real cluster.
 #
 # hack/ is dev/test tooling ONLY (code standards rule 8): installing Wren on a
@@ -8,7 +8,7 @@
 # Assumes a GKE Standard cluster already exists (this script does NOT create
 # or delete it — same convention as hack/e2e-gke.sh) with Workload Identity
 # enabled (--workload-pool set at creation) and Private Google Access on the
-# node subnet (SETUP.md prerequisite for the gcs-fuse egress exemption, WS-19).
+# node subnet (a prerequisite for the GCS FUSE egress exemption; see SETUP.md).
 # It DOES idempotently: enable the GcsFuseCsiDriver addon, create the
 # checkpoint bucket + a dedicated GSA + its bucket IAM binding, and create/bind
 # the run-namespace's wren-checkpointer KSA — the one-time SETUP.md recipe,
@@ -25,8 +25,8 @@
 #     restored file CONTENT verified, not just a log line.
 #   - The same loss with zero checkpoints ever taken fails deterministically
 #     (PhaseFailed, not an infinite retry loop).
-#   - The same loss with --checkpoint-gcs-mount OFF is unaffected (the
-#     pre-WS-21 errWorkspaceLost/"WorkspaceLost" behavior, unchanged).
+#   - With --checkpoint-gcs-mount OFF, the same loss retains the legacy
+#     errWorkspaceLost/"WorkspaceLost" behavior.
 #
 # The mock harness completes in well under a second, so "delete the PVC
 # mid-run" is a real race against the run reaching Succeeded (once a run's
@@ -50,7 +50,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-# shellcheck source=lib/e2e-common.sh
+# shellcheck source=hack/lib/e2e-common.sh
 source "$REPO_ROOT/hack/lib/e2e-common.sh"
 
 GKE_PROJECT="${GKE_PROJECT:-wren-gke-fdea81}"
@@ -209,8 +209,8 @@ create_run() {
 # emptyDir workspace and Puts real tar.gz checkpoints every 3s via the SAME
 # production RunCheckpointer code path (not a direct `gcloud storage cp` —
 # that bypasses the GCS FUSE mount's own directory-creation semantics and is
-# invisible to a later mount's listing, a real quirk found live during this
-# workstream's manual verification, not a product bug).
+# invisible to a later mount's listing, a real GCS FUSE behavior rather than a
+# product bug).
 seed_checkpoint_pod() {
   local run_id="$1" marker="$2"
   local name="wren-e2e-seed-${run_id}"
@@ -302,8 +302,8 @@ wait_seed_ready() {
 # catch_running_and_break's 2nd arg, if non-empty, is eval'd immediately after
 # a fresh RUN_ID is known — BEFORE the Running-polling loop, not after it —
 # so a seed-checkpoint pod started there runs concurrently with the run's own
-# race to Running. That ordering matters: this workstream's manual live
-# verification found that waiting for a checkpoint to land AFTER catching
+# race to Running. That ordering matters: live verification found that waiting
+# for a checkpoint to land AFTER catching
 # Running (i.e. after break_workspace) reliably loses the race — the mock
 # harness reaches Succeeded well within a checkpoint's tick interval, so the
 # run is already terminal by the time the workspace gets broken, and the
@@ -345,8 +345,8 @@ break_workspace() {
   # Wait on these two PIDs specifically — a bare `wait` waits for EVERY
   # background job of this shell, including the long-lived apiserver
   # port-forward (PF_PID) started in step 5, which never exits on its own.
-  # That hung this exact call for 40+ minutes the first time this script ran
-  # live: found and fixed during this workstream's own e2e-script bring-up.
+  # Waiting without explicit PIDs would also include the long-lived
+  # port-forward and hang this call indefinitely.
   wait "$pod_pid" "$pvc_pid"
 }
 
@@ -402,6 +402,8 @@ log "scenario B: positive restore — mid-run workspace loss with a real checkpo
 # The seed pod is started concurrently with the Running-race (via the hook),
 # not after catching Running — see catch_running_and_break's comment for why
 # that ordering is load-bearing, not cosmetic.
+# The hook is evaluated after catch_running_and_break sets RUN_ID.
+# shellcheck disable=SC2016
 catch_running_and_break "e2e-checkpoint: positive restore" \
   'seed_checkpoint_pod "$RUN_ID" "wren e2e positive-restore marker $RUN_ID"'
 POS_RUN_ID="$RUN_ID"
@@ -474,7 +476,7 @@ reason="$(k -n "$NS_RUNS" get agentrun "$NEG_RUN_ID" -o jsonpath='{.status.condi
 log "  [PASS] deterministic PhaseFailed/HarnessError — not an infinite retry loop"
 
 # --- 9. scenario D: regression — checkpointing NOT configured ---
-log "scenario D: regression — --checkpoint-gcs-mount off behaves exactly as before WS-21"
+log "scenario D: checkpoint storage disabled retains WorkspaceLost behavior"
 k -n "$NS_SYSTEM" patch deploy/wren-operator --type=json -p="[
   {\"op\":\"replace\",\"path\":\"/spec/template/spec/containers/0/args\",\"value\":[
     \"--leader-elect\",
@@ -489,9 +491,9 @@ catch_running_and_break "e2e-checkpoint: regression (flag off)"
 REG_RUN_ID="$RUN_ID"
 break_workspace "$REG_RUN_ID"
 final_phase="$(wait_for_phase "$REG_RUN_ID" 60)"
-[ "$final_phase" = "Failed" ] || die "scenario D: expected Failed (unchanged pre-WS-21 behavior), got ${final_phase}"
+[ "$final_phase" = "Failed" ] || die "scenario D: expected Failed with checkpoint storage disabled, got ${final_phase}"
 reason="$(k -n "$NS_RUNS" get agentrun "$REG_RUN_ID" -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}')"
-[ "$reason" = "WorkspaceLost" ] || die "scenario D: expected reason=WorkspaceLost (pre-WS-21 path), got ${reason}"
+[ "$reason" = "WorkspaceLost" ] || die "scenario D: expected reason=WorkspaceLost with checkpoint storage disabled, got ${reason}"
 restart_count="$(k -n "$NS_RUNS" get agentrun "$REG_RUN_ID" -o jsonpath='{.status.restartCount}')"
 [ "$restart_count" = "1" ] || die "scenario D: expected the pod+PVC loss incident to consume one retry, got restartCount=${restart_count}"
 for _ in $(seq 1 20); do

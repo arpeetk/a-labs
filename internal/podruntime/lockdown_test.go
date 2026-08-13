@@ -157,7 +157,7 @@ func TestRunLockdownAppliesIPv6RulesWhenBinaryPresent(t *testing.T) {
 	}
 }
 
-// gcsFuseTestCfg is a lockdown config with the WS-19 GCS-FUSE exemption active:
+// gcsFuseTestCfg is a lockdown config with the GCS FUSE exemption active:
 // the sidecar uid (65534) may reach the restricted Google APIs VIP and the
 // metadata server, and nothing else.
 func gcsFuseTestCfg() LockdownConfig {
@@ -169,8 +169,8 @@ func gcsFuseTestCfg() LockdownConfig {
 	}
 }
 
-// TestGCSFuseExemptionScopedByUIDAndDest is the load-bearing WS-19 security test
-// (brief outcome B): the new exemption must let ONLY the gcs-fuse sidecar uid
+// TestGCSFuseExemptionScopedByUIDAndDest is the load-bearing security test: the
+// exemption must let ONLY the gcs-fuse sidecar uid
 // reach ONLY the two fixed destinations, and must NOT give the untrusted runner
 // (uid 65532, pinned in the pod spec by hardened()) any way to reach them. If
 // this ever regresses, the harness could exfiltrate to Cloud Storage.
@@ -241,7 +241,7 @@ func TestGCSFuseExemptionIPv4Only(t *testing.T) {
 }
 
 // TestNoGCSFuseExemptionWhenUnset: with no sidecar uid configured (the common
-// case — no GCS mount), the rule set is exactly the original WS-1 lockdown.
+// case — no GCS mount), the rule set is exactly the base lockdown.
 func TestNoGCSFuseExemptionWhenUnset(t *testing.T) {
 	base := LockdownConfig{EgressPort: "8099", ProxyUID: "65533"}
 	rules := iptablesRules(base, rejectIPv4)

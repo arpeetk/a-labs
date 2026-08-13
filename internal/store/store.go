@@ -1,8 +1,8 @@
 // Package store is the control plane's persistence layer: Projects and Runs.
 //
-// It defines the Store interface plus two implementations: in-memory (the
-// default; tests and local development) and Postgres (postgres.go, pgx/v5 —
-// spec §5.2). Callers depend only on the interface.
+// It defines the Store interface plus two implementations: in-memory for tests
+// and local development, and Postgres via pgx/v5. Callers depend only on the
+// interface.
 package store
 
 import (
@@ -23,7 +23,7 @@ var ErrExists = errors.New("already exists")
 // process that died after claiming an operation.
 var ErrLeaseLost = errors.New("operation lease lost")
 
-// Project is a registered repo and its run defaults (spec §4).
+// Project is a registered repository and its run defaults.
 type Project struct {
 	Name             string    `json:"name"` // unique id, e.g. "payments-api"
 	Repo             string    `json:"repo"` // GitHub "owner/repo"
@@ -136,7 +136,7 @@ type Store interface {
 	UpdateRun(ctx context.Context, r *Run) error
 	// DeleteRun removes a run's store record (ErrNotFound if unknown). The
 	// AgentRun CR and its owned pod/PVC are deleted separately by the launcher
-	// (`wren run rm`, WS-15 Part C).
+	// (`wren run rm`).
 	DeleteRun(ctx context.Context, id string) error
 }
 

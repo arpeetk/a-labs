@@ -13,12 +13,12 @@ import (
 
 // OpenCode runs a task with the OpenCode CLI: it drives `opencode run` (the
 // CLI's non-interactive mode) inside the workspace and streams its
-// --format=json events onto the Wren event bus (spec §5.4).
+// --format=json events onto the Wren event bus.
 //
 // OpenCode rides the existing Anthropic egress route — no new proxy surface:
 // the adapter renders a per-run opencode config pointing the anthropic
 // provider's baseURL at the injected ANTHROPIC_BASE_URL, and the proxy injects
-// the real x-api-key on the way out (spec §5.6).
+// the real x-api-key on the way out.
 type OpenCode struct{}
 
 // Name implements Harness.
@@ -51,7 +51,7 @@ func (OpenCode) Run(ctx context.Context, spec runspec.RunSpec, em *Emitter) (Res
 // opencodeArgs builds the headless invocation (opencode.ai/docs/cli):
 // `opencode run --format json` emits raw JSON events; --auto auto-approves
 // permission prompts — safe for the same reason as claude's
-// --dangerously-skip-permissions: the pod IS the sandbox (spec §5.6).
+// --dangerously-skip-permissions: the pod IS the sandbox (spec: egress and security).
 func opencodeArgs(spec runspec.RunSpec) []string {
 	args := []string{"run", "--format", "json", "--auto"}
 	if spec.Model != "" {

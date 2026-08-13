@@ -7,7 +7,7 @@ import (
 
 // Authorizer injects a credential into an outbound request. Implementations are
 // applied by the proxy on the way to an upstream, so the credential never lives
-// in the untrusted runner (spec §5.6/§5.7).
+// in the untrusted runner (spec: egress and finalization).
 type Authorizer interface {
 	Apply(*http.Request)
 }

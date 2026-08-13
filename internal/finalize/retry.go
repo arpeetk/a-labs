@@ -19,7 +19,7 @@ import (
 // failed for transport-class reasons (network, HTTP 429/5xx, EOF/timeout) that
 // a fresh pod may get past. podruntime maps it onto its own ErrRetryable, which
 // cmd/wren-runtime turns into runspec.ExitRetryable so the operator spends a
-// restart instead of killing a run that has budget to spare (WS-11).
+// restart instead of killing a run that has budget to spare.
 var ErrRetryable = errors.New("retryable finalize error")
 
 // classify wraps err in ErrRetryable when it is transport-class. Permanent

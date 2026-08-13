@@ -16,7 +16,7 @@ import (
 )
 
 // migrationsFS holds the forward-only SQL migrations. Two tables don't justify
-// a migration framework (spec §5.2 / implementation-plan §WS-3): a tiny in-code
+// a migration framework: a small in-code
 // migrator runs the embedded files in filename order and records the highest
 // applied version in schema_version. Revisit at v0.3.
 //

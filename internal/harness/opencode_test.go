@@ -48,7 +48,7 @@ func TestOpenCodeArgs(t *testing.T) {
 }
 
 // The rendered config points opencode's anthropic provider at the
-// egress-proxy's route (the proxy injects the real key — spec §5.6).
+// egress-proxy's route (the proxy injects the real key — spec: egress and security).
 func TestOpenCodeConfigJSON(t *testing.T) {
 	var parsed struct {
 		Provider map[string]struct {

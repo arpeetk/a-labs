@@ -14,7 +14,7 @@ import (
 
 // newInstallCmd wires `wren install`: stand the control plane up on an existing
 // cluster (GKE via --registry, local eval via --kind). The flags only collect
-// decisions; the flow lives in internal/install (WS-13).
+// decisions; the flow lives in internal/install.
 func newInstallCmd() *cobra.Command {
 	var opts install.Options
 	var kubeContext string
@@ -76,7 +76,7 @@ func newInstallCmd() *cobra.Command {
 
 // newUninstallCmd wires `wren uninstall`: remove the install (namespaces +
 // CRDs). Destructive and gated behind --confirm — deleting the CRDs deletes
-// every AgentRun cluster-wide. --delete-cluster (WS-17 follow-up) goes one
+// every AgentRun cluster-wide. --delete-cluster goes one
 // step further and permanently deletes the underlying GKE cluster too — the
 // counterpart to `wren install --create-cluster`.
 func newUninstallCmd() *cobra.Command {

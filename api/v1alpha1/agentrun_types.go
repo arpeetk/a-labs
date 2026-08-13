@@ -7,7 +7,7 @@ import (
 
 // CancelAnnotation, set on an AgentRun, asks the operator to stop the run: it
 // deletes the current pod and drives the run to Canceled (terminal — NOT
-// auto-resumed, unlike a crash). `wren run stop` sets it (WS-15 Part C).
+// auto-resumed, unlike a crash). `wren run stop` sets it.
 const CancelAnnotation = "wren.dev/cancel"
 
 // PauseAnnotation asks the operator to quiesce the harness, publish and verify
@@ -34,8 +34,9 @@ const (
 	HarnessBYO        HarnessKind = "byo"
 )
 
-// RuntimeClass selects the pod sandbox runtime. v1 defaults to runc; gVisor and
-// Kata are pluggable and land in a later milestone (see the technical spec §5.6).
+// RuntimeClass selects the pod sandbox runtime. Current install paths support
+// runc; gVisor and Kata remain accepted API values for externally provisioned
+// clusters but are not provisioned or supported by the installer.
 type RuntimeClass string
 
 const (

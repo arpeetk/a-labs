@@ -187,10 +187,9 @@ func TestCodexMissingBinary(t *testing.T) {
 	}
 }
 
-// The placeholder keys let the CLI start in API-key mode; the egress-proxy
-// overwrites the header on the /openai/ route (spec §5.6). Both CODEX_API_KEY
-// (the codex exec automation key per the non-interactive docs) and
-// OPENAI_API_KEY (fallback) both get one.
+// Placeholder keys let the CLI start in API-key mode; the egress proxy
+// overwrites the /openai/ header. CODEX_API_KEY (the non-interactive automation
+// key) and OPENAI_API_KEY (fallback) both receive a placeholder.
 func TestCodexEnvPlaceholderKey(t *testing.T) {
 	t.Setenv("CODEX_API_KEY", "")
 	t.Setenv("OPENAI_API_KEY", "")
@@ -264,8 +263,8 @@ func TestCodexRunsAndStreams(t *testing.T) {
 	}
 }
 
-// A failing CLI exits non-zero → the adapter returns the error (deterministic;
-// the operator must not retry — spec §5.4).
+// A failing CLI exits non-zero, so the adapter returns a deterministic error
+// that the operator must not retry.
 func TestCodexRunFailurePropagates(t *testing.T) {
 	fakeBin := t.TempDir()
 	script := "#!/bin/sh\n" +

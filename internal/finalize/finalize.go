@@ -1,5 +1,5 @@
-// Package finalize turns a completed run's workspace changes into a pull request
-// (spec §5.7 PR flow): commit the changes on a run branch, push, and open a PR
+// Package finalize turns a completed run's workspace changes into a pull request:
+// commit the changes on a run branch, push, and open a PR
 // with the rubric body. It composes internal/gitwork and internal/github, so it
 // is testable against a local bare repo and a fake GitHub client.
 package finalize

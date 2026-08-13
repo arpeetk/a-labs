@@ -31,7 +31,7 @@ import (
 
 // realKube is the client-go implementation of Kube. It is deliberately thin —
 // all decisions live in the Installer — and is exercised against a real cluster
-// by `wren install --kind` (the WS-13 DoD); the unit tests cover it through the
+// by the `wren install --kind` end-to-end gate; unit tests cover it through the
 // client-go fakes where those exist (kubernetes/fake).
 type realKube struct {
 	cs     kubernetes.Interface
@@ -213,7 +213,7 @@ func (k *realKube) SecretValue(ctx context.Context, ns, name, key string) (strin
 // with field-manager "wren". SSA is what makes re-installs idempotent: the same
 // rendered asset applied twice converges instead of conflicting. NOTE: the
 // client-go fakes do not model SSA, so this is covered against a real cluster
-// by `wren install --kind` (run twice, in the WS-13 DoD) — the decoding half is
+// by running the `wren install --kind` end-to-end gate twice; the decoding half is
 // unit-tested via splitManifests.
 func (k *realKube) ApplyManifests(ctx context.Context, data []byte) error {
 	objs, err := splitManifests(data)
@@ -362,7 +362,7 @@ func (k *realKube) OverrideImages(ctx context.Context, registry, tag string) err
 // SetApiserverRunNamespace sets WREN_DEFAULT_RUN_NAMESPACE on the apiserver
 // container so `wren project create` with no --namespace lands runs in the
 // install's --run-namespace — the namespace where the proxy credential Secrets
-// live (WS-15 Part A). Replaces the env in place if present (the manifest ships
+// live. Replaces the env in place if present (the manifest ships
 // a default), appends it otherwise. Idempotent across re-installs. Runs under
 // RetryOnConflict for the same reason as OverrideImages: it lands right after
 // that call touches the same Deployment, while the Deployment controller is
@@ -443,7 +443,7 @@ func (k *realKube) SetServiceType(ctx context.Context, ns, name, svcType string)
 // note), and "control plane did not become Ready" + "check the logs" is a
 // dead end for it — an ImagePullBackOff pod never starts, so there ARE no
 // logs. diagnosePullFailure turns that into an actionable, project-specific
-// remediation instead (WS-16 follow-up: preflight the GKE IAM gap).
+// remediation instead of leaving users with opaque Kubernetes events.
 func (k *realKube) WaitDeployments(ctx context.Context, ns string, names []string, timeout time.Duration) error {
 	deploys := k.cs.AppsV1().Deployments(ns)
 	for _, name := range names {

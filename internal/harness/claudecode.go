@@ -12,7 +12,7 @@ import (
 // headless mode inside the cloned workspace, letting the agent read/edit files
 // and run tools autonomously, and streams its stream-json events onto the Wren
 // event bus. Model calls go through the egress-proxy (ANTHROPIC_BASE_URL); the
-// real API key is injected there, never held by the runner (spec §5.4/§5.6).
+// real API key is injected there, never held by the runner (spec: harness and egress contracts).
 type ClaudeCode struct{}
 
 // Name implements Harness.

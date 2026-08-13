@@ -1,13 +1,13 @@
 // Package runspec defines the RunSpec contract the operator hands to a harness
 // runner. The operator marshals a RunSpec to JSON, stores it in a per-run
 // ConfigMap, and mounts it into the pod at MountPath/FileName. Every harness
-// image (claude-code, codex, byo) reads this file on startup (spec §5.4).
+// image reads this file on startup.
 package runspec
 
 import "path/filepath"
 
-// Harness process exit codes (spec §5.4). The operator reads the exit code to
-// decide whether a failed run may be retried: a clean error is deterministic and
+// The operator uses harness exit codes to decide whether a failure may be
+// retried. A clean error is deterministic and
 // must not be retried (it would just repeat and re-spend the agent's tokens),
 // while ExitRetryable signals a transient condition worth a fresh pod.
 const (

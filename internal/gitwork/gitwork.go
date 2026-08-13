@@ -1,7 +1,7 @@
 // Package gitwork performs the git operations of a run's finalize step using
 // go-git (pure Go, so it runs in the distroless runtime image without a git
 // binary): clone the repo, commit the workspace changes on a new branch, and
-// push it so a PR can be opened (spec §5.7).
+// push it so a PR can be opened (spec: finalization).
 package gitwork
 
 import (

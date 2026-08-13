@@ -1,293 +1,192 @@
-# AGENTS.md — Working guide for Wren
+# AGENTS.md — working in Wren
 
-This file tells a coding agent (or a new engineer) how to work in this repo: the
-layout, how to build/test, and the standards to follow. Read it before making
-changes. It complements the design doc at [`docs/technical-spec.md`](docs/technical-spec.md)
-— keep both current as you work.
+Read this file before changing the repository. Wren is a Kubernetes/GCP
+software-factory control plane: the CLI submits a run, the API persists and
+publishes it, the operator creates a hardened agent pod, and the pod restores a
+workspace, runs a coding harness, checkpoints progress, and opens a pull
+request.
 
-**Wren** is the backbone of an internal *Software Factory*: a CLI + GCP/Kubernetes
-control plane that runs parallel, durable, sandboxed coding agents in the cloud.
-A run is submitted, executes in a hardened pod, survives crashes, and opens a PR.
+The current architecture and contracts live in
+[`docs/technical-spec.md`](docs/technical-spec.md). Documentation navigation is
+in [`docs/README.md`](docs/README.md), and intentional gaps are listed once in
+[`docs/roadmap.md`](docs/roadmap.md). Git history and pull requests—not planning
+briefs in the tree—are the record of completed work.
 
----
+## Toolchain
 
-## 1. Toolchain & prerequisites
+| Tool | Minimum/use |
+|---|---|
+| Go 1.26+ | all Go builds, tests, generation |
+| Docker | runtime and harness images |
+| kind 0.32+ | local Kubernetes end-to-end gates |
+| kubectl 1.27+ | cluster inspection and product tests |
+| gh | authenticated GitHub/release checks |
 
-| Tool | Version | Notes |
-|---|---|---|
-| Go | **1.26+** | ⚠️ see PATH gotcha below |
-| Docker | any recent | for building the runtime image + kind |
-| kind | v0.32+ | local Kubernetes for e2e |
-| kubectl | 1.27+ | talk to the cluster |
-| gh | any | GitHub auth for live-PR testing |
-| controller-gen | pinned via `go run` | codegen; no install needed |
-
-> **PATH gotcha (important):** a stale Go 1.17 lives at `/usr/local/go/bin/go` and
-> **shadows** the usable Homebrew Go 1.26 at `/opt/homebrew/bin/go`. Prefix every
-> Go/build command with:
->
-> ```sh
-> export PATH="/opt/homebrew/bin:$PATH"
-> ```
->
-> (Or fix your profile so `/opt/homebrew/bin` precedes `/usr/local/go/bin`.)
-
-> **zsh gotcha:** zsh does **not** word-split unquoted variables, so
-> `CMD="kubectl ..."; $CMD` fails. Inline commands instead of storing them in a var.
-
-**Module path:** `github.com/summiteight/wren` (the project identity). The repo is
-hosted at `arpeetk/a-labs`; the module path intentionally differs and is not
-`go get`-able externally. All imports use the `github.com/summiteight/wren/...`
-prefix.
-
----
-
-## 2. Repository layout
-
-```
-api/v1alpha1/          CRD: AgentRun (types + generated deepcopy)
-cmd/
-  wren/                CLI entrypoint
-  wren-apiserver/      control-plane HTTP API server
-  wren-operator/       Kubernetes controller (controller-runtime manager)
-  wren-runtime/        multi-call in-pod binary (harness + sidecars)
-internal/
-  cli/                 cobra command tree
-  client/              CLI → control-plane HTTP client
-  config/              CLI config (~/.config/wren/config.yaml)
-  apiserver/           HTTP/JSON handlers (spec §5.2 REST mapping)
-  coreapi/             control-plane business logic (Runs + Projects services)
-  store/               persistence: Store interface + in-memory impl
-  launcher/            creates AgentRun CRs (Launcher interface + K8s impl + Fake)
-  controller/          AgentRun reconciler + pod builder
-  runspec/             the RunSpec contract handed to a harness
-  blob/                checkpoint Store + mounted-filesystem impl + safe archive/restore
-  harness/             harness adapters (mock, claude-code, codex, opencode) + event protocol
-  podruntime/          in-pod role runners (harness/hydrate/sidecars) + dispatch
-  egress/              the credential-injecting allowlist proxy (github/anthropic/openai routes)
-  github/              GitHub PR client + test fake
-  gitwork/             go-git clone/commit/push (no git binary needed)
-  finalize/            commit → push branch → open PR (+ rubric)
-  install/             wren install/uninstall (embedded config/default render + assets)
-config/                kustomize manifests (crd, rbac, manager) + samples
-build/                 Dockerfile.runtime + per-harness images (claude-code, codex, opencode) + generic gobin
-hack/                  dev/test tooling ONLY (e2e gates) — onboarding/install is
-                       product surface and lives in the CLI (code standards rule 8)
-                       hack/lib/e2e-common.sh holds logic shared by e2e.sh/
-                       e2e-gke.sh/e2e-gke-checkpoint.sh
-docs/technical-spec.md the living design spec (Draft v0.5 — keep this in sync
-                       when you bump it; it drifts if only one of the two gets updated)
-```
-
-**Component flow (Journey A):**
-`wren CLI` → `wren-apiserver` (coreapi/store/launcher) → creates an `AgentRun` CR
-→ `wren-operator` reconciles → hardened pod (`wren-runtime`: hydrate → harness →
-finalize) → opens a PR → status mirrored back to the CLI.
-
----
-
-## 3. Build
+On the primary development machine, `/usr/local/go/bin/go` is stale. Put the
+Homebrew toolchain first for every Go or make command:
 
 ```sh
 export PATH="/opt/homebrew/bin:$PATH"
-make build            # ./bin/wren            (CLI)
-make build-operator   # ./bin/wren-operator
-make build-apiserver  # ./bin/wren-apiserver
-make build-runtime    # ./bin/wren-runtime
-make docker-runtime   # wren/runtime:dev image
-make assets           # re-render internal/install/assets/manifests.yaml after
-                      # changing config/ (make check-assets guards drift in CI)
 ```
 
-## 4. Test & coverage
+zsh does not split unquoted scalar variables. Do not store a whole command in a
+string and invoke `$CMD`; use a function, an array, or write the command
+directly.
 
-```sh
-make test             # go test ./...
-make cover            # go test -cover ./...
-make vet              # go vet ./...
-make fmt              # gofmt -w .
+The module path is `github.com/summiteight/wren`. The hosting repository name
+may differ; imports intentionally use the module identity.
+
+## Repository map
+
+```text
+api/v1alpha1/        AgentRun CRD API and generated deepcopy
+cmd/wren/            CLI entrypoint
+cmd/wren-apiserver/  HTTP control-plane entrypoint
+cmd/wren-operator/   controller-runtime manager
+cmd/wren-runtime/    multi-call in-pod runtime
+cmd/wren-desktop/    Wails native app and React frontend
+
+internal/apiserver/  transport handlers and error mapping
+internal/coreapi/    project/run business rules and cluster reconciliation
+internal/store/      memory and Postgres persistence, outbox, event journal
+internal/launcher/   Kubernetes AgentRun/log bridge
+internal/controller/ AgentRun lifecycle and hardened pod construction
+internal/runspec/    versioned input contract mounted into a run pod
+internal/harness/    mock, Claude Code, Codex, and OpenCode adapters
+internal/podruntime/ hydrate, harness, gateway, checkpoint, proxy roles
+internal/blob/       mounted checkpoint store and safe archive/restore
+internal/egress/     allowlist proxy and credential injection
+internal/gitwork/    go-git clone/commit/push
+internal/github/     pull-request client; shared fakes are in githubtest
+internal/finalize/   idempotent branch/push/PR workflow
+internal/install/    install/uninstall orchestration and embedded manifests
+internal/desktop/    native app backend
+
+config/              kustomize source manifests and production overlays
+build/               reproducible runtime/harness Dockerfiles
+hack/                test gates only; never put product onboarding here
+docs/                maintained architecture, operations, and standards
 ```
 
-**Coverage bar:** keep coverage **high** on every logic package, and ship tests in
-the *same change* as new code — do not defer. Run `make cover` for live numbers
-rather than trusting a hardcoded table here — every package's percentage has
-moved, sometimes by double digits, across nearly every workstream this project
-has shipped, in both directions (`internal/launcher` went 57%→77% when its
-real-Kubernetes-backed methods finally got tested against a fake clientset
-instead of only their test double; `internal/store`'s share dropped as
-Postgres's error-branch code diluted an already-high percentage). As of
-2026-07-27, every logic package sits roughly **mid-70s to mid-90s**; treat a
-new package landing meaningfully below that band as a signal to add tests, not
-as the new normal. `cmd/*` `main` wiring and real-network glue (real GitHub
-client, real `claude`/`codex`/`opencode` CLIs) are the only intentionally-
-uncovered spots — call those out explicitly if you add more.
+Primary flow:
 
-## 5. Code generation (when you change `api/v1alpha1`)
-
-```sh
-make generate    # regenerate zz_generated.deepcopy.go
-make manifests   # regenerate config/crd/bases + config/rbac
+```text
+wren CLI/desktop → apiserver → store + launch outbox → AgentRun CR
+  → operator → PVC + hardened pod
+  → hydrate → harness → finalize
+  ↘ gateway events / checkpoints / CR status → control plane
 ```
 
-Adding a plain scalar field does not strictly require `generate` (shallow copy
-covers it), but **always run `manifests`** so the CRD schema accepts the field,
-and re-apply the CRD to any running cluster (`kubectl apply -f config/crd/bases/`).
-
----
-
-## 6. Conventions & standards
-
-- **Standards (read these):** [`docs/standards/testing.md`](docs/standards/testing.md),
-  [`docs/standards/code.md`](docs/standards/code.md),
-  [`docs/standards/review.md`](docs/standards/review.md) — the repo's testing,
-  code, and review rules, each with the incident that taught it.
-- **Interface + real impl + fake.** External dependencies (Kubernetes, GitHub,
-  the store) are behind a small interface, with a real implementation and an
-  in-memory `Fake`/`Memory` for tests. Business logic depends on the interface,
-  never the concrete client. See `store`, `launcher`, `github`.
-- **Hermetic tests.** Prefer tests with no network: controller-runtime `fake`
-  client for reconcilers, `httptest` for HTTP and mocked GitHub APIs, local bare
-  git repos for `gitwork`/`finalize`. Inject `now`/`idgen`/clients via unexported
-  seams (see `coreapi.Service`, `podruntime.newGitHubClient`).
-- **Errors:** wrap with `%w` and context (`fmt.Errorf("do x: %w", err)`); export
-  sentinel errors (`ErrNotFound`, `ErrValidation`, `ErrNoChanges`) and map them at
-  the transport boundary (`apiserver.writeServiceErr`).
-- **Security posture (do not regress):** the agent runner is untrusted. Pods are
-  hardened (non-root, read-only rootfs, dropped caps, seccomp, no SA token). The
-  runner must hold **no long-lived secrets** in the target design — the current
-  `GITHUB_TOKEN`-in-env is a labelled **M0 stand-in** for egress-proxy injection.
-- **Comments** explain *why*, not *what*; match the surrounding density. Reference
-  the spec section a piece implements (e.g. "spec §5.7").
-- **Definition of done:** `gofmt` clean, `go vet` clean, `go test ./...` green,
-  new code covered, and the spec's living "Implementation status" block updated if
-  behavior/scope changed.
-
----
-
-## 7. Local end-to-end on kind
-
-> **Product path:** `wren install --kind <name>` automates steps 1–4 below
-> (cluster, CRDs, images, in-cluster control plane) — that is what users run.
-> The manual recipe remains the dev loop (operator/apiserver locally against
-> the cluster, fast rebuilds).
+## Build and generate
 
 ```sh
-export PATH="/opt/homebrew/bin:$PATH"
-
-# 1. cluster + CRDs
-kind create cluster --name wren-test
-kubectl --context kind-wren-test apply -f config/crd/bases/
-
-# 2. runtime image
-make docker-runtime
-kind load docker-image wren/runtime:dev --name wren-test
-
-# 3. operator (against the kind context)
-make build-operator
-kubectl config use-context kind-wren-test
-./bin/wren-operator --leader-elect=false --health-probe-bind-address=:8081 --metrics-bind-address=:8082 &
-
-# 4. control plane
+make build             # CLI
 make build-apiserver
-./bin/wren-apiserver --addr :8090 &
-
-# 5. (optional) real PR — inject a GitHub token as a Secret in the run namespace
-#    kubectl create secret generic wren-github-token -n <ns> --from-literal=token="$(gh auth token)"
-
-# 6. drive it
-make build
-curl -s -X POST localhost:8090/v1/projects -H 'X-Wren-User: admin' \
-  -d '{"name":"demo","repo":"owner/repo","harnessImage":"wren/runtime:dev","cpu":"200m","memory":"256Mi","disk":"1Gi"}'
-./bin/wren login --control-plane localhost:8090 --user you
-./bin/wren run create --project demo --task "..."
-./bin/wren run get <run-id>
-
-# teardown
-kind delete cluster --name wren-test
+make build-operator
+make build-runtime
+make build-desktop
+make docker-runtime
 ```
 
-Without a `GITHUB_TOKEN` Secret the run still reaches `Succeeded` (finalize skips
-the PR). With one, it opens a real PR.
-
-### Testing
-
-Unit tests: `make test vet` (see §4). For the full loop, `make e2e` is the
-**keyless end-to-end gate** — the objective merge check every workstream rides:
+After changing `api/v1alpha1`, run both generators and apply the regenerated CRD
+to any live test cluster:
 
 ```sh
-export PATH="/opt/homebrew/bin:$PATH"
-make e2e                 # kind cluster → build+load images → deploy control plane
-                         # → keyless mock run → assert Succeeded → teardown
-E2E_KEEP=1 make e2e      # keep the cluster + control plane up for debugging
-E2E_BAD_IMAGE=1 make e2e # failure-path demo: bad runtime image → log dump, non-zero exit
+make generate
+make manifests
 ```
 
-It needs **Docker + kind** and runs in <10 min with **zero credentials**. It
-registers a **repo-less** project through the deployed apiserver and submits the
-run via the `wren` CLI (`login` → `run create` → poll `run get`), so the gate
-drives the real path CLI → apiserver → operator. With no repo the run carries an
-empty `RunSpec.Repo`, so hydrate's clone and finalize's PR are both skipped (the
-keyless design). It is idempotent (creates or reuses the `${KIND_CLUSTER:-wren-e2e}`
-cluster; uses a throwaway `WREN_CONFIG_DIR` so it never touches your real CLI
-config) and, on failure, dumps the operator/apiserver logs, the AgentRun YAML, and
-every agent-pod container's logs before exiting non-zero.
+After changing `config/`, refresh the embedded installer render:
 
-The egress-proxy's credentialed upstreams are env-overridable (`WREN_GITHUB_UPSTREAM`,
-`WREN_GITHUB_API_UPSTREAM`, `WREN_ANTHROPIC_UPSTREAM`; default to the real
-endpoints) — the enabler for a later gitea-backed `e2e-pr` tier that asserts a
-real PR without touching github.com.
+```sh
+make assets
+make check-assets
+```
 
----
+Generated files are outputs, not alternate sources of truth. Do not hand-edit
+`zz_generated.deepcopy.go`, generated CRDs/RBAC, Wails bindings, or frontend
+build output.
 
-## 8. Status & M0 stand-ins (things deliberately not "real" yet)
+## Engineering rules
 
-- **CLI surface:** zero stand-ins as of WS-15 — every command `wren --help`
-  (and every subcommand's `--help`) lists actually works. `mcp`/
-  `usage`/`run attach`/`run steer`/`project config` used to exist as
-  placeholder commands that printed "not implemented yet"; they were removed
-  from the CLI entirely rather than left as stubs (code standards rule 8) —
-  they're still roadmap (M1–M2), just not shipped as fake commands in the
-  meantime. If you're adding a new command, ship it real or don't ship it.
-  `fleet` is implemented and live; it is no longer part of that removed list.
-- **Harness:** the **mock** adapter (deterministic, no key) is the default; the
-  real Claude Code adapter needs `ANTHROPIC_API_KEY` + the egress path. The
-  **codex** and **opencode** adapters (WS-12) are built — adapters, images,
-  the `/openai/` egress route, `--openai-key-secret`. Codex's Responses
-  HTTP/SSE path through secure egress is live-canary validated; **opencode is
-  not yet validated against the live provider** (no key in CI; see
-  docs/harnesses.md for the live-smoke recipe).
-- **Egress-proxy:** real — enforces the allowlist and injects github/anthropic/
-  openai credentials (`internal/egress`); the runner holds no token. Bypass is
-  **enforced** (WS-1): an `egress-lockdown` init container iptables-rejects all
-  runner egress except via the proxy's uid (runner/proxy uids are pinned in the
-  pod spec; a startup canary proves it per run). `--egress-enforcement=off` is
-  the escape hatch for clusters that forbid privileged init containers (e.g.
-  GKE Autopilot) — `config/netpol/` has a weaker NetworkPolicy layer for that
-  path. Residual: a runc escape to the node (gVisor/Kata, M4).
-  **checkpointer** is real when a checkpoint mount is configured: it writes
-  full-workspace tar.gz snapshots on the configured interval and hydrate
-  restores the newest snapshot after confirmed PVC loss. Production uses the
-  opt-in GCS-FUSE mount (`--checkpoint-gcs-mount`) with a dedicated Workload
-  Identity KSA; `--checkpoint-local-path` is a single-node kind/dev test backend
-  and is not node-durable. Without a mount, the checkpointer remains a liveness
-  sidecar and PVC reattach is the only workspace recovery layer. WS-22 adds
-  atomic manifest-last publication, SHA-256 read-back verification, bounded
-  retention, exact-checkpoint restore for user-controlled pause/resume, and
-  `status.lastCheckpoint` projection. Snapshots remain full archives (no
-  incremental bundles, `checkpoint_hint`, or final SIGTERM flush yet).
-  **gateway** now tails the harness JSONL stream from pod IPC and forwards it
-  through an authenticated proxy route into the durable run-event journal. The
-  proxy, not the harness/gateway, holds the credential and fixes the run identity.
-  Terminal CR status remains independently scraped by the operator as a safety
-  net for result projection.
-- **Transport:** control-plane API is HTTP/JSON (target: gRPC + Connect).
-- **Store:** in-memory (default) **or** Postgres (`--store=postgres` +
-  `DATABASE_URL`, `internal/store.Postgres`). Postgres atomically records a run,
-  launch intent, and submission event; leased workers replay idempotently across
-  replica death, migrations are HA-serialized, and `/readyz` checks the DB.
-  `config/production-gcp` supplies the two-replica Cloud SQL Auth Proxy shape;
-  managed instance/database/IAM provisioning remains external.
-- **Auth:** `X-Wren-User` header (target: OIDC/SSO).
-- **Kernel isolation:** `runc` (gVisor/Kata deferred to M4).
+Read the repository standards before implementation:
 
-When you make one of these real, remove its stand-in note here and in the spec.
+- [`docs/standards/code.md`](docs/standards/code.md)
+- [`docs/standards/testing.md`](docs/standards/testing.md)
+- [`docs/standards/review.md`](docs/standards/review.md)
+
+The load-bearing rules are:
+
+1. Keep external systems behind small interfaces. Business logic depends on
+   `store.Store`, `launcher.Launcher`, and `github.Client`, not concrete clients.
+2. Ship the real implementation and hermetic tests together. Use
+   controller-runtime fake clients, `httptest`, and local bare Git repositories.
+3. Wrap errors with `%w` and operation context. Map sentinel errors at transport
+   boundaries; do not match human-readable strings.
+4. Make retry behavior explicit. Deterministic failures terminate; transient
+   infrastructure failures consume a bounded retry budget.
+5. Preserve the security split: the harness is untrusted; proxy and checkpoint
+   credentials must never enter its environment or mounts.
+6. New CLI/UI surface must work end to end. Do not add placeholder commands,
+   buttons, or configuration fields.
+7. Comments explain invariants and threat boundaries, not project history.
+   Prefer a stable spec section over an obsolete workstream identifier.
+8. Keep tests and test doubles out of shipped packages when practical. Shared
+   test utilities belong in an explicitly named test-support subpackage.
+9. Preserve user changes in a dirty worktree and keep commits narrowly scoped.
+
+## Security invariants
+
+The harness pod path is hostile-input code. Do not weaken these invariants:
+
+- non-root harness, read-only root filesystem, dropped capabilities, seccomp,
+  no privilege escalation, and no service-account token;
+- no GitHub/model/cloud secret in the harness container;
+- default iptables egress confinement plus the startup bypass canary;
+- checkpoint storage mounted only into trusted hydrate/checkpoint containers;
+- archive extraction confined with `os.Root` and safe relative symlinks;
+- no silent replacement of a lost uncheckpointed workspace;
+- `--egress-enforcement=off` is an explicit, visible security downgrade.
+
+Read [`SECURITY.md`](SECURITY.md) before changing pod construction, egress,
+credentials, archive/restore, identity, or admission behavior.
+
+## Verification
+
+Use [`docs/verification.md`](docs/verification.md) to select the narrow gate,
+then run the merge baseline before committing:
+
+```sh
+make test vet check-assets
+```
+
+For logic changes, also inspect coverage and use the race detector where
+concurrency is involved:
+
+```sh
+make cover
+go test -race ./...
+```
+
+`make e2e` is the keyless product gate on kind. It drives the real CLI → API →
+operator → pod path and needs no provider credentials. Lifecycle, HA, and GKE
+changes have dedicated gates listed in the verification guide. Use provisioned
+GKE wrappers for disposable cloud tests; never adopt or delete an unrelated
+cluster. Set `E2E_KEEP=1` only when retaining a failed environment is useful and
+tear it down deliberately afterward.
+
+Desktop changes require frontend tests/build, native packaging, and a manual or
+computer-driven pass against the same live control plane. A browser-only test
+does not validate Wails bindings.
+
+## Definition of done
+
+- behavior is implemented through the product path, not a dev-only script;
+- focused tests cover success, failure, retry/idempotency, and security edges;
+- `gofmt`, `go test ./...`, `go vet ./...`, and `make check-assets` pass;
+- the relevant end-to-end gate passes for cross-component behavior;
+- generated assets are refreshed where required;
+- current docs describe what the code does, while future work appears only in
+  `docs/roadmap.md`;
+- no secrets, build output, temporary clusters, or obsolete planning artifacts
+  are left behind.

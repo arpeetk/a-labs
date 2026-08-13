@@ -1,5 +1,5 @@
-// Package harness implements the in-pod agent runner contract (spec §5.4): read
-// a RunSpec, execute the task, and emit a newline-delimited JSON event stream.
+// Package harness implements the in-pod agent runner contract: read a RunSpec,
+// execute the task, and emit a newline-delimited JSON event stream.
 //
 // Adapters (claude-code, mock, ...) implement the Harness interface; the runtime
 // binary (cmd/wren-runtime) selects one and streams its events to stdout, where
@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// EventType enumerates the harness event stream (spec §5.4).
+// EventType enumerates the harness event stream (spec: agent pod and harness contract).
 type EventType string
 
 const (

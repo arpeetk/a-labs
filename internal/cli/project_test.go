@@ -110,9 +110,8 @@ func TestRootHasInstallCommands(t *testing.T) {
 	}
 }
 
-// TestInstallHasHarnessImagesFlag guards the CLI wiring for WS-14: `wren
-// install` must expose a way to restrict/skip the harness images it builds
-// (install.Options.HarnessImages), not just the 3 control-plane images.
+// TestInstallHasHarnessImagesFlag verifies that `wren install` exposes a way to
+// restrict or skip harness-image builds, not just the control-plane images.
 func TestInstallHasHarnessImagesFlag(t *testing.T) {
 	root := NewRootCommand()
 	for _, c := range root.Commands() {
@@ -135,7 +134,7 @@ func TestUninstallRequiresConfirm(t *testing.T) {
 }
 
 // TestUninstallDeleteClusterRequiresConfirm guards that --delete-cluster is
-// still gated behind --confirm (WS-17 follow-up) — and that the gate's error
+// still gated behind --confirm — and that the gate's error
 // says so explicitly, not just the namespace/CRD removal.
 func TestUninstallDeleteClusterRequiresConfirm(t *testing.T) {
 	_, err := run(t, "uninstall", "--delete-cluster", "--gcp-project", "proj")

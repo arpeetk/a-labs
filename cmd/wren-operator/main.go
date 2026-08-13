@@ -48,7 +48,7 @@ func main() {
 	flag.StringVar(&egressEnforcement, "egress-enforcement", string(controller.EgressEnforcementIptables),
 		"egress bypass enforcement: iptables (privileged lockdown init container, default) | off (escape hatch for clusters that forbid privileged init containers, e.g. GKE Autopilot)")
 	flag.BoolVar(&podCfg.CheckpointGCSMount, "checkpoint-gcs-mount", false,
-		"experimental (WS-18): mount the run's checkpoint bucket into the checkpointer container via the GKE Cloud Storage FUSE CSI driver; requires the GcsFuseCsiDriver addon + a Workload Identity binding on --checkpoint-ksa")
+		"mount checkpoint buckets into trusted checkpoint/restore containers via GKE Cloud Storage FUSE; requires the CSI addon and --checkpoint-ksa Workload Identity binding")
 	flag.StringVar(&podCfg.CheckpointKSA, "checkpoint-ksa", controller.DefaultCheckpointKSA,
 		"Kubernetes ServiceAccount (Workload-Identity-bound to a GCP SA with objectAdmin on the checkpoint bucket) applied to pods with --checkpoint-gcs-mount enabled")
 	flag.StringVar(&podCfg.CheckpointLocalPath, "checkpoint-local-path", "",
@@ -97,7 +97,7 @@ func main() {
 	}
 
 	// The controller-runtime client cannot read pod logs (a subresource), so a
-	// typed clientset backs the terminal-event scrape into run status (WS-11).
+	// typed clientset backs the terminal-event scrape into run status.
 	cs, err := kubernetes.NewForConfig(mgr.GetConfig())
 	if err != nil {
 		setupLog.Error(err, "unable to build clientset for log scraping")

@@ -3,15 +3,12 @@
 // (egress-proxy, checkpointer, agent-gateway). Roles are functions here so they
 // are unit-testable; cmd/wren-runtime is a thin dispatcher.
 //
-// The egress-proxy is real (spec §5.6). The agent-gateway sidecar is still an
-// M0 stand-in (it keeps the pod's native-sidecar shape valid and logs
-// liveness only). The checkpointer is real as of WS-21 when a checkpoint
-// mount is configured: it takes periodic workspace snapshots (checkpointLoop)
-// against internal/blob.Store, and hydrate restores the latest one on a
-// confirmed workspace loss (RunHydrate, RestoreRequired). Without the mount
-// configured, checkpointer behaves exactly like the plain liveness stub. GCS
+// The egress proxy enforces the outbound allowlist and injects credentials. The
+// gateway forwards the harness event stream to the durable control-plane
+// journal. When a checkpoint mount is configured, the checkpointer publishes
+// periodic workspace snapshots and hydrate restores the latest verified one
+// after confirmed workspace loss; without the mount it is liveness-only. GCS
 // is the production-shaped mount; local hostPath exists only for kind/dev E2E.
-// Stream bridging lands with interactive steering (M2).
 package podruntime
 
 import (
@@ -40,7 +37,7 @@ import (
 
 // egressProxyBase is the base URL of the in-pod egress-proxy, when the operator
 // wired one in. In that mode the runner holds NO GitHub token — the proxy
-// injects it (spec §5.6/§5.7).
+// injects it (spec: egress and finalization).
 func egressProxyBase() string { return strings.TrimRight(os.Getenv("WREN_EGRESS_PROXY"), "/") }
 
 // githubToken is the direct-mode (no-proxy) token, read from the runner env.
@@ -48,7 +45,7 @@ func githubToken() string { return os.Getenv("GITHUB_TOKEN") }
 
 // prConfigured reports whether a run can open a real PR: it needs a repo and a
 // way to authenticate to GitHub — either the egress-proxy (preferred) or a
-// direct token (M0 fallback).
+// direct token (development fallback).
 func prConfigured(spec runspec.RunSpec) bool {
 	return spec.Repo != "" && (egressProxyBase() != "" || githubToken() != "")
 }
@@ -185,7 +182,7 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 		return fmt.Errorf("%w: egress-proxy unreachable", ErrRetryable)
 	}
 
-	// Egress canary (WS-1): when the operator signals enforcement, prove from
+	// Egress canary: when the operator signals enforcement, prove from
 	// inside the untrusted runner that the iptables lockdown holds — for EVERY
 	// harness, before the (expensive) agent runs. A bypass is a deterministic
 	// security failure: fail the run, spend no tokens.
@@ -220,7 +217,7 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 			// Transient (GitHub 5xx/429, dropped push connection, timeout):
 			// exit ExitRetryable so the operator resumes on a fresh pod — the
 			// commit survives on the workspace PVC, so the retry only has to
-			// redo the push/PR (WS-11).
+			// redo the push/PR.
 			em.Errorf("finalize (transient, will retry on a fresh pod): " + ferr.Error())
 			em.Status("failed")
 			return fmt.Errorf("%w: %w", ErrRetryable, ferr)
@@ -233,7 +230,7 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 			em.Message("finalize: opened PR " + p.URL)
 		}
 	} else {
-		em.Message("finalize: PR creation skipped — " + skipReason(spec) + " (M0)")
+		em.Message("finalize: PR creation skipped — " + skipReason(spec))
 	}
 
 	em.PRReady(pr)
@@ -246,7 +243,7 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 //   - Mode == ModeResume, RestoreRequired: a freshly-recreated, empty PVC after
 //     a confirmed workspace loss — restore is mandatory (restoreFromCheckpoint).
 //   - Mode == ModeResume, !RestoreRequired: an ordinary crash-resume where the
-//     PVC survived (today's only ModeResume case pre-WS-21) — a no-op, the
+//     PVC survived — a no-op because the
 //     workspace files are already there.
 //   - Otherwise (a fresh start): clone the repo when configured, else no-op.
 func RunHydrate(ctx context.Context, out io.Writer, specPath string) error {
@@ -306,7 +303,7 @@ func RunHydrate(ctx context.Context, out io.Writer, specPath string) error {
 		em.Errorf("hydrate harness state: " + err.Error())
 		return err
 	}
-	em.Message("hydrate: workspace ready (fresh clone skipped; no repo/token — M0)")
+	em.Message("hydrate: workspace ready (fresh clone skipped; no repo/token)")
 	return nil
 }
 
@@ -327,7 +324,7 @@ func prepareHarnessState(spec runspec.RunSpec) error {
 // a silent empty-workspace resume — it's a deterministic, non-retryable
 // failure: this plain (non-ErrRetryable) error flows through
 // cmd/wren-runtime -> runspec.ExitError -> classifyTermination -> PhaseFailed,
-// with zero new controller code (mirrors WS-16's existing invariant).
+// without adding a second termination-classification path.
 func restoreFromCheckpoint(ctx context.Context, em *harness.Emitter, spec runspec.RunSpec) error {
 	mountPath := os.Getenv("WREN_CHECKPOINT_MOUNT_PATH")
 	if mountPath == "" {
@@ -367,7 +364,7 @@ func orDefault(s, def string) string {
 // RunEgressProxy runs the egress-proxy sidecar: it holds the run's credentials
 // and forwards the runner's traffic, injecting auth for github.com /
 // api.github.com / api.anthropic.com / api.openai.com and enforcing the domain
-// allowlist for everything else (spec §5.6). Secrets (GITHUB_TOKEN,
+// allowlist for everything else (spec: egress and security). Secrets (GITHUB_TOKEN,
 // ANTHROPIC_API_KEY, OPENAI_API_KEY) are mounted into THIS container, never
 // the harness.
 func RunEgressProxy(ctx context.Context, out io.Writer) error {
@@ -402,7 +399,7 @@ func RunEgressProxy(ctx context.Context, out io.Writer) error {
 
 // Default upstreams for the egress-proxy's credentialed routes. Each is
 // overridable via an env var so an e2e tier can point the proxy at a local
-// stand-in (e.g. a gitea server for the gitea-backed e2e-pr tier) without
+// substitute (for example, a Gitea-backed PR gate) without
 // touching production defaults. See envUpstream.
 const (
 	defaultGitHubUpstream       = "https://github.com"
@@ -475,7 +472,7 @@ func splitAllowlist(s string) []string {
 // agent-gateway, plus checkpointer when no checkpoint mount is enabled).
 func RunSidecar(ctx context.Context, out io.Writer, name string) error {
 	em := harness.NewEmitter(out)
-	em.Message(name + ": started (M0 stand-in)")
+	em.Message(name + ": started (liveness-only)")
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -520,7 +517,7 @@ const defaultCheckpointIntervalSeconds = 120
 
 // checkpointTickUnit is the unit WREN_CHECKPOINT_INTERVAL is measured in.
 // Production always uses whole seconds (matching the operator-set env var,
-// itself seconds — spec §5.5); a package var, same seam pattern as
+// itself seconds — spec: checkpoint storage and recovery); a package var, same seam pattern as
 // proxyWaitTimeout, so tests can shrink it to milliseconds and observe several
 // real ticks quickly instead of waiting on production-scale intervals.
 var checkpointTickUnit = time.Second
@@ -610,7 +607,7 @@ func quiesceHarness(sig syscall.Signal) error {
 // mountSelfCheck writes, reads back, and lists a small self-check object through
 // the mounted store, returning an error on any step or a read-back mismatch. On
 // success it logs a clear PASSED line naming the object and mount path — the
-// hook the WS-18 live proof asserts on (and cross-checks with gcloud). The
+// hook the live GKE proof asserts on (and cross-checks with gcloud). The
 // store is scoped to this run's own prefix (blob.RunPrefix) so the self-check
 // never lists another run's objects sharing the same bucket.
 func mountSelfCheck(ctx context.Context, em *harness.Emitter, mountPath, bucket, runID string) error {

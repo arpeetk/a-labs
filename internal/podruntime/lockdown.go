@@ -11,7 +11,7 @@ import (
 	"github.com/summiteight/wren/internal/harness"
 )
 
-// egress-lockdown role (WS-1, spec §5.6).
+// egress-lockdown role (spec: egress and security).
 //
 // This init container runs FIRST in the pod, as root with only NET_ADMIN +
 // NET_RAW, and installs iptables OUTPUT rules that make the runner physically
@@ -36,7 +36,7 @@ type LockdownConfig struct {
 	ProxyUID   string // e.g. "65533"
 	IPv6       bool   // also lock down ip6tables if the stack is present
 
-	// GCS-FUSE checkpoint mount exemption (WS-19). When a run mounts a GCS
+	// GCS-FUSE checkpoint mount exemption. When a run mounts a GCS
 	// bucket, the GKE-injected gke-gcsfuse-sidecar runs as GCSFuseUID (its own
 	// uid, distinct from the runner and proxy) and must reach Cloud Storage + the
 	// GCE metadata server directly — it cannot be routed through the egress-proxy
@@ -88,10 +88,10 @@ func splitCIDRs(s string) []string {
 //  3. established/related                 → ACCEPT (return traffic for the above)
 //  4. owner uid == proxy uid              → ACCEPT (the proxy reaches the world)
 //  5. owner uid == gcs-fuse uid, dst ∈ … → ACCEPT (the mount reaches Storage +
-//     metadata, and nothing else — WS-19; only when GCSFuseUID is set)
+//     metadata, and nothing else; only when GCSFuseUID is set)
 //  6. everything else (DNS included)      → REJECT (runner resolves/reaches nothing)
 //
-// Rule 4a is the WS-19 GCS-FUSE exemption: present only when a run mounts a GCS
+// Rule 4a is the GCS FUSE exemption: present only when a run mounts a GCS
 // bucket (GCSFuseUID set). It is scoped by BOTH the sidecar's uid AND a fixed
 // destination set — the runner uid can never match it, so the harness cannot
 // reach these destinations even though the rule exists. It is IPv4-only: both

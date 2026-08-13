@@ -4,8 +4,8 @@ How a team stands up Wren on an **existing** Kubernetes cluster and how its
 engineers get from zero to a running agent in minutes. Install is product
 surface: it lives in the CLI as `wren install` — not in scripts.
 
-The design behind this is [`docs/technical-spec.md`](docs/technical-spec.md)
-§5, §7, §11; contributor conventions are in [`AGENTS.md`](AGENTS.md).
+The design behind this is [`docs/technical-spec.md`](docs/technical-spec.md);
+contributor conventions are in [`AGENTS.md`](AGENTS.md).
 
 ## What you need
 
@@ -21,8 +21,8 @@ The design behind this is [`docs/technical-spec.md`](docs/technical-spec.md)
 
 ## The three identities (mental model)
 
-Wren juggles three separate credentials — knowing which is which removes all the
-confusion:
+Wren crosses three identity boundaries—knowing which is which removes most
+setup confusion:
 
 1. **You → the cluster.** Your `kubectl` context (for GKE: `gcloud container
    clusters get-credentials`). Used once, by `wren install`.
@@ -67,8 +67,8 @@ or `--harness-images=none` to skip harness images entirely (see
 
 For a **team setup** add `--expose=LoadBalancer` to give the apiserver a stable
 address; without it the control plane is reached by port-forward (below). The
-apiserver's only auth today is a trusted `X-Wren-User` header (M0 stand-in;
-SSO/OIDC is a later milestone) — keep it on a trusted network either way.
+apiserver's only auth today is a trusted `X-Wren-User` header; keep it on a
+trusted network or behind an authenticated gateway.
 
 ## kind (local eval path)
 
@@ -113,7 +113,7 @@ reused, not recreated).
 > team — sizing, region, and cost are decisions a team should usually make
 > deliberately, so the bring-your-own-cluster flow above stays the headline.
 > **GKE Standard only:** Autopilot is unsupported because it forbids the
-> privileged init container Wren's egress lockdown (WS-1) needs. Preflight
+> privileged init container Wren's egress lockdown needs. Preflight
 > requires `gcloud` on `PATH` and an active account (`gcloud auth login`).
 > Tear the cluster down when you're done — `wren uninstall --delete-cluster
 > --gcp-project my-proj --confirm` (still gated by `--confirm`; deletes the
@@ -128,7 +128,7 @@ Once install prints "Wren control plane is Ready", each engineer:
 # 1. reach the control plane (skip with --expose=LoadBalancer — use <ip>:8090)
 kubectl --context <cluster-context> -n wren-system port-forward svc/wren-apiserver 8090:8090 &
 
-# 2. log in (identity is a trusted header for now — see the M0 note above)
+# 2. log in (identity is a trusted header for now — see the note above)
 wren login --control-plane localhost:8090 --user you@corp.com
 
 # 3. register a project. Harness (claude-code), model, cpu/memory/disk and the
@@ -172,19 +172,18 @@ wren project create payments-api-codex \
 wren run create --project payments-api-codex --task "Add input validation to the signup endpoint"
 ```
 
-Swap `codex`/`OPENAI_API_KEY` for `opencode` the same way (opencode rides the
-Anthropic route, so it reuses the same `wren-anthropic-key` Secret `wren
-install` already wrote — no extra credential needed). Codex has been validated
-through Wren against the live Responses API; OpenCode still needs a
-live-provider smoke run. See [docs/harnesses.md](docs/harnesses.md) for the
-exact validation and recovery status.
+For OpenCode, select `--harness opencode` and its delivered image. It uses the
+Anthropic route and the same `wren-anthropic-key` Secret the installer already
+writes. Codex has been validated through Wren against the live Responses API;
+OpenCode still needs a live-provider smoke run. See
+[docs/harnesses.md](docs/harnesses.md) for exact validation and recovery status.
 
-## Checkpoint and restore (GCS; WS-18–WS-21)
+## Checkpoint, pause, and restore
 
 Off by default and independent of the core task→PR loop. This mounts a run's
-checkpoint bucket into the **checkpointer container only** (never the untrusted
-harness) via GKE's Cloud Storage FUSE CSI driver, and exposes it to Go as a
-`blob.Store` of plain files. The sidecar performs a startup mount self-check,
+checkpoint bucket into the trusted **checkpointer and hydrate containers**
+(never the untrusted harness) via GKE's Cloud Storage FUSE CSI driver, and
+exposes it to Go as a `blob.Store` of plain files. The sidecar performs a startup mount self-check,
 then writes full-workspace tar.gz snapshots at `intervalSeconds` (120 seconds
 by default). If the live PVC is later confirmed lost, the controller provisions
 a new PVC and hydrate restores the newest snapshot before starting the harness.
@@ -251,21 +250,23 @@ For a single-node kind/dev recovery test, the operator also accepts
 It is deliberately not a production backend: the data disappears with that
 node and does not protect a multi-node cluster from node loss.
 
-Current checkpoint limitations are explicit: snapshots are full archives and
-interval-triggered only. Incremental/git-aware bundles, retention/garbage
-collection, `checkpoint_hint` snapshots, and a final SIGTERM flush are not yet
-implemented, so worst-case workspace loss is approximately one interval.
+Snapshots are full archives. Periodic publication and user-requested pause both
+publish manifest-last, SHA-256-verified checkpoints with bounded retention;
+pause records and resumes from the exact verified checkpoint. Incremental or
+git-aware bundles, harness `checkpoint_hint` events, and a final SIGTERM flush
+are not implemented, so crash recovery can lose work since the last successful
+periodic checkpoint.
 
-**Trust boundary:** the CSI volume and the bucket-scoped credential live on the
-checkpointer sidecar only. The harness — which runs untrusted model-generated
-code — never gets the volume mount (pinned in the pod builder and asserted by
+**Trust boundary:** the CSI volume and bucket-scoped identity are available
+only to trusted checkpoint/restore roles. The harness—which runs untrusted
+model-generated code—never gets the volume mount (pinned in the pod builder and asserted by
 `TestBuildAgentPod_GCSMount_HarnessNeverMounts`), the same trust-tier split as
 the egress-proxy/runner uid boundary.
 
-**Egress enforcement (WS-19):** the mount now works under the **default**
+**Egress enforcement:** the mount works under the **default**
 `--egress-enforcement=iptables` — `off` is no longer required. The GKE-injected
 `gke-gcsfuse-sidecar` runs as its own uid (65534 on GKE 1.35 / CSI driver
-v1.22.16) and talks directly to Cloud Storage + the metadata server, so the WS-1
+v1.22.16) and talks directly to Cloud Storage + the metadata server, so the
 lockdown (which otherwise rejects all egress but the proxy's uid) would block it.
 It cannot be routed through the egress-proxy — the CSI injection webhook discards
 any env/args set on a user-declared sidecar container. So the pod instead pins
@@ -322,27 +323,7 @@ images to `ghcr.io/arpeetk/wren/{runtime,operator,apiserver}` — pass
 `--registry ghcr.io/arpeetk/wren --tag <tag>` to `wren install` to use them
 instead of building locally.
 
-## Later milestones (not yet built)
+## Intentional gaps
 
-- **GitHub App** instead of a PAT: per-run, repo-scoped installation tokens
-  minted by the control plane and injected at the proxy.
-- **SSO/OIDC** for the apiserver front-door (replacing the `X-Wren-User`
-  header) and managed **Postgres** provisioning + a **Helm chart** (WS-5).
-- **Workload Identity** for the operator/pods → GCP. First use landed in WS-18:
-  the experimental GCS checkpoint mount binds a dedicated checkpointer KSA to a
-  GCP SA (see "Experimental: GCS checkpoint mount" above); the operator/apiserver
-  and the general pod→GCP path are still ambient-credential / node-scoped.
-- **Roadmap CLI surface** (deliberately not shipped yet — the CLI lists only
-  commands that work, so these are absent rather than stubbed): `wren run
-  attach` / `wren run steer` (interactive steering), `wren run resume` (manual
-  re-run of a terminally-Failed run — the operator already auto-resumes
-  *infrastructure* crashes; a manual trigger that resets the retry budget and
-  clears the leftover Failed pod is a real feature, deferred), `wren usage`
-  (token/cost/compute reporting), `wren mcp add|list|test` (per-project MCP
-  servers), `wren project config` (editing defaults/rubric/egress in place).
-  Each is trivial to re-add once its server side lands. (`wren fleet` — a
-  cross-run dashboard — shipped for real in WS-20: `run list`/`fleet` render a
-  table with `--project`/`--phase` filters and `--watch` for a live view.)
-- **Sandbox runtimes** `gvisor` / `kata` for `wren run create --runtime`: wired
-  end-to-end in the operator but not provisioned by any v1 cluster, so the CLI
-  rejects them today (only `runc` works) until M4.
+See [`docs/roadmap.md`](docs/roadmap.md) for the single maintained list of
+unbuilt product work and validation gaps.

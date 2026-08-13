@@ -114,11 +114,11 @@ func TestLoginRequiresServer(t *testing.T) {
 	}
 }
 
-// TestNoNotImplementedCommands guards WS-15 Part C: the CLI ships no command
+// TestNoNotImplementedCommands guards the no-placeholder rule: the CLI ships no command
 // that exists only to error with "not implemented yet". Roadmap commands
 // still not built (mcp, usage) are simply absent, so cobra reports them as
-// unknown rather than running a placeholder. `fleet` was in this list until
-// WS-20 made it real — see TestFleetCommandIsReal below instead.
+// unknown rather than running a placeholder. Fleet is tested separately as a
+// real command.
 func TestNoNotImplementedCommands(t *testing.T) {
 	for _, name := range []string{"usage"} {
 		_, err := run(t, name)
@@ -129,7 +129,7 @@ func TestNoNotImplementedCommands(t *testing.T) {
 }
 
 // TestFleetCommandIsReal is the flip side of TestNoNotImplementedCommands:
-// `wren fleet` must be a real, known command (WS-20) — the earlier assertion
+// `wren fleet` must be a real, known command — the earlier assertion
 // that it was intentionally absent is now stale, and this pins the correction
 // so it can't silently regress back to a stub.
 func TestFleetCommandIsReal(t *testing.T) {
@@ -224,7 +224,7 @@ func TestRunCommandsHitControlPlane(t *testing.T) {
 	}
 }
 
-// TestRunStopAndRm covers the WS-15 Part C commands hitting the control plane.
+// TestRunStopAndRm covers both lifecycle commands against the control plane.
 func TestRunStopAndRm(t *testing.T) {
 	var stopHit, delHit bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -294,15 +294,14 @@ func TestRunResume(t *testing.T) {
 	}
 }
 
-// TestRunCreateRejectsNonRuncRuntime is WS-15 Part C: --runtime gvisor|kata is
-// rejected client-side with an M4 pointer instead of a confusing pod-admission
-// failure downstream.
+// TestRunCreateRejectsNonRuncRuntime verifies that --runtime gvisor|kata is
+// rejected client-side instead of producing a confusing pod-admission failure.
 func TestRunCreateRejectsNonRuncRuntime(t *testing.T) {
 	dir := t.TempDir()
 	// No server needed: validation fails before any request.
 	_, err := execIn(t, dir, "run", "create", "--project", "p", "--task", "t", "--runtime", "gvisor")
-	if err == nil || !strings.Contains(err.Error(), "M4") {
-		t.Fatalf("expected M4 rejection for --runtime gvisor, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "only runc") {
+		t.Fatalf("expected unsupported-runtime rejection for gvisor, got %v", err)
 	}
 }
 

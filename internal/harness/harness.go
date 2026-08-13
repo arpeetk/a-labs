@@ -44,6 +44,6 @@ func Select(spec runspec.RunSpec) Harness {
 	case "mock", "byo", "":
 		return Mock{}
 	default:
-		return Mock{Note: "unknown harness " + kind + "; using mock (M0)"}
+		return Mock{Note: "unknown harness " + kind + "; using mock"}
 	}
 }

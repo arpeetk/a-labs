@@ -1,7 +1,7 @@
 // Command wren-runtime is the multi-call in-pod binary. Its first argument
 // selects a role (harness | hydrate | egress-proxy | checkpointer |
 // agent-gateway); with no argument it runs the harness role, so a harness image
-// can use ["wren-runtime"] as its entrypoint (spec §5.4).
+// can use ["wren-runtime"] as its entrypoint (spec: agent pod and harness contract).
 package main
 
 import (

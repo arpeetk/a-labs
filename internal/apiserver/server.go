@@ -1,9 +1,6 @@
-// Package apiserver exposes the control-plane services over HTTP/JSON, following
-// the REST mapping in spec §5.2.
-//
-// M0 transport decision: HTTP/JSON (net/http). The spec's target transport is
-// gRPC + Connect; that is a fast-follow (tracked in the spec's living status).
-// The handler logic here is transport-agnostic and delegates to coreapi.Service.
+// Package apiserver exposes control-plane services over HTTP/JSON. Handler
+// logic delegates to coreapi.Service so transport concerns remain at this
+// boundary.
 package apiserver
 
 import (
@@ -344,8 +341,8 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---
 
-// userOf extracts the caller identity. M0 uses a trusted header set by the CLI;
-// OIDC/SSO validation at a gateway lands in M1 (spec §7).
+// userOf extracts the caller identity from the currently trusted header. Keep
+// the API private or behind an authenticated gateway until OIDC/SSO ships.
 func userOf(r *http.Request) string {
 	if u := r.Header.Get("X-Wren-User"); u != "" {
 		return u

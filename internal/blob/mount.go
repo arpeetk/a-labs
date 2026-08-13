@@ -16,8 +16,8 @@ import (
 // concrete backing for a run whose durable storage is a mounted bucket. On GKE
 // the mount is a GCS bucket surfaced by the Cloud Storage FUSE CSI driver, so
 // all GCS-specific concerns (auth, the object API) live entirely in Google's
-// CSI sidecar and never in this Go code: from here it is just files (spec §5.5,
-// WS-18). The same type serves any future POSIX-mounted backend (S3 via
+// CSI sidecar and never in this Go code: from here it is just files. The same
+// type serves any future POSIX-mounted backend (S3 via
 // s3fs/goofys, a local temp dir in tests) unchanged.
 //
 // A MountStore is rooted at base/prefix and every key is resolved relative to

@@ -1,5 +1,5 @@
 // Package blob defines the object-store contract for a run's durable data:
-// workspace checkpoints and the mirrored session transcript (spec §5.5).
+// workspace checkpoints and the mirrored session transcript.
 //
 // A Store is scoped to one run's prefix (e.g. "runs/r-8f3a2c/"); every key is
 // relative to that prefix, so a run can never read or overwrite another run's
@@ -11,12 +11,10 @@
 // transcript fragments under "transcript/"; hydrate's checkpoint-restore path
 // Lists "checkpoints/" and Gets the latest one.
 //
-// GCS is the real, live-proven implementation (MountStore, backed by the GCS
-// FUSE CSI driver — spec §5.5, WS-18/19/21): periodic snapshots and
-// restore-from-checkpoint both ship as of WS-21. Transcript mirroring
-// ("transcript/") is not yet implemented — only the checkpoints/ half exists.
-// Checkpoint retention/pruning is bucket policy (spec §6), not part of this
-// contract.
+// MountStore is the live-proven implementation used with the GCS FUSE CSI
+// driver. Periodic snapshots, restore, and bounded retention ship when a
+// checkpoint mount is configured. Transcript mirroring ("transcript/") is not
+// yet implemented.
 package blob
 
 import (
@@ -62,8 +60,7 @@ type Object struct {
 }
 
 // Store is a minimal object store scoped to a single run's prefix. It carries
-// exactly what spec §5.5 needs and nothing more; lifecycle/expiry of old
-// checkpoints is bucket policy (spec §6), not part of this contract.
+// only the operations needed to publish, restore, and prune durable objects.
 type Store interface {
 	// Put writes the object at key (relative to the run's prefix), replacing
 	// any object already there. The caller retains ownership of r.

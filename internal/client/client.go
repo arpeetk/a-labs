@@ -1,5 +1,4 @@
-// Package client is the CLI's transport to the Wren control plane. It speaks the
-// control-plane HTTP/JSON API (spec §5.2) over the context's server address.
+// Package client is the CLI's HTTP/JSON transport to the Wren control plane.
 package client
 
 import (

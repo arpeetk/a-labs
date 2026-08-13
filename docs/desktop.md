@@ -20,11 +20,9 @@ provider credentials.
 - **Contexts:** use the same owner-only control-plane configuration as the CLI;
   tokens are retained in Go and never serialized into the webview.
 
-This first vertical slice intentionally calls the real HTTP/JSON API. The next
-desktop increments are interactive steering, durable conversation history,
-review/diff artifacts, notifications, approval policy,
-usage/budget views, and admin capacity/health controls. Those require matching
-control-plane APIs; they should not be faked locally in the UI.
+The app calls the real HTTP/JSON API; it does not fake unavailable server
+features locally. Planned product surface is tracked in the
+[roadmap](roadmap.md).
 
 ## Development
 
@@ -37,5 +35,5 @@ cd cmd/wren-desktop
 wails dev
 ```
 
-Build a native application with `wails build` from `cmd/wren-desktop`. The
-frontend can be checked independently with `npm install && npm run build`.
+Build a native application with `make build-desktop`. The complete frontend
+and native verification workflow is in [verification.md](verification.md).

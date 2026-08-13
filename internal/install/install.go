@@ -65,7 +65,7 @@ type Options struct {
 	// credentials, wire Artifact Registry auth + the node-SA pull grant, then
 	// run the normal install against it. Requires Registry and GCPProject;
 	// mutually exclusive with KindCluster. GKE Standard only — Autopilot forbids
-	// the WS-1 egress-lockdown privileged init container. See gke.go.
+	// the egress-lockdown privileged init container. See gke.go.
 	CreateCluster bool
 	// GCPProject is the target GCP project (required with CreateCluster).
 	GCPProject string
@@ -93,8 +93,8 @@ type Options struct {
 	// SrcDir is the repo checkout the Docker builds run against.
 	SrcDir string
 	// Expose LoadBalancer switches the apiserver Service type for team setups;
-	// the default ClusterIP stays port-forward-only (the apiserver's only auth
-	// is the X-Wren-User header stand-in — do not expose it publicly).
+	// the default ClusterIP stays port-forward-only. The apiserver trusts the
+	// X-Wren-User header, so do not expose it publicly.
 	Expose string
 	// RunNamespace is where the proxy credential Secrets are created and where
 	// credentialed projects should point their `namespace` field.
@@ -118,8 +118,8 @@ type UninstallOptions struct {
 	WaitTimeout time.Duration
 	// DeleteCluster, when set, also permanently deletes the underlying GKE
 	// cluster after the namespaces/cluster-scoped resources are removed — the
-	// `wren uninstall` counterpart to `wren install --create-cluster` (WS-17
-	// follow-up). Requires GCPProject; GCPZone/GCPClusterName default the same
+	// `wren uninstall` counterpart to `wren install --create-cluster`. Requires
+	// GCPProject; GCPZone/GCPClusterName default the same
 	// as install's (us-central1-a, wren). Gated behind the same --confirm the
 	// CLI already requires for the namespace/CRD deletion.
 	DeleteCluster  bool
@@ -205,7 +205,7 @@ type Kube interface {
 	OverrideImages(ctx context.Context, registry, tag string) error
 	// SetApiserverRunNamespace sets the apiserver's WREN_DEFAULT_RUN_NAMESPACE
 	// env so a project registered with no --namespace lands runs in the namespace
-	// where install wrote the credential Secrets (WS-15 Part A).
+	// where install wrote the credential Secrets.
 	SetApiserverRunNamespace(ctx context.Context, namespace string) error
 	// SetServiceType patches the apiserver Service's type (e.g. LoadBalancer).
 	SetServiceType(ctx context.Context, ns, name, svcType string) error
