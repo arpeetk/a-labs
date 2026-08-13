@@ -62,85 +62,12 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 	if err := r.Get(ctx, req.NamespacedName, &run); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	if !run.DeletionTimestamp.IsZero() {
-		return ctrl.Result{}, nil // owned children are garbage-collected
-	}
-	if run.Status.Phase == wrenv1.PhasePaused {
-		if run.Annotations[wrenv1.CancelAnnotation] == "true" {
-			return r.cancel(ctx, &run)
-		}
-		if run.Annotations[wrenv1.ResumeAnnotation] == "true" {
-			return r.resume(ctx, &run)
-		}
-		return ctrl.Result{}, nil
-	}
-	if isTerminal(run.Status.Phase) {
-		// Manual resume (wren run resume) is the one exception to "terminal
-		// means done": an explicit human/automated decision to give a Failed
-		// run another attempt. Gated on Phase == Failed specifically (not
-		// just isTerminal) so a stray annotation can never resurrect a
-		// Succeeded or Canceled run.
-		if run.Status.Phase == wrenv1.PhaseFailed && run.Annotations[wrenv1.ResumeAnnotation] == "true" {
-			return r.resume(ctx, &run)
-		}
-		return ctrl.Result{}, nil
+	if result, handled, err := r.handleRequestedTransition(ctx, &run); handled {
+		return result, err
 	}
 
-	// User asked to stop the run (wren run stop): halt the pod and mark it
-	// Canceled (terminal — no auto-resume). Checked before the retry path so a
-	// deliberate stop is never mistaken for a crash to retry.
-	if run.Annotations[wrenv1.CancelAnnotation] == "true" {
-		return r.cancel(ctx, &run)
-	}
-	if run.Status.Phase == wrenv1.PhasePausing || run.Annotations[wrenv1.PauseAnnotation] == "true" {
-		return r.pause(ctx, &run)
-	}
-
-	// First sight of the run: admit it.
-	if run.Status.Phase == "" {
-		return r.setPhase(ctx, &run, wrenv1.PhasePending, "Admitted", "run accepted")
-	}
-
-	// Record the egress-enforcement posture on the run so an operator can see,
-	// per run, whether the runner is physically confined to the proxy
-	// (EgressEnforcement=True/Iptables) or free to bypass it (False/Disabled).
-	if err := r.ensureEgressCondition(ctx, &run); err != nil {
-		return ctrl.Result{}, fmt.Errorf("record egress condition: %w", err)
-	}
-	if err := r.ensureCheckpointStorageCondition(ctx, &run); err != nil {
-		return ctrl.Result{}, fmt.Errorf("record checkpoint storage condition: %w", err)
-	}
-
-	// Ensure the durable prerequisites exist before the pod.
-	if err := r.ensurePVC(ctx, &run); err != nil {
-		if errors.Is(err, errWorkspaceLost) {
-			// A permanent, non-retryable condition (like PodAdmissionForbidden
-			// below): recreating an empty PVC and resuming into it wouldn't
-			// recover anything, it would just hide that the work is gone. Fail
-			// deterministically rather than requeue-and-hang (code standards
-			// rule #2) or silently resume into an empty workspace (WS-8
-			// truthing pass; WS-16 A.4).
-			// A pod-disappearance event can advance the attempt before the PVC
-			// deletion event arrives. Remove that unschedulable replacement before
-			// making the run terminal; terminal reconciliation intentionally does
-			// not revisit owned children.
-			if err := r.deleteCurrentPod(ctx, &run); err != nil {
-				return ctrl.Result{}, fmt.Errorf("delete pod after workspace loss: %w", err)
-			}
-			return r.setPhase(ctx, &run, wrenv1.PhaseFailed, "WorkspaceLost",
-				"workspace PVC is gone after the run had already progressed past Pending — the disk (and any in-progress work) was destroyed; this run cannot resume and will not be retried")
-		}
-		if errors.Is(err, errWorkspaceRestoring) {
-			// Recoverable: this run opted into checkpointing, so the PVC is
-			// being recreated for hydrate to restore into (WS-21). Not a
-			// failure, not a no-op — requeue so the follow-up reconcile
-			// actually creates the fresh PVC.
-			return ctrl.Result{Requeue: true}, nil
-		}
-		return ctrl.Result{}, fmt.Errorf("ensure workspace pvc: %w", err)
-	}
-	if err := r.ensureRunSpec(ctx, &run); err != nil {
-		return ctrl.Result{}, fmt.Errorf("ensure runspec: %w", err)
+	if result, handled, err := r.ensurePrerequisites(ctx, &run); handled {
+		return result, err
 	}
 
 	pod, err := r.ensurePod(ctx, &run)
@@ -162,6 +89,81 @@ func (r *AgentRunReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 
 	lg.V(1).Info("reconciled", "phase", run.Status.Phase, "pod", pod.Name, "podPhase", pod.Status.Phase)
 	return r.reconcilePodState(ctx, &run, pod)
+}
+
+// handleRequestedTransition handles lifecycle requests before normal pod
+// reconciliation. The boolean distinguishes a handled no-op from "continue".
+func (r *AgentRunReconciler) handleRequestedTransition(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, bool, error) {
+	if !run.DeletionTimestamp.IsZero() {
+		return ctrl.Result{}, true, nil // owned children are garbage-collected
+	}
+	if run.Status.Phase == wrenv1.PhasePaused {
+		switch {
+		case run.Annotations[wrenv1.CancelAnnotation] == "true":
+			result, err := r.cancel(ctx, run)
+			return result, true, err
+		case run.Annotations[wrenv1.ResumeAnnotation] == "true":
+			result, err := r.resume(ctx, run)
+			return result, true, err
+		default:
+			return ctrl.Result{}, true, nil
+		}
+	}
+	if isTerminal(run.Status.Phase) {
+		// Only an explicit request may resurrect a Failed run. Succeeded and
+		// Canceled runs remain terminal even if they carry a stray annotation.
+		if run.Status.Phase == wrenv1.PhaseFailed && run.Annotations[wrenv1.ResumeAnnotation] == "true" {
+			result, err := r.resume(ctx, run)
+			return result, true, err
+		}
+		return ctrl.Result{}, true, nil
+	}
+	if run.Annotations[wrenv1.CancelAnnotation] == "true" {
+		result, err := r.cancel(ctx, run)
+		return result, true, err
+	}
+	if run.Status.Phase == wrenv1.PhasePausing || run.Annotations[wrenv1.PauseAnnotation] == "true" {
+		result, err := r.pause(ctx, run)
+		return result, true, err
+	}
+	if run.Status.Phase == "" {
+		result, err := r.setPhase(ctx, run, wrenv1.PhasePending, "Admitted", "run accepted")
+		return result, true, err
+	}
+	return ctrl.Result{}, false, nil
+}
+
+// ensurePrerequisites records the run's security/durability posture and makes
+// its durable workspace and RunSpec available before pod reconciliation.
+func (r *AgentRunReconciler) ensurePrerequisites(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, bool, error) {
+	if err := r.ensureEgressCondition(ctx, run); err != nil {
+		return ctrl.Result{}, true, fmt.Errorf("record egress condition: %w", err)
+	}
+	if err := r.ensureCheckpointStorageCondition(ctx, run); err != nil {
+		return ctrl.Result{}, true, fmt.Errorf("record checkpoint storage condition: %w", err)
+	}
+	if err := r.ensurePVC(ctx, run); err != nil {
+		switch {
+		case errors.Is(err, errWorkspaceLost):
+			// Never replace a lost, uncheckpointed workspace with an empty disk.
+			// Also remove a replacement pod created by an earlier disappearance
+			// event before making the run terminal.
+			if err := r.deleteCurrentPod(ctx, run); err != nil {
+				return ctrl.Result{}, true, fmt.Errorf("delete pod after workspace loss: %w", err)
+			}
+			result, err := r.setPhase(ctx, run, wrenv1.PhaseFailed, "WorkspaceLost",
+				"workspace PVC is gone after the run had already progressed past Pending — the disk (and any in-progress work) was destroyed; this run cannot resume and will not be retried")
+			return result, true, err
+		case errors.Is(err, errWorkspaceRestoring):
+			return ctrl.Result{Requeue: true}, true, nil
+		default:
+			return ctrl.Result{}, true, fmt.Errorf("ensure workspace pvc: %w", err)
+		}
+	}
+	if err := r.ensureRunSpec(ctx, run); err != nil {
+		return ctrl.Result{}, true, fmt.Errorf("ensure runspec: %w", err)
+	}
+	return ctrl.Result{}, false, nil
 }
 
 // egressEnforcementConditionType is the condition type recording the egress
@@ -644,50 +646,59 @@ func (r *AgentRunReconciler) pause(ctx context.Context, run *wrenv1.AgentRun) (c
 
 	ready := findCondition(run, pauseCheckpointConditionType)
 	if ready == nil || ready.Status != metav1.ConditionTrue || run.Status.LastCheckpoint == nil {
-		if r.Executor == nil {
-			return r.abortPause(ctx, run, nil, errors.New("operator pod executor is not configured"))
-		}
-		var pod corev1.Pod
-		if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: podName(run)}, &pod); err != nil {
-			if apierrors.IsNotFound(err) {
-				return r.setPhase(ctx, run, wrenv1.PhaseFailed, "PausePodLost", "agent pod disappeared before a pause checkpoint was verified")
-			}
-			return ctrl.Result{}, err
-		}
-		if _, err := r.Executor.Execute(ctx, run.Namespace, pod.Name, ContainerHarness, []string{"/usr/local/bin/wren-runtime", "quiesce"}); err != nil {
-			return r.abortPause(ctx, run, &pod, fmt.Errorf("quiesce harness: %w", err))
-		}
-		out, err := r.Executor.Execute(ctx, run.Namespace, pod.Name, ContainerCheckpointer, []string{"/usr/local/bin/wren-runtime", "checkpoint-once"})
-		if err != nil {
-			return r.abortPause(ctx, run, &pod, fmt.Errorf("forced checkpoint: %w", err))
-		}
-		var m struct {
-			ID            string    `json:"id"`
-			ManifestKey   string    `json:"manifestKey"`
-			SHA256        string    `json:"sha256"`
-			SizeBytes     int64     `json:"sizeBytes"`
-			FormatVersion int32     `json:"formatVersion"`
-			CreatedAt     time.Time `json:"createdAt"`
-			Trigger       string    `json:"trigger"`
-			Warning       string    `json:"warning"`
-		}
-		if err := json.Unmarshal(out, &m); err != nil || m.ID == "" || m.ManifestKey == "" || m.SHA256 == "" {
-			if err == nil {
-				err = errors.New("checkpoint proof is incomplete")
-			}
-			return r.abortPause(ctx, run, &pod, fmt.Errorf("decode checkpoint proof: %w", err))
-		}
-		run.Status.LastCheckpoint = &wrenv1.CheckpointRef{ID: m.ID, URI: m.ManifestKey, At: metav1.NewTime(m.CreatedAt), SHA256: m.SHA256, SizeBytes: m.SizeBytes, FormatVersion: m.FormatVersion, Trigger: m.Trigger}
-		setCondition(run, metav1.Condition{Type: pauseCheckpointConditionType, Status: metav1.ConditionTrue, Reason: "Verified", Message: fmt.Sprintf("checkpoint %s verified (sha256=%s)", m.ID, m.SHA256)})
-		if m.Warning != "" {
-			setCondition(run, metav1.Condition{Type: "CheckpointRetention", Status: metav1.ConditionFalse, Reason: "CleanupFailed", Message: m.Warning})
-		}
-		if err := r.Status().Update(ctx, run); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{Requeue: true}, nil
+		return r.publishPauseCheckpoint(ctx, run)
 	}
+	return r.removeCheckpointedPod(ctx, run)
+}
 
+type pauseCheckpointProof struct {
+	ID            string    `json:"id"`
+	ManifestKey   string    `json:"manifestKey"`
+	SHA256        string    `json:"sha256"`
+	SizeBytes     int64     `json:"sizeBytes"`
+	FormatVersion int32     `json:"formatVersion"`
+	CreatedAt     time.Time `json:"createdAt"`
+	Trigger       string    `json:"trigger"`
+	Warning       string    `json:"warning"`
+}
+
+func (r *AgentRunReconciler) publishPauseCheckpoint(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, error) {
+	if r.Executor == nil {
+		return r.abortPause(ctx, run, nil, errors.New("operator pod executor is not configured"))
+	}
+	var pod corev1.Pod
+	if err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: podName(run)}, &pod); err != nil {
+		if apierrors.IsNotFound(err) {
+			return r.setPhase(ctx, run, wrenv1.PhaseFailed, "PausePodLost", "agent pod disappeared before a pause checkpoint was verified")
+		}
+		return ctrl.Result{}, err
+	}
+	if _, err := r.Executor.Execute(ctx, run.Namespace, pod.Name, ContainerHarness, []string{"/usr/local/bin/wren-runtime", "quiesce"}); err != nil {
+		return r.abortPause(ctx, run, &pod, fmt.Errorf("quiesce harness: %w", err))
+	}
+	out, err := r.Executor.Execute(ctx, run.Namespace, pod.Name, ContainerCheckpointer, []string{"/usr/local/bin/wren-runtime", "checkpoint-once"})
+	if err != nil {
+		return r.abortPause(ctx, run, &pod, fmt.Errorf("forced checkpoint: %w", err))
+	}
+	var proof pauseCheckpointProof
+	if err := json.Unmarshal(out, &proof); err != nil || proof.ID == "" || proof.ManifestKey == "" || proof.SHA256 == "" {
+		if err == nil {
+			err = errors.New("checkpoint proof is incomplete")
+		}
+		return r.abortPause(ctx, run, &pod, fmt.Errorf("decode checkpoint proof: %w", err))
+	}
+	run.Status.LastCheckpoint = &wrenv1.CheckpointRef{ID: proof.ID, URI: proof.ManifestKey, At: metav1.NewTime(proof.CreatedAt), SHA256: proof.SHA256, SizeBytes: proof.SizeBytes, FormatVersion: proof.FormatVersion, Trigger: proof.Trigger}
+	setCondition(run, metav1.Condition{Type: pauseCheckpointConditionType, Status: metav1.ConditionTrue, Reason: "Verified", Message: fmt.Sprintf("checkpoint %s verified (sha256=%s)", proof.ID, proof.SHA256)})
+	if proof.Warning != "" {
+		setCondition(run, metav1.Condition{Type: "CheckpointRetention", Status: metav1.ConditionFalse, Reason: "CleanupFailed", Message: proof.Warning})
+	}
+	if err := r.Status().Update(ctx, run); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{Requeue: true}, nil
+}
+
+func (r *AgentRunReconciler) removeCheckpointedPod(ctx context.Context, run *wrenv1.AgentRun) (ctrl.Result, error) {
 	var pod corev1.Pod
 	err := r.Get(ctx, client.ObjectKey{Namespace: run.Namespace, Name: podName(run)}, &pod)
 	if err == nil {
