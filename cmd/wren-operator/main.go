@@ -41,6 +41,8 @@ func main() {
 	flag.StringVar(&podCfg.GitHubTokenSecret, "github-token-secret", "wren-github-token", "Secret (key \"token\") injected as GITHUB_TOKEN into the egress-proxy; empty to disable")
 	flag.StringVar(&podCfg.AnthropicKeySecret, "anthropic-key-secret", "wren-anthropic-key", "Secret (key \"key\") injected as ANTHROPIC_API_KEY into the egress-proxy; empty to disable")
 	flag.StringVar(&podCfg.OpenAIKeySecret, "openai-key-secret", "wren-openai-key", "Secret (key \"key\") injected as OPENAI_API_KEY into the egress-proxy; empty to disable")
+	flag.StringVar(&podCfg.GatewayTokenSecret, "gateway-token-secret", "wren-gateway-token", "Secret (key \"token\") injected into the trusted egress-proxy for event delivery; empty to disable")
+	flag.StringVar(&podCfg.ControlPlaneURL, "control-plane-url", "", "in-cluster apiserver origin for gateway events (default http://wren-apiserver.wren-system.svc:8090)")
 	flag.StringVar(&podCfg.EgressPort, "egress-port", "", "egress-proxy localhost port (default 8099)")
 	var egressEnforcement string
 	flag.StringVar(&egressEnforcement, "egress-enforcement", string(controller.EgressEnforcementIptables),

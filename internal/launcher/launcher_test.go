@@ -50,8 +50,13 @@ func TestFakeLauncher(t *testing.T) {
 	if err := f.CreateRun(ctx, run); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.CreateRun(ctx, run); !apierrors.IsAlreadyExists(err) {
-		t.Errorf("dup create = %v, want AlreadyExists", err)
+	if err := f.CreateRun(ctx, run); err != nil {
+		t.Errorf("idempotent duplicate create = %v", err)
+	}
+	changed := run.DeepCopy()
+	changed.Spec.Project = "different"
+	if err := f.CreateRun(ctx, changed); err == nil {
+		t.Error("create with conflicting immutable specification succeeded")
 	}
 
 	got, err := f.GetRun(ctx, "ns", "r-1")
@@ -99,6 +104,14 @@ func TestK8sLauncher(t *testing.T) {
 
 	if err := k.CreateRun(ctx, sampleRun("ns", "r-1")); err != nil {
 		t.Fatal(err)
+	}
+	if err := k.CreateRun(ctx, sampleRun("ns", "r-1")); err != nil {
+		t.Errorf("idempotent duplicate create = %v", err)
+	}
+	changed := sampleRun("ns", "r-1")
+	changed.Spec.Project = "different"
+	if err := k.CreateRun(ctx, changed); err == nil {
+		t.Error("create with conflicting immutable specification succeeded")
 	}
 	got, err := k.GetRun(ctx, "ns", "r-1")
 	if err != nil || got.Name != "r-1" {

@@ -134,6 +134,14 @@ func (l *lazyKube) UpsertSecret(ctx context.Context, ns, name string, data map[s
 	return k.UpsertSecret(ctx, ns, name, data)
 }
 
+func (l *lazyKube) SecretValue(ctx context.Context, ns, name, key string) (string, error) {
+	k, err := l.get()
+	if err != nil {
+		return "", err
+	}
+	return k.SecretValue(ctx, ns, name, key)
+}
+
 func (l *lazyKube) OverrideImages(ctx context.Context, registry, tag string) error {
 	k, err := l.get()
 	if err != nil {
@@ -188,6 +196,17 @@ func (k *realKube) ServerVersion(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return v.Major + "." + v.Minor, nil
+}
+
+func (k *realKube) SecretValue(ctx context.Context, ns, name, key string) (string, error) {
+	secret, err := k.cs.CoreV1().Secrets(ns).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get secret %s/%s: %w", ns, name, err)
+	}
+	return string(secret.Data[key]), nil
 }
 
 // ApplyManifests server-side-applies every document in a multi-doc YAML stream

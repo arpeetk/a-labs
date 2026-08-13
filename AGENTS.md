@@ -242,12 +242,13 @@ real PR without touching github.com.
 ## 8. Status & M0 stand-ins (things deliberately not "real" yet)
 
 - **CLI surface:** zero stand-ins as of WS-15 — every command `wren --help`
-  (and every subcommand's `--help`) lists actually works. `mcp`/`fleet`/
+  (and every subcommand's `--help`) lists actually works. `mcp`/
   `usage`/`run attach`/`run steer`/`project config` used to exist as
   placeholder commands that printed "not implemented yet"; they were removed
   from the CLI entirely rather than left as stubs (code standards rule 8) —
   they're still roadmap (M1–M2), just not shipped as fake commands in the
   meantime. If you're adding a new command, ship it real or don't ship it.
+  `fleet` is implemented and live; it is no longer part of that removed list.
 - **Harness:** the **mock** adapter (deterministic, no key) is the default; the
   real Claude Code adapter needs `ANTHROPIC_API_KEY` + the egress path. The
   **codex** and **opencode** adapters (WS-12) are built — adapters, images,
@@ -274,11 +275,18 @@ real PR without touching github.com.
   retention, exact-checkpoint restore for user-controlled pause/resume, and
   `status.lastCheckpoint` projection. Snapshots remain full archives (no
   incremental bundles, `checkpoint_hint`, or final SIGTERM flush yet).
-  **gateway** is still a
-  liveness stand-in (run results reach status via the operator's pods/log
-  scrape, WS-11; the event bridge is the v0.2 target).
+  **gateway** now tails the harness JSONL stream from pod IPC and forwards it
+  through an authenticated proxy route into the durable run-event journal. The
+  proxy, not the harness/gateway, holds the credential and fixes the run identity.
+  Terminal CR status remains independently scraped by the operator as a safety
+  net for result projection.
 - **Transport:** control-plane API is HTTP/JSON (target: gRPC + Connect).
-- **Store:** in-memory (default) **or** Postgres (`--store=postgres` + `DATABASE_URL`, `internal/store.Postgres`; pgx/v5, embedded migrations, reconcile-on-boot). Managed Cloud SQL provisioning is the remaining target (WS-5 Helm).
+- **Store:** in-memory (default) **or** Postgres (`--store=postgres` +
+  `DATABASE_URL`, `internal/store.Postgres`). Postgres atomically records a run,
+  launch intent, and submission event; leased workers replay idempotently across
+  replica death, migrations are HA-serialized, and `/readyz` checks the DB.
+  `config/production-gcp` supplies the two-replica Cloud SQL Auth Proxy shape;
+  managed instance/database/IAM provisioning remains external.
 - **Auth:** `X-Wren-User` header (target: OIDC/SSO).
 - **Kernel isolation:** `runc` (gVisor/Kata deferred to M4).
 

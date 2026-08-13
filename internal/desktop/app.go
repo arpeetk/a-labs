@@ -177,6 +177,14 @@ func (a *App) GetRun(id string) (*client.Run, error) {
 	return c.GetRun(context.Background(), id)
 }
 
+func (a *App) ListRunEvents(id string, afterID int64, limit int) ([]client.RunEvent, error) {
+	c, err := a.currentClient()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListRunEvents(context.Background(), id, afterID, limit)
+}
+
 func (a *App) CreateRun(opts client.RunCreateOptions) (*client.Run, error) {
 	c, err := a.currentClient()
 	if err != nil {

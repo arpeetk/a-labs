@@ -7,6 +7,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -16,6 +17,11 @@ var ErrNotFound = errors.New("not found")
 
 // ErrExists is returned when creating an object whose key already exists.
 var ErrExists = errors.New("already exists")
+
+// ErrLeaseLost means an outbox worker tried to complete work it no longer
+// owns. Leases deliberately expire so another apiserver replica can recover a
+// process that died after claiming an operation.
+var ErrLeaseLost = errors.New("operation lease lost")
 
 // Project is a registered repo and its run defaults (spec §4).
 type Project struct {
@@ -79,6 +85,45 @@ type RunFilter struct {
 	Project string // exact project match
 }
 
+// RunEvent is one immutable item in a run's durable, ordered audit stream.
+// Source+SourceID is the idempotency key: gateway replays and repeated CR
+// reconciliation insert exactly once without relying on best-effort timing.
+type RunEvent struct {
+	ID        int64           `json:"id"`
+	RunID     string          `json:"runId"`
+	Source    string          `json:"source"`
+	SourceID  string          `json:"sourceId"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+}
+
+const (
+	OperationPending    = "pending"
+	OperationProcessing = "processing"
+	OperationCompleted  = "completed"
+	OperationFailed     = "failed"
+	OperationLaunchRun  = "launch_run"
+)
+
+// Operation is a transactionally-enqueued external effect. A worker claims it
+// with a finite lease; success or retry is conditional on that lease owner so
+// two HA apiservers cannot both advance the same item.
+type Operation struct {
+	ID          string          `json:"id"`
+	RunID       string          `json:"runId"`
+	Kind        string          `json:"kind"`
+	Payload     json.RawMessage `json:"payload"`
+	State       string          `json:"state"`
+	Attempts    int             `json:"attempts"`
+	AvailableAt time.Time       `json:"availableAt"`
+	LeaseOwner  string          `json:"leaseOwner,omitempty"`
+	LeaseUntil  time.Time       `json:"leaseUntil,omitempty"`
+	LastError   string          `json:"lastError,omitempty"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
+}
+
 // Store persists Projects and Runs.
 type Store interface {
 	CreateProject(ctx context.Context, p *Project) error
@@ -93,4 +138,23 @@ type Store interface {
 	// AgentRun CR and its owned pod/PVC are deleted separately by the launcher
 	// (`wren run rm`, WS-15 Part C).
 	DeleteRun(ctx context.Context, id string) error
+}
+
+// Durable is the production control-plane extension implemented by Memory and
+// Postgres. It is separate from Store so third-party Store implementations keep
+// source compatibility; helper functions in durable.go retain safe fallbacks.
+type Durable interface {
+	CreateRunWithOperation(ctx context.Context, run *Run, op *Operation, event *RunEvent) error
+	ClaimOperations(ctx context.Context, worker string, limit int, lease time.Duration) ([]*Operation, error)
+	CompleteOperation(ctx context.Context, worker, id string, event *RunEvent) error
+	RetryOperation(ctx context.Context, worker, id, lastError string, availableAt time.Time) error
+	FailOperation(ctx context.Context, worker, id, lastError string, run *Run, event *RunEvent) error
+	AppendRunEvent(ctx context.Context, event *RunEvent) (bool, error)
+	ListRunEvents(ctx context.Context, runID string, afterID int64, limit int) ([]*RunEvent, error)
+	UpsertRunWithEvent(ctx context.Context, run *Run, event *RunEvent) error
+}
+
+// Health is implemented by stores that can verify their backing dependency.
+type Health interface {
+	Ping(context.Context) error
 }

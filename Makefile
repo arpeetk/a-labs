@@ -9,7 +9,7 @@ LDFLAGS := -X $(PKG)/internal/cli.Version=$(VERSION) \
 
 CONTROLLER_GEN := go run sigs.k8s.io/controller-tools/cmd/controller-gen@latest
 
-.PHONY: build build-desktop desktop-dev build-operator generate manifests deploy deploy-manifests assets check-assets e2e e2e-pause-resume e2e-gke e2e-gke-checkpoint docker-push-gke test vet fmt tidy clean
+.PHONY: build build-desktop desktop-dev build-operator generate manifests deploy deploy-manifests assets check-assets e2e e2e-install e2e-control-plane-recovery e2e-pause-resume e2e-gke e2e-gke-provisioned e2e-gke-checkpoint e2e-gke-checkpoint-provisioned docker-push-gke test vet fmt tidy clean
 
 build: ## Build the wren CLI into ./bin
 	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/wren
@@ -72,14 +72,26 @@ deploy: ## Install CRDs + RBAC + operator + apiserver in-cluster (current kube c
 e2e: ## Keyless end-to-end test on kind (the WS-0 merge gate); E2E_KEEP=1 keeps the cluster
 	./hack/e2e.sh
 
+e2e-install: ## Product onboarding gate: wren install -> CLI workflow -> wren uninstall on kind
+	./hack/e2e-install.sh
+
+e2e-control-plane-recovery: ## Postgres + dual-apiserver crash/replay gate on kind
+	./hack/e2e-control-plane-recovery.sh
+
 e2e-pause-resume: ## Keyless pause/resume chaos gate on kind; E2E_KEEP=1 keeps the cluster
 	./hack/e2e-pause-resume.sh
 
 e2e-gke: ## Egress-enforcement e2e on a GKE Standard cluster (existing cluster; push images first with docker-push-gke)
 	./hack/e2e-gke.sh
 
+e2e-gke-provisioned: ## Provision a disposable GKE cluster with zone/machine fallback, run e2e-gke, then delete it
+	./hack/e2e-gke-provisioned.sh
+
 e2e-gke-checkpoint: ## Checkpoint/restore (WS-21) e2e on a GKE Standard cluster (existing cluster; push images first with docker-push-gke)
 	./hack/e2e-gke-checkpoint.sh
+
+e2e-gke-checkpoint-provisioned: ## Provision disposable GKE Standard, run checkpoint/restore gate, and verify cluster deletion
+	GKE_E2E_GATE=checkpoint ./hack/e2e-gke-provisioned.sh
 
 cover: ## Run tests and print per-package coverage
 	go test -cover ./...

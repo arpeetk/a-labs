@@ -38,6 +38,7 @@ const (
 	// reads them in the run namespace (keys "token"/"key").
 	GitHubTokenSecret  = "wren-github-token"
 	AnthropicKeySecret = "wren-anthropic-key"
+	GatewayTokenSecret = "wren-gateway-token"
 )
 
 // minServerVersion is the floor the preflight enforces (kind e2e and GKE both
@@ -195,6 +196,9 @@ type Kube interface {
 	EnsureNamespace(ctx context.Context, name string) error
 	// UpsertSecret creates or replaces a Secret's data.
 	UpsertSecret(ctx context.Context, ns, name string, data map[string]string) error
+	// SecretValue returns one Secret value, or empty when the object/key is
+	// absent. Install uses it to preserve the gateway credential across reruns.
+	SecretValue(ctx context.Context, ns, name, key string) (string, error)
 	// OverrideImages points the control-plane Deployments at pushed images and
 	// appends/replaces the operator's --runtime-image arg (last flag wins).
 	OverrideImages(ctx context.Context, registry, tag string) error
@@ -281,6 +285,9 @@ func (in *Installer) Install(ctx context.Context, opts Options) error {
 		return err
 	}
 	if err := st.images(ctx); err != nil {
+		return err
+	}
+	if err := st.gatewayCredential(ctx); err != nil {
 		return err
 	}
 	if err := st.credentials(ctx); err != nil {

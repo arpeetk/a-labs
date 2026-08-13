@@ -15,6 +15,8 @@
 package podruntime
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -151,7 +153,18 @@ func RunHarness(ctx context.Context, out io.Writer, specPath string) error {
 	if specPath == "" {
 		specPath = DefaultRunSpecPath
 	}
-	em := harness.NewEmitter(out)
+	eventOut := out
+	var eventFile *os.File
+	if path := strings.TrimSpace(os.Getenv("WREN_EVENT_FILE")); path != "" {
+		var err error
+		eventFile, err = os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if err != nil {
+			return fmt.Errorf("open durable event stream: %w", err)
+		}
+		defer eventFile.Close()
+		eventOut = io.MultiWriter(out, eventFile)
+	}
+	em := harness.NewEmitter(eventOut)
 
 	spec, err := LoadRunSpec(specPath)
 	if err != nil {
@@ -394,10 +407,11 @@ func RunEgressProxy(ctx context.Context, out io.Writer) error {
 // stand-in (e.g. a gitea server for the gitea-backed e2e-pr tier) without
 // touching production defaults. See envUpstream.
 const (
-	defaultGitHubUpstream    = "https://github.com"
-	defaultGitHubAPIUpstream = "https://api.github.com"
-	defaultAnthropicUpstream = "https://api.anthropic.com"
-	defaultOpenAIUpstream    = "https://api.openai.com"
+	defaultGitHubUpstream       = "https://github.com"
+	defaultGitHubAPIUpstream    = "https://api.github.com"
+	defaultAnthropicUpstream    = "https://api.anthropic.com"
+	defaultOpenAIUpstream       = "https://api.openai.com"
+	defaultControlPlaneUpstream = "http://wren-apiserver.wren-system.svc:8090"
 )
 
 // envUpstream returns the override from env if set (trimmed, non-empty),
@@ -435,6 +449,15 @@ func egressConfigFromEnv() egress.Config {
 			Upstream: envUpstream("WREN_OPENAI_UPSTREAM", defaultOpenAIUpstream),
 			Auth:     egress.HeaderAuth{Key: "Authorization", Value: "Bearer " + key}})
 	}
+	if token := os.Getenv("WREN_GATEWAY_TOKEN"); token != "" {
+		runID := os.Getenv("WREN_RUN_ID")
+		cfg.Routes = append(cfg.Routes, egress.Route{Prefix: egress.RouteControlPlane,
+			Upstream: envUpstream("WREN_CONTROL_PLANE_UPSTREAM", defaultControlPlaneUpstream),
+			Auth: egress.HeaderAuths{
+				{Key: "Authorization", Value: "Bearer " + token},
+				{Key: "X-Wren-Run-ID", Value: runID},
+			}})
+	}
 	return cfg
 }
 
@@ -446,6 +469,124 @@ func splitAllowlist(s string) []string {
 		}
 	}
 	return out
+}
+
+var gatewayPollInterval = 100 * time.Millisecond
+
+// RunGateway tails the append-only harness event file and forwards every JSONL
+// item to the control plane through the trusted egress proxy. A restart replays
+// from line one; attempt/sequence is a stable idempotency key, so the durable
+// journal accepts each event exactly once without a fragile local cursor.
+func RunGateway(ctx context.Context, out io.Writer) error {
+	em := harness.NewEmitter(out)
+	path := strings.TrimSpace(os.Getenv("WREN_EVENT_FILE"))
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("WREN_GATEWAY_URL")), "/")
+	runID := strings.TrimSpace(os.Getenv("WREN_RUN_ID"))
+	attempt := strings.TrimSpace(os.Getenv("WREN_ATTEMPT"))
+	if path == "" || base == "" || runID == "" {
+		return RunSidecar(ctx, out, RoleGateway)
+	}
+	if attempt == "" {
+		attempt = "0"
+	}
+
+	var f *os.File
+	for f == nil {
+		opened, err := os.Open(path)
+		switch {
+		case err == nil:
+			f = opened
+		case os.IsNotExist(err):
+			if !waitGateway(ctx, gatewayPollInterval) {
+				return nil
+			}
+		default:
+			return fmt.Errorf("open harness event stream: %w", err)
+		}
+	}
+	defer f.Close()
+	em.Message("agent-gateway: forwarding durable event stream")
+
+	reader := bufio.NewReader(f)
+	var fragment []byte
+	var sequence int64
+	for {
+		part, err := reader.ReadBytes('\n')
+		fragment = append(fragment, part...)
+		if len(fragment) > 0 && fragment[len(fragment)-1] == '\n' {
+			sequence++
+			line := bytes.TrimSpace(fragment)
+			fragment = nil
+			var event harness.Event
+			if jsonErr := json.Unmarshal(line, &event); jsonErr != nil {
+				em.Errorf(fmt.Sprintf("agent-gateway: skip malformed event line %d: %v", sequence, jsonErr))
+			} else if postErr := forwardGatewayEvent(ctx, base, runID, attempt, sequence, event, line, func(err error) {
+				em.Errorf(fmt.Sprintf("agent-gateway: event %d delivery retry: %v", sequence, err))
+			}); postErr != nil {
+				if errors.Is(postErr, context.Canceled) {
+					return nil
+				}
+				return postErr
+			}
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return fmt.Errorf("read harness event stream: %w", err)
+		}
+		if errors.Is(err, io.EOF) && !waitGateway(ctx, gatewayPollInterval) {
+			return nil
+		}
+	}
+}
+
+func forwardGatewayEvent(ctx context.Context, base, runID, attempt string, sequence int64, event harness.Event, payload json.RawMessage, report func(error)) error {
+	body, err := json.Marshal(map[string]any{
+		"sourceId": fmt.Sprintf("attempt-%s/%d", attempt, sequence),
+		"type":     string(event.Type),
+		"payload":  payload,
+		"at":       event.Time,
+	})
+	if err != nil {
+		return fmt.Errorf("encode gateway event: %w", err)
+	}
+	delay := gatewayPollInterval
+	retries := 0
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/internal/runs/"+url.PathEscape(runID)+"/events", bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("build gateway request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusNoContent {
+				return nil
+			}
+			err = fmt.Errorf("control plane returned %s", resp.Status)
+		}
+		retries++
+		if report != nil && (retries == 1 || retries%10 == 0) {
+			report(err)
+		}
+		if !waitGateway(ctx, delay) {
+			return context.Canceled
+		}
+		if delay < 5*time.Second {
+			delay *= 2
+		}
+	}
+}
+
+func waitGateway(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }
 
 // RunSidecar runs a long-lived sidecar role: it logs liveness and blocks until
@@ -657,7 +798,7 @@ func Dispatch(ctx context.Context, out io.Writer, role, specPath string) error {
 	case RoleUnquiesce:
 		return quiesceHarness(syscall.SIGCONT)
 	case RoleGateway:
-		return RunSidecar(ctx, out, role)
+		return RunGateway(ctx, out)
 	default:
 		return fmt.Errorf("unknown role %q", role)
 	}

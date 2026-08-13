@@ -30,6 +30,10 @@ dump_diagnostics() {
   k -n "$NS_SYSTEM" logs deploy/wren-operator --tail=200 2>&1 || true
   echo "----- apiserver logs -----"
   k -n "$NS_SYSTEM" logs deploy/wren-apiserver --tail=200 2>&1 || true
+  if [ -n "${PF_LOG:-}" ] && [ -f "$PF_LOG" ]; then
+    echo "----- port-forward logs -----"
+    tail -100 "$PF_LOG" 2>&1 || true
+  fi
   if [ -n "$RUN_ID" ] && [ -n "$RUN_NS" ]; then
     echo "----- AgentRun/$RUN_ID (yaml) -----"
     k -n "$RUN_NS" get agentrun "$RUN_ID" -o yaml 2>&1 || true

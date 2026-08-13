@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wren-apiserver
+  namespace: wren-system
+spec:
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    spec:
+      terminationGracePeriodSeconds: 30
+      topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: ScheduleAnyway
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: wren-apiserver
+      containers:
+      - name: apiserver
+        args:
+        - --addr=:8090
+        - --store=postgres
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: wren-postgres
+              key: database-url
+        readinessProbe:
+          httpGet: {path: /readyz, port: 8090}
+          failureThreshold: 3
+          periodSeconds: 5
+      - name: cloud-sql-proxy
+        image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.18.2
+        args:
+        - --auto-iam-authn
+        - --structured-logs
+        - --address=127.0.0.1
+        - --port=5432
+        - $(INSTANCE_CONNECTION_NAME)
+        env:
+        - name: INSTANCE_CONNECTION_NAME
+          valueFrom:
+            secretKeyRef:
+              name: wren-postgres
+              key: instance-connection-name
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop: ["ALL"]
+        resources:
+          requests: {cpu: 100m, memory: 128Mi}
+          limits: {cpu: 500m, memory: 256Mi}

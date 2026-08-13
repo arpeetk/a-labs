@@ -91,6 +91,17 @@ type RunCondition struct {
 	LastTransitionTime time.Time `json:"lastTransitionTime,omitempty"`
 }
 
+// RunEvent is one immutable entry in a run's durable execution journal.
+type RunEvent struct {
+	ID        int64           `json:"id"`
+	RunID     string          `json:"runId"`
+	Source    string          `json:"source"`
+	SourceID  string          `json:"sourceId"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
+	CreatedAt time.Time       `json:"createdAt"`
+}
+
 // CreateRun submits a task to a new agent run.
 func (c *Client) CreateRun(ctx context.Context, opts RunCreateOptions) (*Run, error) {
 	var run Run
@@ -128,6 +139,26 @@ func (c *Client) GetRun(ctx context.Context, id string) (*Run, error) {
 		return nil, err
 	}
 	return &run, nil
+}
+
+// ListRunEvents returns journal entries strictly after afterID.
+func (c *Client) ListRunEvents(ctx context.Context, id string, afterID int64, limit int) ([]RunEvent, error) {
+	q := url.Values{}
+	if afterID > 0 {
+		q.Set("after", fmt.Sprintf("%d", afterID))
+	}
+	if limit > 0 {
+		q.Set("limit", fmt.Sprintf("%d", limit))
+	}
+	path := "/v1/runs/" + url.PathEscape(id) + "/events"
+	if encoded := q.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	var events []RunEvent
+	if err := c.do(ctx, http.MethodGet, path, nil, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 // DeleteRun removes a run and its cluster resources (DELETE /v1/runs/{id}).

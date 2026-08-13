@@ -89,16 +89,88 @@ func TestCreateRunPublishesOnlyAfterPersistence(t *testing.T) {
 	}
 }
 
-func TestCreateRunRollsBackStoreWhenClusterPublishFails(t *testing.T) {
+func TestCreateRunSurvivesClusterPublicationFailure(t *testing.T) {
 	svc, st, fl := newService(t)
 	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
 	fl.CreateRunErr = errors.New("cluster unavailable")
 
-	if _, err := svc.CreateRun(context.Background(), CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"}); err == nil {
-		t.Fatal("CreateRun succeeded with failing launcher")
+	run, err := svc.CreateRun(context.Background(), CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatalf("durable CreateRun failed during cluster outage: %v", err)
 	}
-	if _, err := st.GetRun(context.Background(), "r-fixed"); !errors.Is(err, store.ErrNotFound) {
-		t.Fatalf("store row survived failed publication: %v", err)
+	if run.ID != "r-fixed" {
+		t.Fatalf("run ID = %q", run.ID)
+	}
+	if _, err := st.GetRun(context.Background(), run.ID); err != nil {
+		t.Fatalf("durable run missing after publication failure: %v", err)
+	}
+	if len(fl.Runs) != 0 {
+		t.Fatalf("failed publication unexpectedly created a run: %+v", fl.Runs)
+	}
+
+	fl.CreateRunErr = nil
+	if n, err := svc.DispatchPending(context.Background(), "recovery-worker", 10); err != nil || n != 1 {
+		t.Fatalf("recovery dispatch = %d, %v", n, err)
+	}
+	if _, ok := fl.Runs[run.Namespace+"/"+run.ID]; !ok {
+		t.Fatalf("recovered launch missing: %+v", fl.Runs)
+	}
+}
+
+func TestCreateRunSurvivesNamespaceAPIOutage(t *testing.T) {
+	svc, st, fl := newService(t)
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	fl.EnsureNamespaceErr = errors.New("kube apiserver unavailable")
+	run, err := svc.CreateRun(context.Background(), CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatalf("durable submission failed during namespace API outage: %v", err)
+	}
+	if _, err := st.GetRun(context.Background(), run.ID); err != nil {
+		t.Fatalf("accepted run was not persisted: %v", err)
+	}
+	if len(fl.Namespaces) != 0 || len(fl.Runs) != 0 {
+		t.Fatalf("cluster outage produced resources: namespaces=%v runs=%v", fl.Namespaces, fl.Runs)
+	}
+	fl.EnsureNamespaceErr = nil
+	if n, err := svc.DispatchPending(context.Background(), "namespace-recovery", 1); err != nil || n != 1 {
+		t.Fatalf("recovery dispatch = %d, %v", n, err)
+	}
+	if !fl.Namespaces[run.Namespace] {
+		t.Fatal("recovery did not create namespace")
+	}
+}
+
+func TestRunOutboxWorkerRecoversPendingLaunchAtStartup(t *testing.T) {
+	svc, _, fl := newService(t)
+	seedProject(t, svc, &store.Project{Name: "demo", DefaultHarness: "mock"})
+	fl.CreateRunErr = errors.New("cluster unavailable")
+	run, err := svc.CreateRun(context.Background(), CreateRunRequest{Project: "demo", User: "u@x", Prompt: "hi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fl.CreateRunErr = nil
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		svc.RunOutboxWorker(ctx, "startup-worker", 5*time.Millisecond, nil)
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, getErr := fl.GetRun(context.Background(), run.Namespace, run.ID); getErr == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("startup worker did not recover pending launch")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("outbox worker did not stop after cancellation")
 	}
 }
 

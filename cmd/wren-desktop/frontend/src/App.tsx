@@ -1,9 +1,18 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react"
-import { api, Bootstrap, Project, Run, RunCreate } from "./api"
+import { api, Bootstrap, Project, Run, RunCreate, RunEvent } from "./api"
 import { canFollowRunLogs, logPlaceholder } from "./runState"
+import { displayLogLines } from "./logLines"
 
-const phases = ["", "Pending", "Provisioning", "Running", "Pausing", "Paused", "Interrupted", "Succeeded", "Failed", "Canceled"]
 const containers = ["harness", "hydrate", "egress-proxy", "checkpointer", "agent-gateway", "egress-lockdown"]
+const harnesses = ["claude-code", "codex", "opencode", "mock", "byo"]
+const scopes = [{ value: "all", label: "Everyone" }, { value: "mine", label: "My runs" }, { value: "team", label: "Team" }]
+const phases = [
+  { value: "", label: "All states" },
+  { value: "Running", label: "Running" },
+  { value: "Paused", label: "Paused" },
+  { value: "Failed", label: "Needs attention" },
+  { value: "Succeeded", label: "Completed" },
+]
 
 function errText(error: unknown) {
   return error instanceof Error ? error.message : String(error)
@@ -23,6 +32,18 @@ function phaseTone(phase: string) {
   if (phase === "Failed" || phase === "Canceled") return "danger"
   if (phase === "Running" || phase === "Finalizing" || phase === "Pausing") return "active"
   return "quiet"
+}
+
+function eventSummary(event: RunEvent) {
+  const payload = event.payload || {}
+  if (event.type === "status" && typeof payload.phase === "string") return `Agent entered ${payload.phase}`
+  if (event.type === "message" && typeof payload.message === "string") return payload.message
+  if (event.type === "tool_call" && typeof payload.tool === "string") return `Tool · ${payload.tool}`
+  if (event.type === "error" && typeof payload.error === "string") return payload.error
+  if (event.type === "run.snapshot" && typeof payload.phase === "string") return `Control plane observed ${payload.phase}`
+  if (event.type === "run.submitted") return "Run accepted and recorded durably"
+  if (event.type === "run.launch_accepted") return "Kubernetes accepted the run"
+  return event.type.replaceAll("_", " ").replaceAll(".", " · ")
 }
 
 export function App() {
@@ -115,10 +136,10 @@ export function App() {
           <div><small>Running now</small><strong className="green">{counts.running}</strong></div>
           <div><small>Needs attention</small><strong className={counts.failed ? "red" : ""}>{counts.failed}</strong></div>
         </section>
-        <section className="toolbar">
-          <select value={scope} onChange={e => setScope(e.target.value)}><option value="all">Everyone</option><option value="mine">My runs</option><option value="team">Team</option></select>
-          <select value={projectFilter} onChange={e => setProjectFilter(e.target.value)}><option value="">All projects</option>{data.projects.map(p => <option key={p.name}>{p.name}</option>)}</select>
-          <select value={phaseFilter} onChange={e => setPhaseFilter(e.target.value)}>{phases.map(p => <option key={p} value={p}>{p || "All phases"}</option>)}</select>
+        <section className="toolbar" aria-label="Fleet filters">
+          <FilterGroup label="Scope" value={scope} options={scopes} onChange={setScope} />
+          <FilterGroup label="Project" value={projectFilter} options={[{ value: "", label: "All projects" }, ...data.projects.map(p => ({ value: p.name, label: p.name }))]} onChange={setProjectFilter} scroll />
+          <FilterGroup label="State" value={phaseFilter} options={phases} onChange={setPhaseFilter} />
           <span className="live"><i /> Live · 3s</span>
         </section>
         <div className="workspace">
@@ -143,11 +164,24 @@ export function App() {
   </div>
 }
 
+function FilterGroup({ label, value, options, onChange, scroll = false }: { label: string; value: string; options: { value: string; label: string }[]; onChange: (value: string) => void; scroll?: boolean }) {
+  return <div className={`filter-group ${scroll ? "scroll" : ""}`}>
+    <span className="filter-label">{label}</span>
+    <div className="choice-row" role="group" aria-label={label}>
+      {options.map(option => <button key={`${label}-${option.value}`} type="button" className={value === option.value ? "choice active" : "choice"} aria-pressed={value === option.value} onClick={() => onChange(option.value)}>{option.label}</button>)}
+    </div>
+  </div>
+}
+
 function RunDetail({ run, onAction, onDelete }: { run?: Run; onAction: (a: () => Promise<unknown>) => Promise<void>; onDelete: () => void }) {
+  const [tab, setTab] = useState<"overview" | "logs" | "recovery">("logs")
   const [logs, setLogs] = useState("")
   const [container, setContainer] = useState("harness")
   const [logError, setLogError] = useState("")
   const [logLive, setLogLive] = useState(false)
+	const [events, setEvents] = useState<RunEvent[]>([])
+	const [eventError, setEventError] = useState("")
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
   useEffect(() => {
     setLogs(""); setLogError("")
   }, [run?.id, container])
@@ -173,6 +207,22 @@ function RunDetail({ run, onAction, onDelete }: { run?: Run; onAction: (a: () =>
       if (streamID) void api.stopLogStream(streamID)
     }
   }, [run?.id, run?.phase, container])
+  useEffect(() => {
+    setEvents([]); setEventError("")
+    if (!run?.id || tab !== "recovery") return
+    let disposed = false
+    const refresh = async () => {
+      try {
+        const next = await api.listRunEvents(run.id, 0, 200)
+        if (!disposed) { setEvents(next); setEventError("") }
+      } catch (error) {
+        if (!disposed) setEventError(errText(error))
+      }
+    }
+    void refresh()
+    const timer = window.setInterval(refresh, 3000)
+    return () => { disposed = true; window.clearInterval(timer) }
+  }, [run?.id, tab])
   if (!run) return <aside className="detail empty-detail"><span>◇</span><h3>Select a run</h3><p>Inspect state, logs, pull requests, and lifecycle actions.</p></aside>
   const runID = run.id
   async function fetchLogs() {
@@ -180,18 +230,45 @@ function RunDetail({ run, onAction, onDelete }: { run?: Run; onAction: (a: () =>
   }
   return <aside className="detail">
     <div className="detail-head"><div><b className={`phase ${phaseTone(run.phase)}`}>{run.phase}</b><h2>{run.id}</h2><p>{run.project} · {run.harness || "default"}</p></div><button className="icon">•••</button></div>
-    <dl><div><dt>Owner</dt><dd>{run.user || "—"}</dd></div><div><dt>Restarts</dt><dd>{run.restartCount || 0}</dd></div><div><dt>Namespace</dt><dd>{run.namespace || "—"}</dd></div><div><dt>Created</dt><dd>{run.createdAt ? new Date(run.createdAt).toLocaleString() : "—"}</dd></div></dl>
-    {run.prUrl && <a className="pr-card" href={run.prUrl} target="_blank"><span>⑂</span><span><small>Pull request ready</small><strong>{run.prUrl.replace("https://github.com/", "")}</strong></span><b>↗</b></a>}
-    {run.lastCheckpoint && <div className="checkpoint-card"><small>Durable checkpoint · {run.lastCheckpoint.trigger || "recovery"}</small><strong>{run.lastCheckpoint.id}</strong><span>{run.lastCheckpoint.at ? new Date(run.lastCheckpoint.at).toLocaleString() : "—"} · {run.lastCheckpoint.sizeBytes ? `${Math.ceil(run.lastCheckpoint.sizeBytes / 1024)} KiB` : "—"}</span><code>{run.lastCheckpoint.sha256 ? `sha256:${run.lastCheckpoint.sha256.slice(0, 16)}…` : run.lastCheckpoint.uri}</code></div>}
-    {!!run.conditions?.length && <div className="conditions"><h3>Recovery timeline</h3>{run.conditions.filter(c => c.type !== "Ready" && c.type !== "EgressEnforcement").map(c => <div key={c.type}><span className={`status-dot ${c.status === "False" ? "warn" : ""}`} /><span><strong>{c.type}</strong><small>{c.reason}{c.message ? ` · ${c.message}` : ""}</small></span></div>)}</div>}
-    <div className="logs-head"><h3>Run logs {logLive && <span className="live"><i /> Live</span>}</h3><select value={container} onChange={e => setContainer(e.target.value)}>{containers.map(c => <option key={c}>{c}</option>)}</select><button className="ghost compact" onClick={() => void fetchLogs()}>Snapshot</button></div>
-    <pre className="logs">{logError ? `Unable to stream logs\n${logError}` : logs || logPlaceholder(run.phase)}</pre>
+    <div className="detail-tabs" role="tablist">
+      {(["overview", "logs", "recovery"] as const).map(value => <button key={value} role="tab" aria-selected={tab === value} className={tab === value ? "active" : ""} onClick={() => setTab(value)}>{value === "logs" ? "Live logs" : value[0].toUpperCase() + value.slice(1)}</button>)}
+    </div>
+    {tab === "overview" && <div className="detail-panel overview-panel">
+      <dl><div><dt>Owner</dt><dd>{run.user || "—"}</dd></div><div><dt>Restarts</dt><dd>{run.restartCount || 0}</dd></div><div><dt>Namespace</dt><dd title={run.namespace}>{run.namespace || "—"}</dd></div><div><dt>Created</dt><dd>{run.createdAt ? new Date(run.createdAt).toLocaleString() : "—"}</dd></div></dl>
+      {run.prUrl ? <a className="pr-card" href={run.prUrl} target="_blank"><span>⑂</span><span><small>Pull request ready</small><strong>{run.prUrl.replace("https://github.com/", "")}</strong></span><b>↗</b></a> : <div className="quiet-card"><strong>No pull request yet</strong><span>Wren will attach the pull request when finalization completes.</span></div>}
+    </div>}
+    {tab === "logs" && <div className="detail-panel logs-panel">
+      <div className="logs-head"><div><h3>Container output</h3>{logLive && <span className="live"><i /> Streaming live</span>}</div><button className="ghost compact" onClick={() => void fetchLogs()}>Refresh snapshot</button></div>
+      <div className="container-tabs" role="tablist" aria-label="Log container">{containers.map(value => <button key={value} role="tab" aria-selected={container === value} className={container === value ? "active" : ""} onClick={() => setContainer(value)}>{value}</button>)}</div>
+      <div className="logs" tabIndex={0} role="log" aria-label={`${container} container output`}>
+        {logError
+          ? <div className="log-state error"><strong>Unable to stream logs</strong><span>{logError}</span></div>
+          : logs
+            ? displayLogLines(logs).map(line => <div className={`log-line ${line.kind}`} key={line.id}><time>{line.time || "··:··:··"}</time><span className="log-kind">{line.kind}</span><code>{line.message}</code></div>)
+            : <div className="log-state"><span>{logPlaceholder(run.phase)}</span></div>}
+      </div>
+    </div>}
+    {tab === "recovery" && <div className="detail-panel recovery-panel">
+      {run.lastCheckpoint ? <div className="checkpoint-card"><small>Durable checkpoint · {run.lastCheckpoint.trigger || "recovery"}</small><strong>{run.lastCheckpoint.id}</strong><span>{run.lastCheckpoint.at ? new Date(run.lastCheckpoint.at).toLocaleString() : "—"} · {run.lastCheckpoint.sizeBytes ? `${Math.ceil(run.lastCheckpoint.sizeBytes / 1024)} KiB` : "—"}</span><code>{run.lastCheckpoint.sha256 ? `sha256:${run.lastCheckpoint.sha256.slice(0, 20)}…` : run.lastCheckpoint.uri}</code></div> : <div className="quiet-card"><strong>No durable checkpoint recorded</strong><span>Checkpoint metadata will appear here once a verified snapshot is published.</span></div>}
+      {!!run.conditions?.length && <div className="conditions"><h3>Recovery timeline</h3>{run.conditions.filter(c => c.type !== "Ready" && c.type !== "EgressEnforcement").map(c => <div key={c.type}><span className={`status-dot ${c.status === "False" ? "warn" : ""}`} /><span><strong>{c.type}</strong><small>{c.reason}{c.message ? ` · ${c.message}` : ""}</small></span></div>)}</div>}
+	  <div className="event-journal"><div className="journal-head"><span><small>Durable journal</small><strong>{events.length} events</strong></span><i className="status-dot" /></div>
+		{eventError && <div className="journal-error">{eventError}</div>}
+		{events.length ? <ol>{[...events].reverse().map(event => <li key={event.id}><time>{new Date(event.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</time><span><strong>{eventSummary(event)}</strong><small>{event.source} · {event.sourceId}</small></span></li>)}</ol> : !eventError && <div className="journal-empty">Waiting for the first durable event…</div>}
+	  </div>
+    </div>}
     <div className="lifecycle">
       {(run.phase === "Running" || run.phase === "Pending" || run.phase === "Provisioning") && <button onClick={() => void onAction(() => api.stopRun(runID))}>Stop run</button>}
       {run.phase === "Running" && <button className="primary" onClick={() => void onAction(() => api.pauseRun(runID))}>Pause safely</button>}
       {(run.phase === "Failed" || run.phase === "Paused") && <button className="primary" onClick={() => void onAction(() => api.resumeRun(runID))}>Resume run</button>}
-      <button className="danger-button" onClick={() => { if (confirm(`Delete ${runID} and its workspace?`)) void onAction(async () => { await api.deleteRun(runID); onDelete() }) }}>Delete</button>
+      <button className="danger-button" onClick={() => setConfirmingDelete(true)}>Delete</button>
     </div>
+    {confirmingDelete && <div className="modal-backdrop" role="presentation">
+      <div className="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="delete-run-title" aria-describedby="delete-run-description">
+        <div className="modal-head"><div><small>Destructive action</small><h2 id="delete-run-title">Delete run?</h2></div><button type="button" aria-label="Close" onClick={() => setConfirmingDelete(false)}>×</button></div>
+        <p id="delete-run-description">Delete <strong>{runID}</strong> and its workspace. This cannot be undone.</p>
+        <div className="modal-actions"><button type="button" className="ghost" onClick={() => setConfirmingDelete(false)}>Cancel</button><button type="button" className="danger-button" onClick={() => { setConfirmingDelete(false); void onAction(async () => { await api.deleteRun(runID); onDelete() }) }}>Delete run</button></div>
+      </div>
+    </div>}
   </aside>
 }
 
@@ -205,9 +282,10 @@ function RunComposer({ projects, onClose, onCreated }: { projects: Project[]; on
   }
   return <div className="modal-backdrop"><form className="modal composer" onSubmit={submit}>
     <div className="modal-head"><div><small>New orchestration</small><h2>What should Wren build?</h2></div><button type="button" onClick={onClose}>×</button></div>
-    <label>Project<select required value={form.project} onChange={e => setForm({ ...form, project: e.target.value })}><option value="" disabled>Select a repository</option>{projects.map(p => <option key={p.name}>{p.name}</option>)}</select></label>
+    <fieldset className="choice-field"><legend>Project</legend><div className="card-choices">{projects.map(project => <button key={project.name} type="button" className={form.project === project.name ? "choice-card active" : "choice-card"} onClick={() => setForm({ ...form, project: project.name })}><strong>{project.name}</strong><span>{project.repo || "Keyless project"}</span></button>)}</div></fieldset>
     <label>Task<textarea autoFocus required rows={8} placeholder="Describe the feature, bug, constraints, and definition of done…" value={form.task} onChange={e => setForm({ ...form, task: e.target.value })} /></label>
-    <div className="form-grid"><label>Harness<select value={form.harness || ""} onChange={e => setForm({ ...form, harness: e.target.value })}><option value="">Project default</option><option>claude-code</option><option>codex</option><option>opencode</option><option>mock</option><option>byo</option></select></label><label>Base branch<input placeholder="main" value={form.baseRef || ""} onChange={e => setForm({ ...form, baseRef: e.target.value })} /></label></div>
+    <fieldset className="choice-field"><legend>Harness</legend><div className="choice-row wrap"><button type="button" className={!form.harness ? "choice active" : "choice"} onClick={() => setForm({ ...form, harness: "" })}>Project default</button>{harnesses.map(harness => <button key={harness} type="button" className={form.harness === harness ? "choice active" : "choice"} onClick={() => setForm({ ...form, harness })}>{harness}</button>)}</div></fieldset>
+    <label>Base branch<input placeholder="main" value={form.baseRef || ""} onChange={e => setForm({ ...form, baseRef: e.target.value })} /></label>
     {error && <p className="form-error">{error}</p>}
     <div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>Cancel</button><button className="primary" disabled={saving}>{saving ? "Launching…" : "Launch agent"}</button></div>
   </form></div>
@@ -226,7 +304,7 @@ function ProjectModal({ onClose, onCreated }: { onClose: () => void; onCreated: 
   const [project, setProject] = useState<Project>({ name: "", repo: "", defaultHarness: "claude-code" })
   const [error, setError] = useState("")
   async function submit(e: FormEvent) { e.preventDefault(); try { await api.createProject(project); onCreated() } catch (err) { setError(errText(err)) } }
-  return <div className="modal-backdrop"><form className="modal" onSubmit={submit}><div className="modal-head"><h2>Register project</h2><button type="button" onClick={onClose}>×</button></div><div className="form-grid"><label>Name<input required placeholder="payments-api" value={project.name} onChange={e => setProject({ ...project, name: e.target.value })} /></label><label>GitHub repository<input placeholder="acme/payments-api" value={project.repo || ""} onChange={e => setProject({ ...project, repo: e.target.value })} /></label><label>Default harness<select value={project.defaultHarness} onChange={e => setProject({ ...project, defaultHarness: e.target.value })}><option>claude-code</option><option>codex</option><option>opencode</option><option>mock</option><option>byo</option></select></label><label>Namespace<input placeholder="wren-runs" value={project.namespace || ""} onChange={e => setProject({ ...project, namespace: e.target.value })} /></label></div>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>Cancel</button><button className="primary">Register</button></div></form></div>
+  return <div className="modal-backdrop"><form className="modal" onSubmit={submit}><div className="modal-head"><h2>Register project</h2><button type="button" onClick={onClose}>×</button></div><div className="form-grid"><label>Name<input required placeholder="payments-api" value={project.name} onChange={e => setProject({ ...project, name: e.target.value })} /></label><label>GitHub repository<input placeholder="acme/payments-api" value={project.repo || ""} onChange={e => setProject({ ...project, repo: e.target.value })} /></label><label>Namespace<input placeholder="wren-runs" value={project.namespace || ""} onChange={e => setProject({ ...project, namespace: e.target.value })} /></label></div><fieldset className="choice-field"><legend>Default harness</legend><div className="choice-row wrap">{harnesses.map(harness => <button key={harness} type="button" className={project.defaultHarness === harness ? "choice active" : "choice"} onClick={() => setProject({ ...project, defaultHarness: harness })}>{harness}</button>)}</div></fieldset>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="ghost" onClick={onClose}>Cancel</button><button className="primary">Register</button></div></form></div>
 }
 
 function ContextModal({ contexts, onClose, onLoaded }: { contexts: Bootstrap["contexts"]; onClose: () => void; onLoaded: (data: Bootstrap) => void }) {

@@ -41,6 +41,7 @@ const (
 	VolumeCheckpoints = "checkpoints"
 
 	MountIPC         = "/var/run/wren"
+	EventFilePath    = MountIPC + "/events.jsonl"
 	MountMCP         = "/etc/wren/mcp"
 	MountTmp         = "/tmp"
 	MountHome        = "/home/agent"
@@ -123,6 +124,12 @@ type PodConfig struct {
 	GitHubTokenSecret  string
 	AnthropicKeySecret string
 	OpenAIKeySecret    string
+	// GatewayTokenSecret is mounted only into the trusted egress proxy. The
+	// gateway sends event payloads through that proxy and never sees the token.
+	GatewayTokenSecret string
+	// ControlPlaneURL is the in-cluster apiserver origin used by the proxy's
+	// internal route. Empty uses the standard wren-system Service address.
+	ControlPlaneURL string
 	// EgressPort is the localhost port the egress-proxy listens on.
 	EgressPort string
 	// EgressEnforcement selects the bypass-prevention mechanism (default
@@ -176,6 +183,13 @@ func (c PodConfig) egressPort() string {
 }
 
 func (c PodConfig) proxyBaseURL() string { return "http://127.0.0.1:" + c.egressPort() }
+
+func (c PodConfig) controlPlaneURL() string {
+	if strings.TrimSpace(c.ControlPlaneURL) != "" {
+		return strings.TrimRight(c.ControlPlaneURL, "/")
+	}
+	return "http://wren-apiserver.wren-system.svc:8090"
+}
 
 // secretEnv builds an optional Secret-sourced env var (optional so a missing
 // Secret does not block the pod).
@@ -375,11 +389,13 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 		{Name: "WREN_RUN_ID", Value: run.Name},
 		{Name: "WREN_EGRESS_PORT", Value: cfg.egressPort()},
 		{Name: "WREN_EGRESS_ALLOWLIST", Value: joinAllowlist(run.Spec.Egress.Allowlist)},
+		{Name: "WREN_CONTROL_PLANE_UPSTREAM", Value: cfg.controlPlaneURL()},
 	}
 	// Credentials live here — on the trusted proxy, never the runner.
 	egressProxyEnv = append(egressProxyEnv, secretEnv("GITHUB_TOKEN", cfg.GitHubTokenSecret, "token")...)
 	egressProxyEnv = append(egressProxyEnv, secretEnv("ANTHROPIC_API_KEY", cfg.AnthropicKeySecret, "key")...)
 	egressProxyEnv = append(egressProxyEnv, secretEnv("OPENAI_API_KEY", cfg.OpenAIKeySecret, "key")...)
+	egressProxyEnv = append(egressProxyEnv, secretEnv("WREN_GATEWAY_TOKEN", cfg.GatewayTokenSecret, "token")...)
 
 	// The egress-proxy runs as a distinct uid (proxyUID) so the lockdown iptables
 	// rules can uid-match it: override the runner-uid pin from hardened().
@@ -431,6 +447,9 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 		SecurityContext: hardened(true),
 		Env: []corev1.EnvVar{
 			{Name: "WREN_RUN_ID", Value: run.Name},
+			{Name: "WREN_ATTEMPT", Value: fmt.Sprintf("%d", attemptGeneration(run))},
+			{Name: "WREN_EVENT_FILE", Value: EventFilePath},
+			{Name: "WREN_GATEWAY_URL", Value: proxyBase + strings.TrimSuffix(egress.RouteControlPlane, "/")},
 			{Name: "WREN_INTERACTIVE", Value: fmt.Sprintf("%t", run.Spec.Interactive)},
 		},
 		VolumeMounts: []corev1.VolumeMount{ipcMount},
@@ -438,6 +457,7 @@ func buildAgentPod(run *wrenv1.AgentRun, cfg PodConfig) *corev1.Pod {
 
 	harnessEnv := append([]corev1.EnvVar{
 		{Name: "WREN_RUN_ID", Value: run.Name},
+		{Name: "WREN_EVENT_FILE", Value: EventFilePath},
 		{Name: "WREN_MODE", Value: string(mode(resume))},
 		runSpecEnv,
 		{Name: "HOME", Value: MountHome},

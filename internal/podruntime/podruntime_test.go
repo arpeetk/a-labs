@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/summiteight/wren/internal/blob"
+	"github.com/summiteight/wren/internal/egress"
 	"github.com/summiteight/wren/internal/runspec"
 )
 
@@ -45,6 +48,170 @@ func TestRunHarnessHappyPath(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(ws, "WREN_MOCK.md")); err != nil {
 		t.Errorf("workspace marker missing: %v", err)
+	}
+}
+
+func TestRunHarnessMirrorsEventsToGatewayFile(t *testing.T) {
+	ws := t.TempDir()
+	specPath := writeRunSpec(t, t.TempDir(), runspec.RunSpec{RunID: "r-events", Harness: "mock", Prompt: "x", WorkspacePath: ws})
+	eventPath := t.TempDir() + "/events.jsonl"
+	t.Setenv("WREN_EVENT_FILE", eventPath)
+	var stdout bytes.Buffer
+	if err := RunHarness(context.Background(), &stdout, specPath); err != nil {
+		t.Fatal(err)
+	}
+	events, err := os.ReadFile(eventPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(events, stdout.Bytes()) {
+		t.Fatalf("gateway event file differs from stdout\nfile=%s\nout=%s", events, stdout.String())
+	}
+}
+
+func TestRunGatewayForwardsStableAttemptSequence(t *testing.T) {
+	eventPath := t.TempDir() + "/events.jsonl"
+	contents := `{"type":"status","time":"2026-08-11T10:00:00Z","phase":"running"}
+{"type":"tool_call","time":"2026-08-11T10:00:01Z","tool":"go test"}
+`
+	if err := os.WriteFile(eventPath, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/internal/runs/r-bridge/events" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		var body struct {
+			SourceID string          `json:"sourceId"`
+			Type     string          `json:"type"`
+			Payload  json.RawMessage `json:"payload"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode: %v", err)
+		}
+		if len(body.Payload) == 0 {
+			t.Error("missing original event payload")
+		}
+		received <- body.SourceID + ":" + body.Type
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+	t.Setenv("WREN_EVENT_FILE", eventPath)
+	t.Setenv("WREN_GATEWAY_URL", server.URL)
+	t.Setenv("WREN_RUN_ID", "r-bridge")
+	t.Setenv("WREN_ATTEMPT", "3")
+	oldPoll := gatewayPollInterval
+	gatewayPollInterval = time.Millisecond
+	defer func() { gatewayPollInterval = oldPoll }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunGateway(ctx, io.Discard) }()
+	for _, want := range []string{"attempt-3/1:status", "attempt-3/2:tool_call"} {
+		select {
+		case got := <-received:
+			if got != want {
+				t.Errorf("gateway event = %q, want %q", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s", want)
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("RunGateway: %v", err)
+	}
+}
+
+func TestRunGatewayTailsEventsAppendedAfterOpen(t *testing.T) {
+	eventPath := t.TempDir() + "/events.jsonl"
+	if err := os.WriteFile(eventPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		received <- struct{}{}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer server.Close()
+	t.Setenv("WREN_EVENT_FILE", eventPath)
+	t.Setenv("WREN_GATEWAY_URL", server.URL)
+	t.Setenv("WREN_RUN_ID", "r-tail")
+	oldPoll := gatewayPollInterval
+	gatewayPollInterval = time.Millisecond
+	defer func() { gatewayPollInterval = oldPoll }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunGateway(ctx, io.Discard) }()
+	time.Sleep(10 * time.Millisecond)
+	f, err := os.OpenFile(eventPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"type":"status","time":"2026-08-11T10:00:00Z","phase":"running"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	select {
+	case <-received:
+		cancel()
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("gateway did not observe an event appended after initial EOF")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunGatewayThroughTrustedProxyInjectsIdentity(t *testing.T) {
+	eventPath := t.TempDir() + "/events.jsonl"
+	if err := os.WriteFile(eventPath, []byte(`{"type":"status","time":"2026-08-11T10:00:00Z","phase":"running"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan struct{}, 1)
+	controlPlane := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/internal/runs/r-proxied/events" {
+			t.Errorf("upstream path = %q", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer bridge-secret" {
+			t.Errorf("authorization = %q", got)
+		}
+		if got := r.Header.Get("X-Wren-Run-ID"); got != "r-proxied" {
+			t.Errorf("run identity = %q", got)
+		}
+		received <- struct{}{}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	defer controlPlane.Close()
+	t.Setenv("WREN_CONTROL_PLANE_UPSTREAM", controlPlane.URL)
+	t.Setenv("WREN_GATEWAY_TOKEN", "bridge-secret")
+	t.Setenv("WREN_RUN_ID", "r-proxied")
+	proxy, err := egress.New(egressConfigFromEnv())
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := httptest.NewServer(proxy)
+	defer proxyServer.Close()
+	t.Setenv("WREN_EVENT_FILE", eventPath)
+	t.Setenv("WREN_GATEWAY_URL", proxyServer.URL+"/control-plane")
+	t.Setenv("WREN_ATTEMPT", "1")
+	oldPoll := gatewayPollInterval
+	gatewayPollInterval = time.Millisecond
+	defer func() { gatewayPollInterval = oldPoll }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- RunGateway(ctx, io.Discard) }()
+	select {
+	case <-received:
+		cancel()
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("gateway event did not cross the trusted proxy")
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
 	}
 }
 

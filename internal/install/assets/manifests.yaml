@@ -549,6 +549,12 @@ spec:
         env:
         - name: WREN_DEFAULT_RUN_NAMESPACE
           value: wren-runs
+        - name: WREN_GATEWAY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              key: token
+              name: wren-gateway-token
+              optional: true
         image: wren/apiserver:dev
         livenessProbe:
           httpGet:
@@ -562,7 +568,7 @@ spec:
           name: http
         readinessProbe:
           httpGet:
-            path: /healthz
+            path: /readyz
             port: 8090
           initialDelaySeconds: 3
           periodSeconds: 10

@@ -55,10 +55,22 @@ func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 // Close releases the connection pool.
 func (p *Postgres) Close() { p.pool.Close() }
 
+func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }
+
 // migrate applies every embedded migration whose version exceeds the highest
-// recorded in schema_version, in filename order, each in its own transaction.
+// recorded in schema_version. One transaction-level advisory lock serializes
+// startup across HA apiserver replicas; without it two fresh replicas can both
+// observe version N and race the same DDL before either records N+1.
 func (p *Postgres) migrate(ctx context.Context) error {
-	if _, err := p.pool.Exec(ctx, `
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin migration transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // commit path returns the real error
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(8793561230042)`); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_version (
 			version    integer     PRIMARY KEY,
 			applied_at timestamptz NOT NULL DEFAULT now()
@@ -67,7 +79,7 @@ func (p *Postgres) migrate(ctx context.Context) error {
 	}
 
 	var current int
-	if err := p.pool.QueryRow(ctx,
+	if err := tx.QueryRow(ctx,
 		`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&current); err != nil {
 		return fmt.Errorf("read schema_version: %w", err)
 	}
@@ -98,26 +110,12 @@ func (p *Postgres) migrate(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", name, err)
 		}
-		if err := p.applyMigration(ctx, version, string(sqlBytes)); err != nil {
+		if _, err := tx.Exec(ctx, string(sqlBytes)); err != nil {
 			return fmt.Errorf("apply migration %s: %w", name, err)
 		}
-	}
-	return nil
-}
-
-func (p *Postgres) applyMigration(ctx context.Context, version int, sql string) error {
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx) //nolint:errcheck // best-effort; commit path returns the real error
-
-	if _, err := tx.Exec(ctx, sql); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO schema_version (version) VALUES ($1)`, version); err != nil {
-		return err
+		if _, err := tx.Exec(ctx, `INSERT INTO schema_version (version) VALUES ($1)`, version); err != nil {
+			return fmt.Errorf("record migration %s: %w", name, err)
+		}
 	}
 	return tx.Commit(ctx)
 }

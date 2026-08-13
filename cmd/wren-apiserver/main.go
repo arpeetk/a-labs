@@ -26,7 +26,11 @@ import (
 func main() {
 	addr := flag.String("addr", ":8090", "HTTP listen address")
 	storeKind := flag.String("store", "memory", "store backend: memory|postgres")
+	inlineDispatch := flag.Bool("inline-dispatch", true, "attempt a committed launch immediately on the request path (the durable worker always retries)")
+	outboxWorker := flag.Bool("outbox-worker", true, "run the durable background dispatcher; disable only for recovery drills")
 	flag.Parse()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	cfg, err := ctrl.GetConfig()
 	if err != nil {
@@ -52,20 +56,34 @@ func main() {
 	if ns := os.Getenv("WREN_DEFAULT_RUN_NAMESPACE"); ns != "" {
 		defaults.DefaultNamespace = ns
 	}
-	svc := coreapi.New(st, lc, defaults)
+	svc := coreapi.New(st, lc, defaults, coreapi.WithInlineDispatch(*inlineDispatch))
 
 	// Reconcile-on-boot: re-learn in-flight runs from the AgentRun CRs so a
 	// restarted apiserver (or one that just migrated stores) does not forget
 	// them. Non-fatal: a fresh install with an unreachable list still serves.
-	if n, err := svc.ReconcileFromCluster(context.Background()); err != nil {
+	if n, err := svc.ReconcileFromCluster(ctx); err != nil {
 		log.Printf("reconcile-on-boot: %v (continuing)", err)
 	} else if n > 0 {
 		log.Printf("reconcile-on-boot: re-learned %d run(s) from the cluster", n)
 	}
+	workerID, err := os.Hostname()
+	if err != nil || workerID == "" {
+		workerID = fmt.Sprintf("pid-%d", os.Getpid())
+	}
+	if *outboxWorker {
+		go svc.RunOutboxWorker(ctx, workerID, time.Second, func(err error) {
+			log.Printf("outbox worker: %v", err)
+		})
+	}
+
+	serverOptions := []apiserver.Option{}
+	if token := os.Getenv("WREN_GATEWAY_TOKEN"); token != "" {
+		serverOptions = append(serverOptions, apiserver.WithGatewayToken(token))
+	}
 
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           apiserver.New(svc, lc).Handler(),
+		Handler:           apiserver.New(svc, lc, serverOptions...).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		// Slowloris-style hardening (Go's http.Server doc recommends setting
 		// these explicitly — the zero value is "no timeout"). ReadTimeout/
@@ -86,13 +104,11 @@ func main() {
 		}
 	}()
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	<-ctx.Done()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = srv.Shutdown(ctx)
+	_ = srv.Shutdown(shutdownCtx)
 	log.Print("wren-apiserver stopped")
 }
 

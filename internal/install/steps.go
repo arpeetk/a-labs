@@ -2,10 +2,36 @@ package install
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"path/filepath"
 	"strings"
 )
+
+func (s *steps) gatewayCredential(ctx context.Context) error {
+	if err := s.in.Kube.EnsureNamespace(ctx, s.opts.RunNamespace); err != nil {
+		return fmt.Errorf("ensure run namespace for gateway: %w", err)
+	}
+	token, err := s.in.Kube.SecretValue(ctx, SystemNamespace, GatewayTokenSecret, "token")
+	if err != nil {
+		return fmt.Errorf("read existing gateway credential: %w", err)
+	}
+	if token == "" {
+		raw := make([]byte, 32)
+		if _, err := rand.Read(raw); err != nil {
+			return fmt.Errorf("generate gateway credential: %w", err)
+		}
+		token = base64.RawURLEncoding.EncodeToString(raw)
+	}
+	for _, namespace := range []string{SystemNamespace, s.opts.RunNamespace} {
+		if err := s.in.Kube.UpsertSecret(ctx, namespace, GatewayTokenSecret, map[string]string{"token": token}); err != nil {
+			return fmt.Errorf("write gateway credential in %s: %w", namespace, err)
+		}
+	}
+	s.logf("configured authenticated, replay-safe run event delivery")
+	return nil
+}
 
 // imageNames are the three control-plane images every install builds, in
 // push/load order. The operator's --runtime-image points at "runtime";

@@ -102,9 +102,16 @@ func TestInstallKindCreatesMissingCluster(t *testing.T) {
 func TestInstallIsIdempotent(t *testing.T) {
 	// testing.md rule 5: a re-run must converge, not fail on existing state.
 	in, _, _, _ := fixture(t)
+	var firstGatewayToken string
 	for i := 0; i < 2; i++ {
 		if err := in.Install(context.Background(), kindOpts()); err != nil {
 			t.Fatalf("install %d: %v", i+1, err)
+		}
+		token := in.Kube.(*FakeKube).Secrets[SystemNamespace+"/"+GatewayTokenSecret]["token"]
+		if i == 0 {
+			firstGatewayToken = token
+		} else if token != firstGatewayToken {
+			t.Fatal("idempotent reinstall rotated the live gateway credential")
 		}
 	}
 }
@@ -334,8 +341,8 @@ func TestInstallCredentialsSkippedWhenUnavailable(t *testing.T) {
 	if err := in.Install(context.Background(), opts); err != nil {
 		t.Fatal(err)
 	}
-	if len(k.Secrets) != 0 {
-		t.Errorf("no credentials → no secrets, got %v", k.Secrets)
+	if len(k.Secrets) != 2 || k.Secrets[SystemNamespace+"/"+GatewayTokenSecret]["token"] == "" || k.Secrets["wren-runs/"+GatewayTokenSecret]["token"] == "" {
+		t.Errorf("keyless install should create only the internal gateway credential pair, got %v", k.Secrets)
 	}
 	if !strings.Contains(out.String(), "keyless") {
 		t.Errorf("should note the keyless continuation, out:\n%s", out.String())

@@ -30,11 +30,12 @@ import (
 
 // Shared defaults so the operator (runner config) and the proxy agree.
 const (
-	DefaultPort    = "8099"
-	RouteGitHub    = "/github/"     // git smart-HTTP → github.com
-	RouteGitHubAPI = "/github-api/" // REST API → api.github.com
-	RouteAnthropic = "/anthropic/"  // model API → api.anthropic.com
-	RouteOpenAI    = "/openai/"     // model API → api.openai.com
+	DefaultPort       = "8099"
+	RouteGitHub       = "/github/"        // git smart-HTTP → github.com
+	RouteGitHubAPI    = "/github-api/"    // REST API → api.github.com
+	RouteAnthropic    = "/anthropic/"     // model API → api.anthropic.com
+	RouteOpenAI       = "/openai/"        // model API → api.openai.com
+	RouteControlPlane = "/control-plane/" // gateway events → internal apiserver
 )
 
 // Route reverse-proxies requests under Prefix to Upstream, injecting Auth.

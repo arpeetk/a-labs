@@ -8,18 +8,25 @@ import (
 
 // Memory is a thread-safe in-memory Store for tests and local development.
 type Memory struct {
-	mu       sync.RWMutex
-	projects map[string]*Project
-	runs     map[string]*Run
+	mu          sync.RWMutex
+	projects    map[string]*Project
+	runs        map[string]*Run
+	events      map[string][]*RunEvent
+	operations  map[string]*Operation
+	nextEventID int64
 }
 
 // NewMemory returns an empty in-memory store.
 func NewMemory() *Memory {
 	return &Memory{
-		projects: map[string]*Project{},
-		runs:     map[string]*Run{},
+		projects:   map[string]*Project{},
+		runs:       map[string]*Run{},
+		events:     map[string][]*RunEvent{},
+		operations: map[string]*Operation{},
 	}
 }
+
+func (m *Memory) Ping(context.Context) error { return nil }
 
 var _ Store = (*Memory)(nil)
 

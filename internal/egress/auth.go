@@ -43,3 +43,15 @@ func (h HeaderAuth) Apply(r *http.Request) {
 		r.Header.Set(h.Key, h.Value)
 	}
 }
+
+// HeaderAuths applies several fixed headers. It is used by the trusted proxy's
+// control-plane route to bind both the cluster credential and the immutable run
+// identity; the gateway itself receives neither secret nor authority to choose
+// another run ID.
+type HeaderAuths []HeaderAuth
+
+func (hs HeaderAuths) Apply(r *http.Request) {
+	for _, h := range hs {
+		h.Apply(r)
+	}
+}

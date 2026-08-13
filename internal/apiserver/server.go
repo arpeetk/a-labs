@@ -8,11 +8,15 @@ package apiserver
 
 import (
 	"bufio"
+	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	wrenv1 "github.com/summiteight/wren/api/v1alpha1"
@@ -23,18 +27,35 @@ import (
 
 // Server is the HTTP handler for the control-plane API.
 type Server struct {
-	svc *coreapi.Service
-	lc  launcher.Launcher
+	svc          *coreapi.Service
+	lc           launcher.Launcher
+	gatewayToken string
+}
+
+// Option customizes the API server without expanding its stable constructor.
+type Option func(*Server)
+
+// WithGatewayToken enables the internal event-ingest endpoint. The token is
+// held by the trusted egress proxy, never by the untrusted harness container.
+func WithGatewayToken(token string) Option {
+	return func(s *Server) { s.gatewayToken = token }
 }
 
 // New builds a Server. The launcher is used directly for the pods/log stream
 // (run logs), which is not part of the coreapi request/response surface.
-func New(svc *coreapi.Service, lc launcher.Launcher) *Server { return &Server{svc: svc, lc: lc} }
+func New(svc *coreapi.Service, lc launcher.Launcher, opts ...Option) *Server {
+	s := &Server{svc: svc, lc: lc}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
 
 // Handler returns the configured HTTP mux.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("POST /v1/runs", s.createRun)
 	mux.HandleFunc("GET /v1/runs", s.listRuns)
 	mux.HandleFunc("GET /v1/runs/{id}", s.getRun)
@@ -43,6 +64,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/runs/{id}/pause", s.pauseRun)
 	mux.HandleFunc("POST /v1/runs/{id}/resume", s.resumeRun)
 	mux.HandleFunc("GET /v1/runs/{id}/logs", s.runLogs)
+	mux.HandleFunc("GET /v1/runs/{id}/events", s.runEvents)
+	mux.HandleFunc("POST /v1/internal/runs/{id}/events", s.ingestRunEvent)
 	mux.HandleFunc("POST /v1/projects", s.createProject)
 	mux.HandleFunc("GET /v1/projects", s.listProjects)
 	mux.HandleFunc("GET /v1/projects/{name}", s.getProject)
@@ -67,10 +90,27 @@ type errorBody struct {
 	Error string `json:"error"`
 }
 
+type ingestEventBody struct {
+	SourceID string          `json:"sourceId"`
+	Type     string          `json:"type"`
+	Payload  json.RawMessage `json:"payload,omitempty"`
+	At       time.Time       `json:"at,omitempty"`
+}
+
 // --- handlers ---
 
 func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := s.svc.Ready(ctx); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 }
 
 func (s *Server) createRun(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +156,54 @@ func (s *Server) getRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *Server) runEvents(w http.ResponseWriter, r *http.Request) {
+	after, err := queryInt64(r, "after", 0)
+	if err != nil || after < 0 {
+		writeErr(w, http.StatusBadRequest, errors.New("after must be a non-negative integer"))
+		return
+	}
+	limit64, err := queryInt64(r, "limit", 200)
+	if err != nil || limit64 < 1 || limit64 > 1000 {
+		writeErr(w, http.StatusBadRequest, errors.New("limit must be between 1 and 1000"))
+		return
+	}
+	events, err := s.svc.ListRunEvents(r.Context(), r.PathValue("id"), after, int(limit64))
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, events)
+}
+
+func (s *Server) ingestRunEvent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if s.gatewayToken == "" {
+		writeErr(w, http.StatusServiceUnavailable, errors.New("gateway event ingestion is not configured"))
+		return
+	}
+	want := "Bearer " + s.gatewayToken
+	got := r.Header.Get("Authorization")
+	if len(got) != len(want) || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 || r.Header.Get("X-Wren-Run-ID") != id {
+		writeErr(w, http.StatusUnauthorized, errors.New("invalid gateway identity"))
+		return
+	}
+	var body ingestEventBody
+	if err := decode(r, &body); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	inserted, err := s.svc.AppendGatewayEvent(r.Context(), id, body.SourceID, body.Type, body.Payload, body.At)
+	if err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	if !inserted {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]bool{"inserted": true})
 }
 
 // deleteRun removes a run and its cluster resources (`wren run rm`).
@@ -272,6 +360,14 @@ func decode(r *http.Request, v any) error {
 		return err
 	}
 	return nil
+}
+
+func queryInt64(r *http.Request, name string, fallback int64) (int64, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get(name))
+	if raw == "" {
+		return fallback, nil
+	}
+	return strconv.ParseInt(raw, 10, 64)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

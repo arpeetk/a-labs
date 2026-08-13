@@ -133,6 +133,65 @@ func TestCreateRunFlow(t *testing.T) {
 	}
 }
 
+func TestRunEventJournalAndGatewayReplay(t *testing.T) {
+	st := store.NewMemory()
+	lc := launcher.NewFake()
+	svc := coreapi.New(st, lc, coreapi.DefaultDefaults())
+	h := New(svc, lc, WithGatewayToken("test-gateway-token")).Handler()
+	do(t, h, "POST", "/v1/projects", "u@x", `{"name":"p","defaultHarness":"mock"}`)
+	w := do(t, h, "POST", "/v1/runs", "u@x", `{"project":"p","task":"exercise recovery"}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create run = %d %s", w.Code, w.Body.String())
+	}
+	var run store.Run
+	if err := json.Unmarshal(w.Body.Bytes(), &run); err != nil {
+		t.Fatal(err)
+	}
+
+	postEvent := func(token, runHeader string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, "/v1/internal/runs/"+run.ID+"/events", strings.NewReader(`{"sourceId":"attempt-1/7","type":"tool.completed","payload":{"tool":"go test"}}`))
+		r.Header.Set("Authorization", "Bearer "+token)
+		r.Header.Set("X-Wren-Run-ID", runHeader)
+		out := httptest.NewRecorder()
+		h.ServeHTTP(out, r)
+		return out
+	}
+	if got := postEvent("wrong", run.ID); got.Code != http.StatusUnauthorized {
+		t.Fatalf("bad token = %d", got.Code)
+	}
+	if got := postEvent("test-gateway-token", "another-run"); got.Code != http.StatusUnauthorized {
+		t.Fatalf("cross-run identity = %d", got.Code)
+	}
+	if got := postEvent("test-gateway-token", run.ID); got.Code != http.StatusCreated {
+		t.Fatalf("first ingest = %d %s", got.Code, got.Body.String())
+	}
+	if got := postEvent("test-gateway-token", run.ID); got.Code != http.StatusNoContent {
+		t.Fatalf("replayed ingest = %d %s", got.Code, got.Body.String())
+	}
+
+	w = do(t, h, "GET", "/v1/runs/"+run.ID+"/events?after=0&limit=100", "u@x", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("list events = %d %s", w.Code, w.Body.String())
+	}
+	var events []store.RunEvent
+	if err := json.Unmarshal(w.Body.Bytes(), &events); err != nil {
+		t.Fatal(err)
+	}
+	gatewayCount := 0
+	for _, event := range events {
+		if event.Source == "gateway" && event.SourceID == "attempt-1/7" {
+			gatewayCount++
+		}
+	}
+	if gatewayCount != 1 {
+		t.Fatalf("gateway event count = %d, events=%+v", gatewayCount, events)
+	}
+	if w := do(t, h, "GET", "/v1/runs/"+run.ID+"/events?limit=1001", "u@x", ""); w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid limit = %d", w.Code)
+	}
+}
+
 // TestListRunsProjectQueryParam proves the ?project= query param (WS-20)
 // actually reaches coreapi.ListRuns and narrows the result -- the apiserver
 // handler previously never read it at all, so it was silently ignored no

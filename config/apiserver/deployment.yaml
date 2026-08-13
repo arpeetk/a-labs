@@ -32,6 +32,12 @@ spec:
         # patches this to a custom --run-namespace (WS-15 Part A).
         - name: WREN_DEFAULT_RUN_NAMESPACE
           value: wren-runs
+        - name: WREN_GATEWAY_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: wren-gateway-token
+              key: token
+              optional: true
         securityContext:
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: true
@@ -45,7 +51,7 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 20
         readinessProbe:
-          httpGet: { path: /healthz, port: 8090 }
+          httpGet: { path: /readyz, port: 8090 }
           initialDelaySeconds: 3
           periodSeconds: 10
         resources:

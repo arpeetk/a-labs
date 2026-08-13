@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -15,6 +16,98 @@ func testStore(t *testing.T, newStore func(t *testing.T) Store) {
 	t.Run("ProjectCRUD", func(t *testing.T) { testProjectCRUD(t, newStore(t)) })
 	t.Run("RunCRUDAndFilter", func(t *testing.T) { testRunCRUDAndFilter(t, newStore(t)) })
 	t.Run("UpsertRun", func(t *testing.T) { testUpsertRun(t, newStore(t)) })
+	t.Run("DurableOutboxAndEvents", func(t *testing.T) { testDurableOutboxAndEvents(t, newStore(t)) })
+}
+
+func testDurableOutboxAndEvents(t *testing.T, s Store) {
+	t.Helper()
+	d, ok := s.(Durable)
+	if !ok {
+		t.Fatalf("%T does not implement Durable", s)
+	}
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	run := &Run{ID: "r-durable", Project: "p", User: "u", Phase: "Pending", CreatedAt: now}
+	op := &Operation{ID: "launch/r-durable", RunID: run.ID, Kind: OperationLaunchRun, Payload: json.RawMessage(`{"run":"r-durable"}`), AvailableAt: now, CreatedAt: now}
+	submitted := &RunEvent{RunID: run.ID, Source: "control-plane", SourceID: "submitted", Type: "run.submitted", Payload: json.RawMessage(`{"phase":"Pending"}`), CreatedAt: now}
+	if err := d.CreateRunWithOperation(ctx, run, op, submitted); err != nil {
+		t.Fatalf("CreateRunWithOperation: %v", err)
+	}
+	if err := d.CreateRunWithOperation(ctx, run, op, submitted); !errors.Is(err, ErrExists) {
+		t.Fatalf("duplicate durable creation = %v, want ErrExists", err)
+	}
+	events, err := d.ListRunEvents(ctx, run.ID, 0, 100)
+	if err != nil || len(events) != 1 || events[0].Type != "run.submitted" {
+		t.Fatalf("submitted events = %+v, %v", events, err)
+	}
+
+	claimed, err := d.ClaimOperations(ctx, "worker-a", 1, time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].Attempts != 1 {
+		t.Fatalf("first claim = %+v, %v", claimed, err)
+	}
+	if again, err := d.ClaimOperations(ctx, "worker-b", 1, time.Minute); err != nil || len(again) != 0 {
+		t.Fatalf("concurrent claim escaped lease = %+v, %v", again, err)
+	}
+	if err := d.CompleteOperation(ctx, "worker-b", op.ID, nil); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("wrong-worker completion = %v, want ErrLeaseLost", err)
+	}
+	if err := d.RetryOperation(ctx, "worker-a", op.ID, "temporary", now.Add(-time.Second)); err != nil {
+		t.Fatalf("RetryOperation: %v", err)
+	}
+	claimed, err = d.ClaimOperations(ctx, "worker-b", 1, time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].Attempts != 2 || claimed[0].LastError != "temporary" {
+		t.Fatalf("retry claim = %+v, %v", claimed, err)
+	}
+	launched := &RunEvent{RunID: run.ID, Source: "outbox", SourceID: op.ID, Type: "run.launch_accepted", Payload: json.RawMessage(`{}`), CreatedAt: now.Add(time.Second)}
+	if err := d.CompleteOperation(ctx, "worker-b", op.ID, launched); err != nil {
+		t.Fatalf("CompleteOperation: %v", err)
+	}
+	if completed, err := d.ClaimOperations(ctx, "worker-c", 10, time.Minute); err != nil || len(completed) != 0 {
+		t.Fatalf("completed operation reclaimed = %+v, %v", completed, err)
+	}
+
+	inserted, err := d.AppendRunEvent(ctx, launched)
+	if err != nil || inserted {
+		t.Fatalf("duplicate event inserted=%t err=%v", inserted, err)
+	}
+	run.Phase = "Running"
+	snapshot := &RunEvent{RunID: run.ID, Source: "kubernetes", SourceID: "status-1", Type: "run.phase", Payload: json.RawMessage(`{"phase":"Running"}`), CreatedAt: now.Add(2 * time.Second)}
+	if err := d.UpsertRunWithEvent(ctx, run, snapshot); err != nil {
+		t.Fatalf("UpsertRunWithEvent: %v", err)
+	}
+	if err := d.UpsertRunWithEvent(ctx, run, snapshot); err != nil {
+		t.Fatalf("idempotent UpsertRunWithEvent: %v", err)
+	}
+	events, err = d.ListRunEvents(ctx, run.ID, submitted.ID, 100)
+	if err != nil || len(events) != 2 || events[0].Type != "run.launch_accepted" || events[1].Type != "run.phase" {
+		t.Fatalf("event journal after replay = %+v, %v", events, err)
+	}
+	page, err := d.ListRunEvents(ctx, run.ID, events[0].ID, 1)
+	if err != nil || len(page) != 1 || page[0].Type != "run.phase" {
+		t.Fatalf("event cursor page = %+v, %v", page, err)
+	}
+
+	failedRun := &Run{ID: "r-failed-launch", Project: "p", User: "u", Phase: "Pending", CreatedAt: now.Add(3 * time.Second)}
+	failedOp := &Operation{ID: "launch/r-failed-launch", RunID: failedRun.ID, Kind: OperationLaunchRun, Payload: json.RawMessage(`{}`), AvailableAt: now, CreatedAt: now.Add(3 * time.Second)}
+	if err := d.CreateRunWithOperation(ctx, failedRun, failedOp, nil); err != nil {
+		t.Fatalf("create terminal-failure run: %v", err)
+	}
+	claimed, err = d.ClaimOperations(ctx, "worker-f", 1, time.Minute)
+	if err != nil || len(claimed) != 1 || claimed[0].ID != failedOp.ID {
+		t.Fatalf("failure claim = %+v, %v", claimed, err)
+	}
+	failedRun.Phase = "Failed"
+	failedEvent := &RunEvent{RunID: failedRun.ID, Source: "outbox", SourceID: failedOp.ID + "/failed", Type: "run.launch_failed", Payload: json.RawMessage(`{}`), CreatedAt: now.Add(4 * time.Second)}
+	if err := d.FailOperation(ctx, "wrong-worker", failedOp.ID, "permanent", failedRun, failedEvent); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("wrong-worker failure = %v, want ErrLeaseLost", err)
+	}
+	if err := d.FailOperation(ctx, "worker-f", failedOp.ID, "permanent", failedRun, failedEvent); err != nil {
+		t.Fatalf("FailOperation: %v", err)
+	}
+	failedStored, err := s.GetRun(ctx, failedRun.ID)
+	if err != nil || failedStored.Phase != "Failed" {
+		t.Fatalf("terminal run = %+v, %v", failedStored, err)
+	}
 }
 
 func testProjectCRUD(t *testing.T, s Store) {

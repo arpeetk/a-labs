@@ -12,6 +12,7 @@ import (
 	"sort"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -135,7 +136,18 @@ func (k *K8s) EnsureNamespace(ctx context.Context, ns string) error {
 }
 
 func (k *K8s) CreateRun(ctx context.Context, run *wrenv1.AgentRun) error {
-	return k.c.Create(ctx, run)
+	err := k.c.Create(ctx, run)
+	if !apierrors.IsAlreadyExists(err) {
+		return err
+	}
+	var existing wrenv1.AgentRun
+	if getErr := k.c.Get(ctx, client.ObjectKeyFromObject(run), &existing); getErr != nil {
+		return fmt.Errorf("read existing AgentRun after create conflict: %w", getErr)
+	}
+	if equality.Semantic.DeepEqual(existing.Spec, run.Spec) {
+		return nil
+	}
+	return fmt.Errorf("AgentRun %s/%s already exists with a different specification", run.Namespace, run.Name)
 }
 
 func (k *K8s) GetRun(ctx context.Context, ns, name string) (*wrenv1.AgentRun, error) {

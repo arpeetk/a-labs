@@ -115,17 +115,32 @@ gcloud storage buckets create "gs://${CHECKPOINT_BUCKET}" --project "$GKE_PROJEC
 
 log "ensuring GSA ${CHECKPOINT_GSA} exists with objectAdmin on the bucket"
 gcloud iam service-accounts create "$CHECKPOINT_GSA" --project "$GKE_PROJECT" 2>&1 | tail -3 || true
-gcloud storage buckets add-iam-policy-binding "gs://${CHECKPOINT_BUCKET}" \
-  --member="serviceAccount:${CHECKPOINT_GSA}@${GKE_PROJECT}.iam.gserviceaccount.com" \
-  --role="roles/storage.objectAdmin" 2>&1 | tail -3
+gsa_email="${CHECKPOINT_GSA}@${GKE_PROJECT}.iam.gserviceaccount.com"
+iam_bound=0
+for attempt in $(seq 1 12); do
+  if iam_output="$(gcloud storage buckets add-iam-policy-binding "gs://${CHECKPOINT_BUCKET}" \
+    --member="serviceAccount:${gsa_email}" --role="roles/storage.objectAdmin" 2>&1)"; then
+    printf '%s\n' "$iam_output" | tail -3
+    iam_bound=1
+    break
+  fi
+  if printf '%s' "$iam_output" | grep -q 'does not exist'; then
+    warn "service-account IAM propagation pending (${attempt}/12)"
+    sleep 5
+    continue
+  fi
+  printf '%s\n' "$iam_output" >&2
+  die "grant checkpoint bucket IAM"
+done
+[ "$iam_bound" = "1" ] || die "service account ${gsa_email} did not propagate within 60s"
 
 log "ensuring ${NS_RUNS}/${CHECKPOINT_KSA} exists and is Workload-Identity-bound"
 k create namespace "$NS_RUNS" 2>/dev/null || true
 k create serviceaccount "$CHECKPOINT_KSA" -n "$NS_RUNS" 2>/dev/null || true
 k annotate serviceaccount "$CHECKPOINT_KSA" -n "$NS_RUNS" \
-  "iam.gke.io/gcp-service-account=${CHECKPOINT_GSA}@${GKE_PROJECT}.iam.gserviceaccount.com" --overwrite 2>&1
+  "iam.gke.io/gcp-service-account=${gsa_email}" --overwrite 2>&1
 gcloud iam service-accounts add-iam-policy-binding \
-  "${CHECKPOINT_GSA}@${GKE_PROJECT}.iam.gserviceaccount.com" --project "$GKE_PROJECT" \
+  "$gsa_email" --project "$GKE_PROJECT" \
   --role roles/iam.workloadIdentityUser \
   --member "serviceAccount:${GKE_PROJECT}.svc.id.goog[${NS_RUNS}/${CHECKPOINT_KSA}]" 2>&1 | tail -3
 
@@ -263,6 +278,21 @@ spec:
 YAML
 }
 
+wait_seed_ready() {
+  local run_id="$1" pod="wren-e2e-seed-${1}"
+  if k -n "$NS_RUNS" wait --for=condition=Ready "pod/${pod}" --timeout=180s >/dev/null 2>&1; then
+    return 0
+  fi
+  warn "seed checkpointer pod ${pod} did not become Ready"
+  k -n "$NS_RUNS" get "pod/${pod}" -o wide 2>&1 || true
+  k -n "$NS_RUNS" describe "pod/${pod}" 2>&1 || true
+  for container in seed-workspace checkpointer gke-gcsfuse-sidecar; do
+    printf '%s\n' "----- ${pod}/${container} -----" >&2
+    k -n "$NS_RUNS" logs "$pod" -c "$container" --tail=200 2>&1 || true
+  done
+  return 1
+}
+
 # catch_running_and_break <task-label> -> creates a run, polls tightly for
 # Running, then deletes its pod AND PVC together (not just the PVC — a live
 # pod's PVC has the kubernetes.io/pvc-protection finalizer, so it won't
@@ -335,6 +365,7 @@ wait_for_phase() {
 log "scenario A: real periodic checkpoint snapshots"
 SEED_RUN_ID="wren-e2e-periodic-proof"
 seed_checkpoint_pod "$SEED_RUN_ID" "wren e2e periodic-snapshot proof"
+wait_seed_ready "$SEED_RUN_ID" || die "scenario A: seed checkpointer pod was not ready"
 deadline=$(( $(date +%s) + 60 ))
 count=0
 # `gcloud storage ls` on this prefix also returns a zero-byte directory-marker
@@ -348,7 +379,10 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
   [ "$count" -ge 2 ] 2>/dev/null && break
   sleep 5
 done
-[ "$count" -ge 2 ] 2>/dev/null || die "scenario A: expected >=2 checkpoints, found ${count}"
+if ! [ "$count" -ge 2 ] 2>/dev/null; then
+  k -n "$NS_RUNS" logs "wren-e2e-seed-${SEED_RUN_ID}" -c checkpointer --tail=200 2>&1 || true
+  die "scenario A: expected >=2 checkpoints, found ${count}"
+fi
 log "  [PASS] ${count} checkpoint object(s) landed — independently verifying via gcloud storage"
 gcloud storage ls -l "gs://${CHECKPOINT_BUCKET}/runs/${SEED_RUN_ID}/checkpoints/objects/"
 first_ck="$(gcloud storage ls "gs://${CHECKPOINT_BUCKET}/runs/${SEED_RUN_ID}/checkpoints/objects/" 2>/dev/null | grep '\.tar\.gz$' | head -1)"

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,11 +34,52 @@ func TestPostgresConformance(t *testing.T) {
 		}
 		t.Cleanup(pg.Close)
 		// Fresh state per subtest: the conformance suite assumes an empty store.
-		if _, err := pg.pool.Exec(ctx, `TRUNCATE projects, runs`); err != nil {
+		if _, err := pg.pool.Exec(ctx, `TRUNCATE projects, runs, run_events, outbox_operations CASCADE`); err != nil {
 			t.Fatalf("truncate: %v", err)
 		}
 		return pg
 	})
+}
+
+// TestPostgresMigrateConcurrent proves the production startup shape: two HA
+// apiserver replicas may boot against a new database simultaneously. The
+// advisory transaction lock must serialize their schema work without a DDL or
+// duplicate-version race.
+func TestPostgresMigrateConcurrent(t *testing.T) {
+	dsn := resolvePostgresDSN(t)
+	ctx := context.Background()
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pg, err := NewPostgres(ctx, dsn)
+			if err == nil {
+				pg.Close()
+			}
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent NewPostgres: %v", err)
+		}
+	}
+	pg, err := NewPostgres(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pg.Close()
+	var versions int
+	if err := pg.pool.QueryRow(ctx, `SELECT COUNT(*) FROM schema_version`).Scan(&versions); err != nil {
+		t.Fatal(err)
+	}
+	if versions != 3 {
+		t.Fatalf("schema versions after concurrent startup = %d, want 3", versions)
+	}
 }
 
 // TestPostgresMigrateIdempotent asserts NewPostgres can run twice against the
@@ -62,8 +104,8 @@ func TestPostgresMigrateIdempotent(t *testing.T) {
 	if err := pg2.pool.QueryRow(ctx, `SELECT COUNT(*) FROM schema_version`).Scan(&versions); err != nil {
 		t.Fatal(err)
 	}
-	if versions != 2 {
-		t.Errorf("schema_version rows = %d, want 2 (each migration applied once)", versions)
+	if versions != 3 {
+		t.Errorf("schema_version rows = %d, want 3 (each migration applied once)", versions)
 	}
 }
 

@@ -133,6 +133,29 @@ func TestBuildAgentPod(t *testing.T) {
 	}
 }
 
+func TestBuildAgentPodGatewayOwnsEventBridgeConfiguration(t *testing.T) {
+	run := testRun()
+	run.Status.AttemptGeneration = 4
+	pod := buildAgentPod(run, PodConfig{Images: testImages})
+	gateway := containerByName(pod.Spec.InitContainers, ContainerGateway)
+	checkpointer := containerByName(pod.Spec.InitContainers, ContainerCheckpointer)
+	harness := containerByName(pod.Spec.Containers, ContainerHarness)
+	for name, want := range map[string]string{
+		"WREN_ATTEMPT": "4", "WREN_EVENT_FILE": EventFilePath,
+		"WREN_GATEWAY_URL": "http://127.0.0.1:8099/control-plane",
+	} {
+		if got, ok := envValue(gateway, name); !ok || got.Value != want {
+			t.Errorf("gateway %s = %+v, want %q", name, got, want)
+		}
+		if _, ok := envValue(checkpointer, name); ok {
+			t.Errorf("checkpointer unexpectedly received gateway-only %s", name)
+		}
+	}
+	if got, ok := envValue(harness, "WREN_EVENT_FILE"); !ok || got.Value != EventFilePath {
+		t.Errorf("harness event file = %+v", got)
+	}
+}
+
 // TestBuildAgentPodMockHarnessUsesRuntimeImage pins the fix for a bug found
 // live on real GKE: coreapi's HarnessImage default only resolves to something
 // pullable on a kind install (where that literal tag happens to be loaded

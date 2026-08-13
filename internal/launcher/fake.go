@@ -2,10 +2,12 @@ package launcher
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
@@ -33,9 +35,10 @@ type Fake struct {
 	AssumeSecretsPresent bool
 	// SecretErr, when set, is returned by every SecretHasKey call (error path).
 	SecretErr error
-	// CreateRunErr injects a cluster publication failure for service rollback
-	// tests. No run is recorded when it is set.
-	CreateRunErr error
+	// CreateRunErr injects a cluster publication failure for durable retry tests.
+	// No run is recorded when it is set.
+	CreateRunErr       error
+	EnsureNamespaceErr error
 }
 
 var _ Launcher = (*Fake)(nil)
@@ -56,6 +59,9 @@ func key(ns, name string) string { return ns + "/" + name }
 func (f *Fake) EnsureNamespace(_ context.Context, ns string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.EnsureNamespaceErr != nil {
+		return f.EnsureNamespaceErr
+	}
 	f.Namespaces[ns] = true
 	return nil
 }
@@ -67,8 +73,11 @@ func (f *Fake) CreateRun(_ context.Context, run *wrenv1.AgentRun) error {
 		return f.CreateRunErr
 	}
 	k := key(run.Namespace, run.Name)
-	if _, ok := f.Runs[k]; ok {
-		return apierrors.NewAlreadyExists(schema.GroupResource{Group: "wren.dev", Resource: "agentruns"}, run.Name)
+	if existing, ok := f.Runs[k]; ok {
+		if equality.Semantic.DeepEqual(existing.Spec, run.Spec) {
+			return nil
+		}
+		return fmt.Errorf("AgentRun %s already exists with a different specification", k)
 	}
 	cp := run.DeepCopy()
 	f.Runs[k] = cp

@@ -78,6 +78,15 @@ func (f *FakeKube) UpsertSecret(ctx context.Context, ns, name string, data map[s
 	return nil
 }
 
+func (f *FakeKube) SecretValue(_ context.Context, ns, name, key string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.fail("SecretValue:" + name); err != nil {
+		return "", err
+	}
+	return f.Secrets[ns+"/"+name][key], nil
+}
+
 func (f *FakeKube) OverrideImages(ctx context.Context, registry, tag string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

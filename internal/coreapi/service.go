@@ -7,7 +7,9 @@ package coreapi
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -87,16 +89,41 @@ func DefaultDefaults() Defaults {
 
 // Service implements the Projects and Runs logic over a Store and a Launcher.
 type Service struct {
-	store    store.Store
-	launcher launcher.Launcher
-	defaults Defaults
-	now      func() time.Time
-	idgen    func() string
+	store          store.Store
+	launcher       launcher.Launcher
+	defaults       Defaults
+	now            func() time.Time
+	idgen          func() string
+	inlineDispatch bool
+}
+
+// Option customizes service execution policy.
+type Option func(*Service)
+
+// WithInlineDispatch controls the latency optimization that attempts a newly
+// committed outbox item on the request goroutine. The background worker remains
+// authoritative; disabling this is useful for deterministic recovery drills.
+func WithInlineDispatch(enabled bool) Option {
+	return func(s *Service) { s.inlineDispatch = enabled }
 }
 
 // New builds a Service.
-func New(s store.Store, l launcher.Launcher, d Defaults) *Service {
-	return &Service{store: s, launcher: l, defaults: d, now: time.Now, idgen: genRunID}
+func New(s store.Store, l launcher.Launcher, d Defaults, opts ...Option) *Service {
+	svc := &Service{store: s, launcher: l, defaults: d, now: time.Now, idgen: genRunID, inlineDispatch: true}
+	for _, opt := range opts {
+		opt(svc)
+	}
+	return svc
+}
+
+// Ready verifies dependencies required to accept a durable submission.
+func (s *Service) Ready(ctx context.Context) error {
+	if health, ok := s.store.(store.Health); ok {
+		if err := health.Ping(ctx); err != nil {
+			return fmt.Errorf("store: %w", err)
+		}
+	}
+	return nil
 }
 
 // --- Projects ---
@@ -161,7 +188,10 @@ type CreateRunRequest struct {
 	Memory      string // override
 }
 
-// CreateRun resolves config, creates the AgentRun CR, and records the run.
+// CreateRun resolves config and commits the run plus its Kubernetes publication
+// intent atomically. An inline dispatch keeps the API responsive in the common
+// case; the leased outbox worker replays the same idempotent operation if this
+// process dies anywhere between the database commit and AgentRun publication.
 func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (*store.Run, error) {
 	if strings.TrimSpace(req.Project) == "" {
 		return nil, fmt.Errorf("%w: project is required", ErrValidation)
@@ -199,9 +229,6 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (*store.R
 		return nil, err
 	}
 
-	if err := s.launcher.EnsureNamespace(ctx, ns); err != nil {
-		return nil, fmt.Errorf("ensure namespace: %w", err)
-	}
 	rec := &store.Run{
 		ID:          id,
 		Project:     req.Project,
@@ -216,17 +243,26 @@ func (s *Service) CreateRun(ctx context.Context, req CreateRunRequest) (*store.R
 		Phase:       string(wrenv1.PhasePending),
 		CreatedAt:   s.now(),
 	}
-	if err := s.store.CreateRun(ctx, rec); err != nil {
+	payload, err := json.Marshal(run)
+	if err != nil {
+		return nil, fmt.Errorf("encode launch operation: %w", err)
+	}
+	now := s.now().UTC()
+	op := &store.Operation{
+		ID: "launch/" + id, RunID: id, Kind: store.OperationLaunchRun,
+		Payload: payload, State: store.OperationPending, AvailableAt: now, CreatedAt: now,
+	}
+	event := &store.RunEvent{
+		RunID: id, Source: "control-plane", SourceID: "submitted", Type: "run.submitted",
+		Payload: mustJSON(map[string]any{"phase": rec.Phase, "project": rec.Project, "user": rec.User}), CreatedAt: now,
+	}
+	if err := store.CreateRunWithOperation(ctx, s.store, rec, op, event); err != nil {
 		return nil, err
 	}
-	// Persist before publishing the CR. The operator can execute a CR as soon as
-	// it appears, so the reverse order allowed a store failure to return 500 while
-	// an untracked, billable agent run continued in the cluster.
-	if err := s.launcher.CreateRun(ctx, run); err != nil {
-		if rollbackErr := s.store.DeleteRun(ctx, rec.ID); rollbackErr != nil {
-			return nil, fmt.Errorf("create AgentRun: %w (also roll back run record: %v)", err, rollbackErr)
-		}
-		return nil, fmt.Errorf("create AgentRun: %w", err)
+	// Best effort only: a transient cluster error is now durable pending work,
+	// not a reason to delete the sole record of the user's accepted request.
+	if s.inlineDispatch {
+		_, _ = s.DispatchPending(ctx, "inline-"+id, 1)
 	}
 	return rec, nil
 }
@@ -263,7 +299,7 @@ func (s *Service) GetRun(ctx context.Context, id string) (*store.Run, error) {
 		rec.Conditions, changed = conditions, true
 	}
 	if changed {
-		_ = s.store.UpdateRun(ctx, rec)
+		_ = store.UpsertRunWithEvent(ctx, s.store, rec, eventFromCR(cr, rec, s.now()))
 	}
 	return rec, nil
 }
@@ -403,12 +439,62 @@ func (s *Service) ReconcileFromCluster(ctx context.Context) (int, error) {
 		// GetRun's mirroring — status is only written when the CR carries it).
 		existing, _ := s.store.GetRun(ctx, cr.Name)
 		rec := runFromCR(cr, existing)
-		if err := store.UpsertRun(ctx, s.store, rec); err != nil {
+		if err := store.UpsertRunWithEvent(ctx, s.store, rec, eventFromCR(cr, rec, s.now())); err != nil {
 			return n, fmt.Errorf("upsert run %s: %w", rec.ID, err)
 		}
 		n++
 	}
 	return n, nil
+}
+
+// ListRunEvents returns the immutable audit/event stream after an optional
+// cursor. The run lookup keeps unknown IDs a deliberate 404 even for stores
+// whose journal implementation is absent.
+func (s *Service) ListRunEvents(ctx context.Context, id string, afterID int64, limit int) ([]*store.RunEvent, error) {
+	if _, err := s.store.GetRun(ctx, id); err != nil {
+		return nil, err
+	}
+	return store.ListRunEvents(ctx, s.store, id, afterID, limit)
+}
+
+// AppendGatewayEvent ingests an event that the trusted gateway forwarded from
+// the harness stream. sourceID is attempt/sequence, making a full replay after
+// gateway restart harmless.
+func (s *Service) AppendGatewayEvent(ctx context.Context, id, sourceID, eventType string, payload json.RawMessage, at time.Time) (bool, error) {
+	if strings.TrimSpace(sourceID) == "" || strings.TrimSpace(eventType) == "" {
+		return false, fmt.Errorf("%w: sourceId and type are required", ErrValidation)
+	}
+	if _, err := s.store.GetRun(ctx, id); err != nil {
+		return false, err
+	}
+	if at.IsZero() {
+		at = s.now()
+	}
+	return store.AppendRunEvent(ctx, s.store, &store.RunEvent{
+		RunID: id, Source: "gateway", SourceID: sourceID, Type: eventType,
+		Payload: append([]byte(nil), payload...), CreatedAt: at.UTC(),
+	})
+}
+
+func eventFromCR(cr *wrenv1.AgentRun, rec *store.Run, at time.Time) *store.RunEvent {
+	payload := mustJSON(map[string]any{
+		"phase": rec.Phase, "restartCount": rec.RestartCount, "prUrl": rec.PRURL,
+		"lastCheckpoint": rec.LastCheckpoint, "conditions": rec.Conditions,
+	})
+	sourceID := "resource-version/" + cr.ResourceVersion
+	if cr.ResourceVersion == "" {
+		sum := sha256.Sum256(payload)
+		sourceID = "snapshot/" + hex.EncodeToString(sum[:])
+	}
+	return &store.RunEvent{RunID: rec.ID, Source: "kubernetes", SourceID: sourceID, Type: "run.snapshot", Payload: payload, CreatedAt: at.UTC()}
+}
+
+func mustJSON(value any) json.RawMessage {
+	b, err := json.Marshal(value)
+	if err != nil {
+		panic(err) // all current callers pass fixed, JSON-safe DTOs
+	}
+	return b
 }
 
 // runFromCR maps an AgentRun CR onto a store.Run for reconcile-on-boot. The CR

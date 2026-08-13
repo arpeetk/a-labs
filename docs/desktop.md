@@ -9,9 +9,11 @@ provider credentials.
 ## Product shape
 
 - **Fleet:** live-polling view across projects and users, with project/phase/scope filters.
-- **Run workspace:** lifecycle state, restarts, namespace, PR, live per-container
-  logs with bounded snapshots, verified checkpoint identity/integrity and
-  recovery conditions, safe pause/resume, stop, and destructive delete.
+- **Run workspace:** lifecycle state, restarts, namespace, PR, readable live
+  per-container logs with bounded snapshots, verified checkpoint
+  identity/integrity, the durable execution journal, recovery conditions, safe
+  pause/resume, stop, and destructive delete. Filters, containers, projects, and
+  harnesses use visible segmented choices rather than native dropdowns.
 - **Composer:** submit a feature or bug-fix task against a registered project,
   optionally overriding harness and base branch.
 - **Projects:** register GitHub repositories and inspect their orchestration defaults.

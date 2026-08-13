@@ -16,6 +16,7 @@ export type RunCreate = {
   baseRef?: string; cpu?: string; memory?: string; runtime?: string
 }
 export type LogEvent = { streamId: string; chunk?: string; error?: string; done?: boolean }
+export type RunEvent = { id: number; runId: string; source: string; sourceId: string; type: string; payload?: Record<string, unknown>; createdAt: string }
 
 type Backend = {
   Load(): Promise<Bootstrap>
@@ -23,6 +24,7 @@ type Backend = {
   SaveContext(context: { name: string; server: string; org?: string; user?: string; token?: string }): Promise<Bootstrap>
   ListRuns(scope: string, project: string, phase: string): Promise<Run[]>
   GetRun(id: string): Promise<Run>
+  ListRunEvents(id: string, afterID: number, limit: number): Promise<RunEvent[]>
   CreateRun(options: RunCreate): Promise<Run>
   StopRun(id: string): Promise<void>
   PauseRun(id: string): Promise<void>
@@ -54,6 +56,7 @@ export const api = {
   saveContext: (context: { name: string; server: string; org?: string; user?: string; token?: string }) => backend().SaveContext(context),
   listRuns: (scope: string, project: string, phase: string) => backend().ListRuns(scope, project, phase),
   getRun: (id: string) => backend().GetRun(id),
+  listRunEvents: (id: string, afterID = 0, limit = 200) => backend().ListRunEvents(id, afterID, limit),
   createRun: (options: RunCreate) => backend().CreateRun(options),
   stopRun: (id: string) => backend().StopRun(id),
   pauseRun: (id: string) => backend().PauseRun(id),

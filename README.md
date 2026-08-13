@@ -143,10 +143,10 @@ The spec (§1–§9) describes the **target** design; M0 is the first working sl
 | Harnesses | ✅ `claude-code` (proven e2e) + `mock` (keyless gate); `codex` + `opencode` adapters, images, and the `/openai/` egress route built — **not yet run against live providers** ([docs/harnesses.md](docs/harnesses.md)) | + BYO conformance suite |
 | Recovery + pause | ✅ infra crashes resume via PVC reattach; mounted checkpoints use manifest-last atomic publication, SHA-256 read-back verification, bounded retention and corruption fallback; pause/resume pins an exact verified checkpoint and removes compute; status is visible in CLI/desktop/Postgres | + incremental/git-aware snapshots, transcript mirroring, graceful shutdown flush |
 | Egress-proxy | ✅ injects creds (github.com, api.github.com, api.anthropic.com, api.openai.com) + allowlist; runner holds no secret; **bypass enforced** (iptables uid-lockdown + per-run canary; `--egress-enforcement=off` escape hatch with `config/netpol/` FQDN policies) + a DNS-rebinding-closed CONNECT path — **verified on real GKE Standard**, not just kind | — |
-| Control plane | ✅ runs in-cluster (operator + apiserver Deployments, `config/default`; `make e2e` rides them) — local-against-cluster remains the dev loop | published images + Ingress/OIDC front-door |
+| Control plane | ✅ crash-safe launch outbox + immutable event journal; HA Postgres/Cloud SQL deployment shape in `config/production-gcp`; process-replacement chaos gate | managed Cloud SQL provisioning + Ingress/OIDC front-door |
 | GitHub creds | ✅ PAT in the proxy secret | per-run **GitHub App** tokens |
 | API transport | HTTP/JSON | gRPC + Connect |
-| Store | ✅ in-memory (default, dev) **or** Postgres (`--store=postgres` + `DATABASE_URL`; reconcile-on-boot re-learns in-flight runs) | managed Cloud SQL, Helm-provisioned (WS-5) |
+| Store | ✅ in-memory (default, dev) **or** Postgres with atomic run+launch intent, leased replay, serialized HA migrations, and deduplicated run events | managed Cloud SQL lifecycle (instance/database/IAM provisioning) |
 | Auth | `X-Wren-User` header | OIDC / SSO |
 | Isolation | hardened `runc` pods | + gVisor/Kata (deferred, M4) |
 

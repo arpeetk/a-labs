@@ -17,7 +17,8 @@
 #
 # Usage:
 #   hack/e2e-gke.sh
-#   GKE_CLUSTER=wren-e2e GKE_ZONE=us-central1-a hack/e2e-gke.sh
+#   GKE_CLUSTER=wren-e2e GKE_ZONE=us-west1-b hack/e2e-gke.sh
+#   make e2e-gke-provisioned  # disposable cluster with capacity fallback
 #   E2E_EGRESS_ENFORCEMENT=off hack/e2e-gke.sh   # test the off path
 #   E2E_KEEP=1 hack/e2e-gke.sh                   # skip namespace teardown
 #
@@ -245,4 +246,6 @@ fi
 
 STATUS="ok"
 log "GKE E2E PASSED — run $RUN_ID Succeeded with egress enforcement verified"
-log "Cluster '${GKE_CLUSTER}' left running. To delete: gcloud container clusters delete ${GKE_CLUSTER} --zone=${GKE_ZONE} --project=${GKE_PROJECT} --quiet"
+if [ "${E2E_PROVISIONED:-0}" != "1" ]; then
+  log "Cluster '${GKE_CLUSTER}' left running. To delete: gcloud container clusters delete ${GKE_CLUSTER} --zone=${GKE_ZONE} --project=${GKE_PROJECT} --quiet"
+fi
